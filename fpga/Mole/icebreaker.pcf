@@ -1,0 +1,43 @@
+# iCEbreaker (iCE40 UP5K-SG48) pin assignment for the Mole v0
+# bit-cycle engine top (`MoleTop`).
+#
+# This is a *placeholder* committed alongside the scaffold. Pin
+# numbers are taken from the iCEbreaker rev 1.x silkscreen and are
+# stable; what may still move as MoleTop's IO settles is which
+# debug / status LEDs we expose and whether SDA/SCL move to a
+# different PMOD slot.
+
+# 12 MHz on-board oscillator
+set_io io_clk        35
+set_frequency io_clk 12
+
+# Active-low reset (iCEbreaker user button: pulled high externally,
+# shorted to ground when pressed).
+set_io io_reset      10
+
+# USB-UART (FT2232H channel A → /dev/ttyUSB0). Mole loads programs
+# in and streams results out over this link.
+#   io_uRx receives from the host (program bytes).
+#   io_uTx transmits to the host  (result-ring bytes).
+set_io io_uRx         6
+set_io io_uTx         9
+
+# I3C / I2C bus, brought out on PMOD1A. Both lines are open-drain;
+# the SB_IO primitives are configured bidirectional (drive low or
+# Hi-Z) and external pull-ups on the PMOD adapter hold the bus
+# high. The bit engine *never* drives these lines actively high.
+#
+# PMOD1A pin map (iCEbreaker rev 1.x):
+#   PMOD1A.1 (FPGA pin 4) → io_scl
+#   PMOD1A.2 (FPGA pin 2) → io_sda
+#
+# Wire 4.7 kΩ pull-ups (or 1 kΩ for I3C push-pull-ish operation
+# during pre-DAA windows) from each line to 3.3 V.
+set_io io_scl         4
+set_io io_sda         2
+
+# Status LEDs (iCEbreaker on-board). Used for engine state /
+# heartbeat / HALT-status indication.
+set_io io_ledR       11
+set_io io_ledG       37
+set_io io_ledB       40
