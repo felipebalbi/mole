@@ -80,29 +80,47 @@ This means:
   drive value different from the surrounding quarters; the engine
   itself stays glitch-free.
 
-## Open-drain primitive: `ReadableOpenDrain`, not `TriState`
+## Open-drain primitive: custom `MoleBus`, not `ReadableOpenDrain`
 
-Every bus wire (`io.bus.scl`, `io.bus.sda`) uses
-`spinal.lib.io.ReadableOpenDrain[Bool]`. **Do not** replace with
-`TriState`.
+Every bus wire (`io.bus.scl`, `io.bus.sda`) uses Mole's custom
+`MoleBus` bundle (lands with Step 2): three signals per line ---
+`driveLow`, `driveHigh`, `read`. **Do not** replace with stock
+`spinal.lib.io.ReadableOpenDrain[Bool]` or `TriState`.
 
-Rationale (same as in the I2c example project):
-- `ReadableOpenDrain` has only `(write, read)` --- no
-  `writeEnable` to forget, and you cannot accidentally drive a
-  hard `1` because there is no second transistor to enable.
-- Maps cleanly to an actual open-drain pad at synthesis (iCE40
-  `SB_IO` open-drain mode).
-- Two wires per line instead of three.
+Rationale:
+- `ReadableOpenDrain` exposes only `(write, read)` --- it cannot
+  express I3C push-pull mode where the pad actively drives high
+  instead of releasing. The 3-signal bundle splits the two so the
+  per-bit `drive_high` flag from the `EMIT_*` instruction routes
+  directly to the right pin without an inferred mode register.
+- Sister project `icebreaker-spinalhdl-examples/I2c` uses
+  `ReadableOpenDrain` because it only ever speaks I²C. Mole has to
+  speak both, so the primitive necessarily diverges. This is a
+  deliberate divergence, documented in Step 2's "What landed"
+  block when it ships.
+- Maps cleanly to iCE40 `SB_IO` in push-pull mode with
+  output-enable driven by `driveLow | driveHigh`. Pull-ups stay
+  external so OD "1" still works.
 
-Polarity is **electrical, not logical**:
-- `write := False` turns the open-drain NMOS on → pin tied to
-  GND → bus low.
-- `write := True` turns the NMOS off → pin floats → external
-  pull-up wins → bus high.
+Polarity rules:
+- `driveLow := True` → NMOS pull-down on → pin at GND → bus low.
+- `driveHigh := True` → PMOS pull-up on → pin at VIO → bus high
+  (push-pull). Pull-up resistor is irrelevant in this state.
+- Both `False` → output-enable off → pin floats → external
+  pull-up wins → bus high (open-drain release).
+- Both `True` → **bus contention.** Illegal. Asserted out in
+  sim, and the engine's `drive` decoder should never produce it
+  (the 3-bit field has no encoding for both).
 
-The engine drives low and *releases* high. It must never drive
-either line actively high. This is a hardware-safety rule; a
-review that lands code violating it should be reverted on sight.
+Three rules:
+- The engine drives low or drives high based on the **per-bit
+  `drive_high` flag**; it does not have a "mode" register.
+- "Release the bus" is `driveLow := False; driveHigh := False`
+  (both NMOS and PMOS off). This is the default at reset and
+  between programs.
+- For I2C / I3C OD operation the SDK sets `drive_high = 0` on
+  every bit, so the PMOS never fires --- electrically identical
+  to a classic open-drain bus.
 
 ## Compile-time deterministic engine
 
@@ -126,19 +144,24 @@ Same pattern the I2c example project codified (and named in its
 
 ### Registered drivers, not per-state combinational drives
 
-Bus lines come from `Reg(Bool())` regs at Component scope:
+Bus lines come from `Reg(Bool())` regs at Component scope, one
+pair per line (`driveLow` + `driveHigh`):
 
 ```scala
-val sclDrive = Reg(Bool()) init(True)   // True = released
-val sdaDrive = Reg(Bool()) init(True)
-io.bus.scl.write := sclDrive
-io.bus.sda.write := sdaDrive
+val sclDriveLow  = Reg(Bool()) init(False)  // NMOS off  = released
+val sclDriveHigh = Reg(Bool()) init(False)  // PMOS off  = released
+val sdaDriveLow  = Reg(Bool()) init(False)
+val sdaDriveHigh = Reg(Bool()) init(False)
+io.bus.scl.driveLow  := sclDriveLow
+io.bus.scl.driveHigh := sclDriveHigh
+io.bus.sda.driveLow  := sdaDriveLow
+io.bus.sda.driveHigh := sdaDriveHigh
 ```
 
-States touch only the lines they change. Do **not** call
-`io.bus.releaseAll()` at Component scope alongside the registered
-drives --- last-assignment-wins makes `releaseAll()` clobber the
-regs and the bus will never go low.
+States touch only the lines they change. Do **not** add a
+`releaseAll()` helper that drives the regs at Component scope
+alongside per-state writes --- last-assignment-wins makes the
+release clobber the regs and the bus will never go low.
 
 ### Edge on entry, dwell in active
 

@@ -152,11 +152,12 @@ place where "fix a spec bug" becomes "edit Scheme" instead of
 Wire engine:
 
 - `EMIT_BIT drive expect capture_en` --- one full bit (4 quarters at
-  canonical positions). `drive` = SDA+SCL drive value + drive-enable;
-  `expect` = compare value + mask; `capture_en` = also write sampled
-  SDA to result ring.
+  canonical positions). `drive` = per-line **3-bit** drive field for
+  SDA and SCL (see "Drive field" below); `expect` = compare value +
+  mask; `capture_en` = also write sampled SDA to result ring.
 - `EMIT_QUARTER drive expect capture_en` --- single quarter
-  (glitches, sub-bit shaping).
+  (glitches, sub-bit shaping). Same `drive` field semantics as
+  `EMIT_BIT`.
 - `STRETCH_SCL n` --- hold SCL low for `n` quarters (target-style
   stretching or measured bus-hold).
 - `WAIT_SCL_RELEASE timeout` --- async escape: pause the quarter
@@ -179,6 +180,65 @@ Bookkeeping:
   `od-freq`, `i2c-freq`. Programmable per-test.
 
 Total: 10 opcodes. Comfortable headroom in a 16-bit encoding.
+
+### Drive field --- OD / PP / I2C as bitstream data
+
+The `drive` field carries **3 bits per line** (so 6 bits total for
+SDA + SCL) and encodes the choice between open-drain, push-pull, and
+total Hi-Z **per bit**:
+
+```
+drive[2] = drive_high      0 = Hi-Z when bit_value=1 (open-drain)
+                           1 = actively drive high   (push-pull)
+drive[1] = bit_value       0 = low, 1 = high
+drive[0] = drive_enable    0 = total Hi-Z, ignore bit_value
+                           1 = drive per bit_value
+```
+
+Four useful combinations:
+
+| `drive_high` | `bit_value` | `drive_enable` | Effect                      | Used for                            |
+|---|---|---|---|---|
+| 0            | 0           | 1              | pull low (NMOS on)          | I2C/I3C "0"                         |
+| 0            | 1           | 1              | release (Hi-Z, pull-up wins)| I2C/I3C OD "1"                      |
+| 1            | 0           | 1              | drive low (push-pull)       | I3C PP "0"                          |
+| 1            | 1           | 1              | drive high (push-pull)      | I3C PP "1"                          |
+| -            | -           | 0              | total Hi-Z                  | reads, target idle, bus hand-off    |
+
+The engine has **no knowledge** of which mode applies where. The
+Scheme SDK encodes the OD-vs-PP choice in the bitstream itself by
+setting `drive_high` per bit:
+
+- `i2c/*` namespaces: always `drive_high = 0`.
+- `i3c/sdr/start`, `i3c/sdr/addr-byte`, `i3c/sdr/ack-slot`,
+  `ccc/header-broadcast`: `drive_high = 0` (OD).
+- `i3c/sdr/write-data`, `i3c/sdr/parity-t-bit`, post-ACK payload:
+  `drive_high = 1` (PP).
+- The OD ⇄ PP transition is just two consecutive `EMIT_BIT`
+  instructions with different `drive_high` --- no engine state, no
+  "mode switch" opcode, no race.
+
+This is the same architectural premise that keeps `Start` and `Stop`
+out of the engine: the SDK is the spec, the engine is dumb wire.
+
+`LOAD_TIMING reg word` (already in the ISA) carries the
+frequency-per-mode choice: separate divider words for `pp-freq`,
+`od-freq`, `i2c-freq`. The SDK loads the right one before each
+phase change.
+
+**Pad-level reality (iCE40 UP5K v0):** the SB_IO primitives are
+configured push-pull-capable from the start, with external pull-ups
+present so OD "1" still works. "PP high" then competes against the
+pull-up benignly (push-pull always wins). For v2 / PHY card, the
+PHY can additionally vary slew rate and VIO per phase --- that's a
+knob, not an architectural change.
+
+**Compliance bonus:** because the OD ⇄ PP seam is just where the
+SDK chose to flip `drive_high`, compliance tests can deliberately
+mis-time the seam (e.g., flip a bit early or late around the ACK
+slot) to fuzz controller / target implementations. Glitches inherit
+the same `drive` field via `EMIT_QUARTER`, so PP-high glitches onto
+what should be an OD release are first-class.
 
 ### Reserved for v0.5 (do not implement yet)
 
