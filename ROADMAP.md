@@ -193,6 +193,57 @@ Bookkeeping:
 Total: 11 opcodes. Comfortable headroom in a 16-bit encoding
 (4-bit opcode field holds 16 codes).
 
+#### Encoding width --- 16-bit fixed
+
+The instruction word is **16 bits fixed-width**. Per-opcode field
+budget (post-SCL-move, locked):
+
+```
+EMIT_BIT       [15:12]op [11:9]drive_sda [8]expect [7]mask [6]capture [5:0]reserved
+EMIT_QUARTER   [15:12]op [11:9]drive_sda [8:6]drive_scl [5]expect [4]mask [3]capture [2:0]reserved
+STRETCH_SCL    [15:12]op [11:0]n_quarters
+WAIT_SCL_REL   [15:12]op [11:0]timeout_quarters
+WAIT_SDA_LOW   [15:12]op [11:0]timeout_quarters
+SET_BUS_MODE   [15:12]op [11:9]mode [8:0]reserved
+JMP            [15:12]op [11:0]addr
+BRANCH_ON_MM   [15:12]op [11:0]addr
+HALT           [15:12]op [11:8]status [7:0]reserved
+MARK           [15:12]op [11:4]label [3:0]reserved
+LOAD_TIMING    [15:12]op [11:10]reg [9:0]divider_word
+```
+
+Two smaller widths were considered and rejected:
+
+- **8-bit fixed.** Only `SET_BUS_MODE` (7 bits) fits.
+  `EMIT_QUARTER` alone needs **13** bits (4 op + 3 SDA + 3 SCL + 3
+  expect/mask/capture), `EMIT_BIT` needs 10, and every
+  control-flow / timing / wait opcode needs the full 16 (4 op +
+  12-bit operand). Half the ISA would need multi-word encoding,
+  which kills the single-cycle decoder.
+- **Variable-length (8 + 16 hybrid, RISC-V "C"-style).** The only
+  opcode that could realistically go short is `EMIT_BIT`, and only
+  by giving up `capture_en` and/or inline `expect`/`mask` ---
+  features we just locked in. Saves ~1 byte per frame for the
+  ~4 `SET_BUS_MODE`s, at the cost of variable instruction fetch,
+  variable PC increment, alignment handling at branch targets,
+  and a substantially more complex decoder, sim, and
+  disassembler. Cost ≫ benefit.
+- **12-bit fixed.** `EMIT_QUARTER` still does not fit (13 bits);
+  branch/wait operands have no headroom.
+
+The SPRAM headroom on UP5K (256 Kbit = 16 K instructions at
+16-bit) makes the savings unspendable anyway: a worst-case I3C
+SDR 256-byte payload is ~2,500 instructions ≈ 15 % of one SPRAM
+bank. We are not memory-bound.
+
+**JMP / BRANCH address space.** 12 bits gives **4096 instructions
+= 8 KB program max**. Comfortably fits ~80 typical compliance
+tests (~50-100 insn each) in one program. If a future workload
+ever needs more, a v1 "jumbo-address" opcode is a follow-up, not
+a v0 blocker. The fixed-width encoding is part of the wire-format
+stability contract --- changing it counts as a bytecode-version
+bump, same as reordering opcodes.
+
 ### Canonical `EMIT_BIT` shape
 
 `EMIT_BIT` produces **one full I2C/I3C bit on the wire** in 4
@@ -253,6 +304,63 @@ data, not as clock-and-data.
 
 This is also why `EMIT_BIT` is the right grain --- see "Why not
 `EMIT_QUARTER`-only?" below.
+
+### When to use `EMIT_QUARTER`
+
+`EMIT_QUARTER` is the **escape hatch** for any wire shape that is
+not a canonical SDR data bit. Its use cases are finite and
+bounded:
+
+1. **Bus management primitives (always).** Start, Stop, Repeated
+   Start --- SDA edges *while SCL is high* are not a canonical bit
+   shape (canonical bits drop SCL first). 2-4 `EMIT_QUARTER`s
+   each, depending on how setup/hold dwell is encoded.
+   Mode-agnostic; same for I2C, I3C SDR, and I3C HDR. SDK exposes
+   these as macros (`i3c/start`, `i3c/stop`,
+   `i3c/repeated-start`).
+2. **HDR data bits (when HDR is added).** HDR-DDR transmits data
+   on *both* SCL edges with a different per-bit shape than SDR's
+   canonical low/low/high/high; each HDR-DDR bit compiles to 4
+   `EMIT_QUARTER`s. Same for HDR-TSP / HDR-TSL when those land.
+3. **Compliance violations (the entire reason Mole exists).**
+   Setup-time and hold-time violations, SCL glitches, SDA
+   glitches, early- or late-SCL-release, pre-Start bus
+   disturbance. The compliance test catalog *is* the EMIT_QUARTER
+   workload --- it's how Mole goes from "well-formed protocol" to
+   "deliberately malformed protocol."
+4. **Optional: bus-idle (tBUF) waits.** Holding both lines high
+   for a measured idle interval between Stop and the next Start.
+   Can also be done with `STRETCH_SCL` + idle `EMIT_QUARTER`
+   combos; SDK picks per readability.
+
+`EMIT_QUARTER` is **not** used for:
+
+- SDR address bits, data bits, ACK / T-bits.
+- CCC headers (broadcast 0x7E + CCC code + defining bytes). Each
+  byte is 9 canonical bits → `EMIT_BIT × 9`.
+- Anything where SCL is canonical and you just want a particular
+  SDA value at the canonical sample point. `EMIT_BIT` is correct.
+
+**Frequency in a typical program.** A representative I3C SDR
+write of a 16-byte payload:
+
+| Phase                  | Count | Opcode used                  |
+|------------------------|------:|------------------------------|
+| Start                  |     1 | `EMIT_QUARTER` × ~3          |
+| Address + RnW + ACK    |     1 | `EMIT_BIT` × 9               |
+| `SET_BUS_MODE i3c-PP`  |     1 | `SET_BUS_MODE`               |
+| Data + T-bit × 16      |    16 | `EMIT_BIT` × 9 each (144)    |
+| `SET_BUS_MODE i3c-OD`  |     1 | `SET_BUS_MODE`               |
+| Stop                   |     1 | `EMIT_QUARTER` × ~3          |
+
+≈ 156 instructions total, of which ~6 are `EMIT_QUARTER` ---
+about **4 %**. The rest is `EMIT_BIT`. That ratio is the design
+validation: `EMIT_BIT` is the right dominant opcode and
+`EMIT_QUARTER` is the right minority escape hatch.
+
+If a future program is *dominated* by `EMIT_QUARTER`, that is a
+signal the SDK macro layer is missing an abstraction, not that
+the ISA is wrong.
 
 ### Bus mode register --- how the engine knows SCL drive style
 

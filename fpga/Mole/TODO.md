@@ -233,6 +233,39 @@ into a single "released" bit --- that would lose the PP-high case
 ROADMAP §"Bus mode register" table. The 4th combination
 (`mode[1:0]=11`) is reserved.
 
+**Encoding width: 16-bit fixed.** Every opcode is exactly one
+16-bit word. Locked per-opcode field layout (matches ROADMAP
+§"Encoding width"):
+
+```
+EMIT_BIT       [15:12]op [11:9]drive_sda [8]expect [7]mask [6]capture [5:0]reserved
+EMIT_QUARTER   [15:12]op [11:9]drive_sda [8:6]drive_scl [5]expect [4]mask [3]capture [2:0]reserved
+STRETCH_SCL    [15:12]op [11:0]n_quarters
+WAIT_SCL_REL   [15:12]op [11:0]timeout_quarters
+WAIT_SDA_LOW   [15:12]op [11:0]timeout_quarters
+SET_BUS_MODE   [15:12]op [11:9]mode [8:0]reserved
+JMP            [15:12]op [11:0]addr
+BRANCH_ON_MM   [15:12]op [11:0]addr
+HALT           [15:12]op [11:8]status [7:0]reserved
+MARK           [15:12]op [11:4]label [3:0]reserved
+LOAD_TIMING    [15:12]op [11:10]reg [9:0]divider_word
+```
+
+JMP / BRANCH operand is 12 bits → **4096-instruction program
+limit (= 8 KB)**. Reject programs larger than that at encode time
+with a clear error; a v1 "jumbo-address" opcode can lift the
+limit if a future workload demands it.
+
+**Rejected: 8-bit and variable-length encoding.** See ROADMAP
+§"Encoding width". Only `SET_BUS_MODE` (7 bits) would fit in
+8 bits; `EMIT_QUARTER` alone needs 13 and every wait / branch /
+timing opcode needs the full 16. Variable-length saves ~1 byte
+per `SET_BUS_MODE` at the cost of variable fetch, variable PC
+increment, branch-target alignment, and a substantially more
+complex decoder / sim / disassembler. The SPRAM headroom on UP5K
+(~16K instructions per bank vs ~2,500 for a worst-case I3C SDR
+frame) makes the savings unspendable anyway.
+
 **Rejected: byte-level emits.** No `EMIT_BYTE`, `EMIT_WORD`, or
 any "emit N bits in one fetch" opcode. See ROADMAP §"Why no
 byte-level emit". Short version: a "byte" on the wire is **9

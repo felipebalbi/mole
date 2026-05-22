@@ -49,10 +49,14 @@ rule in `../../AGENTS.md` §3.4.
 The 11-opcode ISA (`EMIT_BIT`, `EMIT_QUARTER`, `STRETCH_SCL`,
 `WAIT_SCL_RELEASE`, `WAIT_SDA_LOW`, `SET_BUS_MODE`, `JMP`,
 `BRANCH_ON_MISMATCH`, `HALT`, `MARK`, `LOAD_TIMING`) and its
-16-bit encoding are externally visible: the host compiler emits
-exactly this byte format and every deployed Mole decodes it.
-Reordering opcodes, shrinking fields, or repurposing reserved
-bits is a wire-format break.
+**16-bit fixed-width** encoding are externally visible: the host
+compiler emits exactly this byte format and every deployed Mole
+decodes it. Reordering opcodes, shrinking fields, repurposing
+reserved bits, *or changing the fixed 16-bit width* (to 8-bit, to
+variable-length, or anything else) is a wire-format break that
+requires a bytecode-version bump. See ROADMAP §"Encoding width"
+for the per-opcode field budget and why narrower widths were
+rejected.
 
 If the ISA truly needs to change:
 1. Bump a bytecode-format version word at the top of every
@@ -115,6 +119,16 @@ This means:
   ISA-contract section above and ROADMAP §"Why not
   `EMIT_QUARTER`-only?" for the asymmetry that justifies keeping
   both.
+- **`EMIT_QUARTER` is the escape hatch, not the workhorse.** It
+  exists for the bounded set of non-canonical wire shapes ---
+  Start / Stop / Repeated Start, HDR data bits, compliance
+  violations (setup/hold violations, SCL/SDA glitches, early/late
+  release), and optional bus-idle waits. A typical I3C SDR write
+  is ~4 % `EMIT_QUARTER`, ~96 % `EMIT_BIT`. If a code review
+  surfaces a program *dominated* by `EMIT_QUARTER`, that is a
+  signal the SDK macro layer is missing an abstraction, not that
+  the ISA grain is wrong. See ROADMAP §"When to use EMIT_QUARTER"
+  for the enumerated use cases and the not-used-for list.
 
 ## Open-drain primitive: custom `MoleBus`, not `ReadableOpenDrain`
 
