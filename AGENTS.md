@@ -30,7 +30,7 @@ model, and the compile-time error-injection contract.
 ### One-paragraph architecture
 
 A small **bit-cycle engine** in the FPGA ("Layer 0") executes a
-~10-opcode ISA over quarter-bit-resolution SDA/SCL patterns,
+~11-opcode ISA over quarter-bit-resolution SDA/SCL patterns,
 protocol-agnostic. All of I2C / I3C lives on the host as a
 **Scheme SDK** ("Layer 1") that compiles down to that bytecode.
 Spec-compliant primitives live in `i2c/`, `i3c/`, `ccc/`, `hdr-ddr/`

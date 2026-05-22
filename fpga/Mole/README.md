@@ -15,7 +15,7 @@ in [`TODO.md`](TODO.md).
 ## What this is
 
 A SpinalHDL implementation of Layer 0 of the Mole architecture: a
-small, register-mapped engine that executes a ~10-opcode ISA
+small, register-mapped engine that executes a ~11-opcode ISA
 (`EMIT_BIT`, `EMIT_QUARTER`, `STRETCH_SCL`, `WAIT_SCL_RELEASE`,
 `WAIT_SDA_LOW`, `JMP`, `BRANCH_ON_MISMATCH`, `HALT`, `MARK`,
 `LOAD_TIMING`) and drives SDA / SCL with quarter-bit-resolution

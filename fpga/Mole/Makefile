@@ -100,7 +100,7 @@ sim: ## Run all simulations
 # sim-spram: ## Run SPRAM controller sim (lands with Step 6)
 # 	$(SBT) -batch "runMain $(PACKAGE).SpramControllerSim"
 
-# sim-isa: ## Round-trip the 10-opcode encoder/decoder (lands with Step 7)
+# sim-isa: ## Round-trip the 11-opcode encoder/decoder (lands with Step 7)
 # 	$(SBT) -batch "runMain $(PACKAGE).InstructionSim"
 
 # sim-engine-smoke: ## EMIT_BIT smoke: drive 0x55 onto sim bus (lands with Step 9)

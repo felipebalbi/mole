@@ -46,13 +46,13 @@ rule in `../../AGENTS.md` §3.4.
 
 ## ISA is a stable contract
 
-The 10-opcode ISA (`EMIT_BIT`, `EMIT_QUARTER`, `STRETCH_SCL`,
-`WAIT_SCL_RELEASE`, `WAIT_SDA_LOW`, `JMP`, `BRANCH_ON_MISMATCH`,
-`HALT`, `MARK`, `LOAD_TIMING`) and its 16-bit encoding are
-externally visible: the host compiler emits exactly this byte
-format and every deployed Mole decodes it. Reordering opcodes,
-shrinking fields, or repurposing reserved bits is a wire-format
-break.
+The 11-opcode ISA (`EMIT_BIT`, `EMIT_QUARTER`, `STRETCH_SCL`,
+`WAIT_SCL_RELEASE`, `WAIT_SDA_LOW`, `SET_BUS_MODE`, `JMP`,
+`BRANCH_ON_MISMATCH`, `HALT`, `MARK`, `LOAD_TIMING`) and its
+16-bit encoding are externally visible: the host compiler emits
+exactly this byte format and every deployed Mole decodes it.
+Reordering opcodes, shrinking fields, or repurposing reserved
+bits is a wire-format break.
 
 If the ISA truly needs to change:
 1. Bump a bytecode-format version word at the top of every
@@ -66,19 +66,55 @@ The `LOAD_REG` / `BRANCH_ON_CAPTURED_MASK` / `CAPTURE_RUN` /
 Do not implement them in v0 even if a step seems to want them ---
 add the requirement to the v0.5 plan instead.
 
+**`EMIT_BYTE` (and any byte-level / word-level emit) is
+explicitly rejected**, not deferred. See ROADMAP §"Why no
+byte-level emit". A "byte" on the wire is 9 bits, not 8, and the
+9th is structurally different from the first 8 --- the SDK
+encodes `write-byte` as a macro that expands to 9 `EMIT_BIT`s
+with correct per-bit operands. Treat any review that re-proposes
+`EMIT_BYTE` as a sign the SDK needs a new macro, not the engine
+a new opcode.
+
+**Putting SDA OD/PP into `BUS_MODE` is also explicitly rejected.**
+SDA drive style flips inside a wire byte (the 9th-bit asymmetry:
+target drives ACK after controller drives 8 data bits); a mode
+register tracking this would have to become a per-byte FSM ---
+the exact "protocol-aware shortcut" the ROADMAP rejects. SCL drive
+style is per-frame-phase (slow state, lives in `BUS_MODE`); SDA
+drive style is per-bit (fast data, lives in the bitstream). See
+ROADMAP §"Why SDA does *not* live in `BUS_MODE`".
+
 ## Quarter-bit is the timing unit on the wire
 
 The fabric clock *is* the quarter-bit clock. One fabric cycle =
 one quarter-bit time. `LOAD_TIMING` controls how many fabric
 cycles per quarter-bit at runtime (for pp / od / i2c frequency
-selection); there is no sub-quarter-bit timing knob.
+selection); `SET_BUS_MODE` picks which of those divider words is
+active. There is no sub-quarter-bit timing knob.
 
 This means:
 - Every state in the bit-cycle FSM advances on a quarter-bit
   boundary --- no half-bit, no "between quarters" state.
-- Glitch injection happens by emitting `EMIT_QUARTER` with a
-  drive value different from the surrounding quarters; the engine
-  itself stays glitch-free.
+- `EMIT_BIT` carries the **canonical bit shape** for all 4
+  quarters: SCL low / low / high / high (engine-generated, not
+  in the bitstream), SDA held at `bit_value` throughout (per the
+  `drive_sda` field). The SDK emits one `EMIT_BIT` per wire bit
+  and never has to reason about the SCL waveform. See ROADMAP
+  §"Canonical EMIT_BIT shape" for the wire-level contract.
+- **SCL is engine-generated during `EMIT_BIT`, bitstream-
+  controlled during `EMIT_QUARTER`.** This is the only path to
+  per-quarter SCL control; `EMIT_BIT`'s bitstream does not carry
+  an SCL drive field. The engine's `SclWaveformGen` reads
+  `BUS_MODE.mode[2]` to choose OD-release vs PP-high for the
+  high half of every `EMIT_BIT`.
+- Glitch injection (and any other per-quarter deviation from the
+  canonical shape, including SCL glitches) happens by emitting 4
+  explicit `EMIT_QUARTER`s in place of one `EMIT_BIT`. The engine
+  itself stays glitch-free --- the bitstream encodes the shape.
+- `EMIT_BIT` and `EMIT_QUARTER` coexist deliberately: see the
+  ISA-contract section above and ROADMAP §"Why not
+  `EMIT_QUARTER`-only?" for the asymmetry that justifies keeping
+  both.
 
 ## Open-drain primitive: custom `MoleBus`, not `ReadableOpenDrain`
 
