@@ -46,15 +46,17 @@ rule in `../../AGENTS.md` §3.4.
 
 ## ISA is a stable contract
 
-The 11-opcode ISA (`EMIT_BIT`, `EMIT_QUARTER`, `STRETCH_SCL`,
-`WAIT_SCL_RELEASE`, `WAIT_SDA_LOW`, `SET_BUS_MODE`, `JMP`,
-`BRANCH_ON_MISMATCH`, `HALT`, `MARK`, `LOAD_TIMING`) and its
+The **12-opcode ISA** --- `EMIT_BIT`, `EMIT_QUARTER`,
+`STRETCH_SCL`, `WAIT_ON`, `SET_BUS_MODE`, `SAMPLE_BIT_ON_SCL`,
+`DRIVE_BIT_ON_SCL`, `JMP`, `BRANCH_ON`, `HALT`, `MARK`,
+`LOAD_TIMING` (plus four reserved opcode slots) --- and its
 **16-bit fixed-width** encoding are externally visible: the host
 compiler emits exactly this byte format and every deployed Mole
 decodes it. Reordering opcodes, shrinking fields, repurposing
-reserved bits, *or changing the fixed 16-bit width* (to 8-bit, to
-variable-length, or anything else) is a wire-format break that
-requires a bytecode-version bump. See ROADMAP §"Encoding width"
+reserved bits, moving the flag triple off `[2:0]`, *or changing
+the fixed 16-bit width* (to 8-bit, to variable-length, or
+anything else) is a wire-format break that requires a
+bytecode-version bump. See ROADMAP §"ISA" and §"Encoding width"
 for the per-opcode field budget and why narrower widths were
 rejected.
 
@@ -65,10 +67,13 @@ If the ISA truly needs to change:
 3. Update the host encoder (the Rust crate under `../../crates/`)
    in the same PR.
 
-The `LOAD_REG` / `BRANCH_ON_CAPTURED_MASK` / `CAPTURE_RUN` /
-`CALL` / `RET` opcodes are **reserved for v0.5** (see ROADMAP).
-Do not implement them in v0 even if a step seems to want them ---
-add the requirement to the v0.5 plan instead.
+The `WAIT_ADDRESSED`, `MISMATCH_CLEAR`, `FLAG_CLEAR`,
+`CAPTURE_RUN`, `CALL`, and `RET` opcodes are **reserved for
+v0.5** (see ROADMAP §"Reserved for v0.5"). Do not implement them
+in v0 even if a step seems to want them --- add the requirement
+to the v0.5 plan instead. Likewise the `tx_symbol = 11` encoding
+is reserved for the v0.5 `raw_override` escape and must not be
+repurposed.
 
 **`EMIT_BYTE` (and any byte-level / word-level emit) is
 explicitly rejected**, not deferred. See ROADMAP §"Why no
@@ -79,14 +84,14 @@ with correct per-bit operands. Treat any review that re-proposes
 `EMIT_BYTE` as a sign the SDK needs a new macro, not the engine
 a new opcode.
 
-**Putting SDA OD/PP into `BUS_MODE` is also explicitly rejected.**
-SDA drive style flips inside a wire byte (the 9th-bit asymmetry:
-target drives ACK after controller drives 8 data bits); a mode
-register tracking this would have to become a per-byte FSM ---
-the exact "protocol-aware shortcut" the ROADMAP rejects. SCL drive
-style is per-frame-phase (slow state, lives in `BUS_MODE`); SDA
-drive style is per-bit (fast data, lives in the bitstream). See
-ROADMAP §"Why SDA does *not* live in `BUS_MODE`".
+**Putting `tx_symbol` into `BUS_MODE` is also explicitly
+rejected.** `BUS_MODE` owns the symbol-to-electrical *mapping*
+(slow state: changes a handful of times per transaction). The
+bitstream carries the *value* (fast data: per-bit). Folding the
+value into the mapping turns every bit-level driver flip into a
+`SET_BUS_MODE` churn and defeats the point of having a per-bit
+field at all. See ROADMAP §"Why SDA does *not* live in
+`BUS_MODE`" for the full asymmetry argument.
 
 ## Quarter-bit is the timing unit on the wire
 
@@ -101,20 +106,31 @@ This means:
   boundary --- no half-bit, no "between quarters" state.
 - `EMIT_BIT` carries the **canonical bit shape** for all 4
   quarters: SCL low / low / high / high (engine-generated, not
-  in the bitstream), SDA held at `bit_value` throughout (per the
-  `drive_sda` field). The SDK emits one `EMIT_BIT` per wire bit
-  and never has to reason about the SCL waveform. See ROADMAP
-  §"Canonical EMIT_BIT shape" for the wire-level contract.
+  in the bitstream), SDA held at the bit's `tx_symbol`
+  throughout. The `tx_symbol` is decoded against the active
+  `BUS_MODE` (dominant → OD-low or PP-drive-0; recessive →
+  OD-release or PP-drive-1; hiz → driver-off). The SDK emits
+  one `EMIT_BIT` per wire bit and never has to reason about
+  the SCL waveform. See ROADMAP §"Canonical EMIT_BIT shape"
+  for the wire-level contract.
 - **SCL is engine-generated during `EMIT_BIT`, bitstream-
   controlled during `EMIT_QUARTER`.** This is the only path to
   per-quarter SCL control; `EMIT_BIT`'s bitstream does not carry
   an SCL drive field. The engine's `SclWaveformGen` reads
   `BUS_MODE.mode[2]` to choose OD-release vs PP-high for the
-  high half of every `EMIT_BIT`.
+  high half of every `EMIT_BIT`. In target role the engine
+  releases SCL entirely and slaves to the external clock; the
+  controller-side opcodes (`EMIT_BIT`, `EMIT_QUARTER`) are
+  replaced by `SAMPLE_BIT_ON_SCL` / `DRIVE_BIT_ON_SCL` which
+  pace off external SCL edges.
 - Glitch injection (and any other per-quarter deviation from the
   canonical shape, including SCL glitches) happens by emitting 4
   explicit `EMIT_QUARTER`s in place of one `EMIT_BIT`. The engine
   itself stays glitch-free --- the bitstream encodes the shape.
+  Target-role lint: `EMIT_QUARTER` with `scl_symbol = recessive`
+  is rejected by the SDK under PP-class `BUS_MODE` (would
+  request PP-drive-1 of SCL); `dominant` (pull low: stretch,
+  fuzz) and `hiz` (release) are always legal.
 - `EMIT_BIT` and `EMIT_QUARTER` coexist deliberately: see the
   ISA-contract section above and ROADMAP §"Why not
   `EMIT_QUARTER`-only?" for the asymmetry that justifies keeping
@@ -140,17 +156,20 @@ Every bus wire (`io.bus.scl`, `io.bus.sda`) uses Mole's custom
 Rationale:
 - `ReadableOpenDrain` exposes only `(write, read)` --- it cannot
   express I3C push-pull mode where the pad actively drives high
-  instead of releasing. The 3-signal bundle splits the two so the
-  per-bit `drive_high` flag from the `EMIT_*` instruction routes
-  directly to the right pin without an inferred mode register.
+  instead of releasing. The 3-signal bundle splits the two so
+  the symbol decoder (one combinational function of `tx_symbol`
+  + active `BUS_MODE`) can drive the right pin without an
+  inferred mode register *on the pad*. The only mode register
+  in the design is `BUS_MODE` itself --- see ROADMAP §"Bus mode
+  register".
 - Sister project `icebreaker-spinalhdl-examples/I2c` uses
-  `ReadableOpenDrain` because it only ever speaks I²C. Mole has to
-  speak both, so the primitive necessarily diverges. This is a
-  deliberate divergence, documented in Step 2's "What landed"
-  block when it ships.
+  `ReadableOpenDrain` because it only ever speaks I²C. Mole has
+  to speak both I2C and I3C (OD + PP), so the primitive
+  necessarily diverges. This is a deliberate divergence,
+  documented in Step 2's "What landed" block when it ships.
 - Maps cleanly to iCE40 `SB_IO` in push-pull mode with
   output-enable driven by `driveLow | driveHigh`. Pull-ups stay
-  external so OD "1" still works.
+  external so OD recessive (Hi-Z + pull-up wins) still works.
 
 Polarity rules:
 - `driveLow := True` → NMOS pull-down on → pin at GND → bus low.
@@ -159,18 +178,34 @@ Polarity rules:
 - Both `False` → output-enable off → pin floats → external
   pull-up wins → bus high (open-drain release).
 - Both `True` → **bus contention.** Illegal. Asserted out in
-  sim, and the engine's `drive` decoder should never produce it
-  (the 3-bit field has no encoding for both).
+  sim, and the symbol decoder must never produce it (no
+  `tx_symbol`/`BUS_MODE` combination decodes to both).
+
+`tx_symbol` → `(driveLow, driveHigh)` decode table (combinational
+in `BUS_MODE`):
+
+| `BUS_MODE`            | `dominant`           | `recessive`               | `hiz`    |
+|-----------------------|----------------------|---------------------------|----------|
+| `i2c`, `i3c-OD`       | NMOS on  → `(1, 0)`  | both off → `(0, 0)`       | `(0, 0)` |
+| `i3c-PP`, `hdr-ddr`   | NMOS on  → `(1, 0)`  | PMOS on  → `(0, 1)`       | `(0, 0)` |
+
+In OD modes `recessive` and `hiz` are electrically indistinguishable
+(both produce `(0, 0)` and the external pull-up wins). In PP modes
+`recessive` actively drives high; `hiz` is genuine driver-off.
 
 Three rules:
-- The engine drives low or drives high based on the **per-bit
-  `drive_high` flag**; it does not have a "mode" register.
-- "Release the bus" is `driveLow := False; driveHigh := False`
-  (both NMOS and PMOS off). This is the default at reset and
-  between programs.
-- For I2C / I3C OD operation the SDK sets `drive_high = 0` on
-  every bit, so the PMOS never fires --- electrically identical
-  to a classic open-drain bus.
+- The engine drives low or drives high based on the symbol
+  decoder's output --- a pure combinational function of the
+  current opcode's `tx_symbol` field and the active `BUS_MODE`.
+  No per-pad mode register.
+- "Release the bus" is `tx_symbol = hiz` (or any opcode that
+  doesn't drive the line), which decodes to
+  `driveLow := False; driveHigh := False`. Also the default at
+  reset and between programs.
+- For I2C / I3C OD operation the `BUS_MODE` is `i2c` or
+  `i3c-OD`, so the symbol decoder never asserts `driveHigh` and
+  the PMOS never fires --- electrically identical to a classic
+  open-drain bus.
 
 ## Compile-time deterministic engine
 

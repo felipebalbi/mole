@@ -15,12 +15,19 @@ in [`TODO.md`](TODO.md).
 ## What this is
 
 A SpinalHDL implementation of Layer 0 of the Mole architecture: a
-small, register-mapped engine that executes a ~11-opcode ISA
-(`EMIT_BIT`, `EMIT_QUARTER`, `STRETCH_SCL`, `WAIT_SCL_RELEASE`,
-`WAIT_SDA_LOW`, `JMP`, `BRANCH_ON_MISMATCH`, `HALT`, `MARK`,
-`LOAD_TIMING`) and drives SDA / SCL with quarter-bit-resolution
-timing. No I2C or I3C knowledge lives here --- protocol semantics
-live in the host-side Scheme SDK (Layer 1).
+small, register-mapped engine that executes a **12-opcode ISA**
+(`EMIT_BIT`, `EMIT_QUARTER`, `STRETCH_SCL`, `WAIT_ON`,
+`SET_BUS_MODE`, `SAMPLE_BIT_ON_SCL`, `DRIVE_BIT_ON_SCL`, `JMP`,
+`BRANCH_ON`, `HALT`, `MARK`, `LOAD_TIMING`; four reserved opcode
+slots) and drives SDA / SCL with quarter-bit-resolution timing.
+Per-bit / per-quarter drive is a bus-agnostic 2-bit `tx_symbol`
+(`dominant` / `recessive` / `hiz` / reserved) decoded against the
+active `BUS_MODE` register --- the engine has zero protocol
+knowledge. The same engine plays controller (engine drives SCL)
+or target (engine slaves to external SCL via `SAMPLE_BIT_ON_SCL`
+/ `DRIVE_BIT_ON_SCL`). Protocol semantics (I2C, I3C, CCC,
+HDR-DDR, peripheral emulation) live in the host-side Scheme SDK
+(Layer 1).
 
 ## What's in scope (v0)
 
@@ -31,9 +38,11 @@ live in the host-side Scheme SDK (Layer 1).
 - I2C (all modes) and I3C SDR up to the fabric ceiling (~12 MHz
   I3C with the UP5K's ~48 MHz fabric --- see ROADMAP §"Clocks").
 - Same engine plays controller *or* target (selected by host).
-- Open-drain SDA / SCL using Spinal's `ReadableOpenDrain[Bool]`
-  primitive. The engine **never** drives these lines actively
-  high.
+- Custom `MoleBus` bundle on SDA / SCL (`driveLow` + `driveHigh`
+  + `read`), backing push-pull-capable iCE40 `SB_IO` pads with
+  external pull-ups. OD vs PP is decoded at runtime from the
+  active `BUS_MODE` register; PP-high is legal only under
+  `i3c-PP` / `hdr-ddr` and is never used for SCL in target role.
 
 ## What's out of scope (v0)
 
