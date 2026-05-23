@@ -26,7 +26,7 @@ already on the icebreaker).
 The architecture is a **bit-stream + Scheme SDK** design:
 
 - **FPGA hosts a tiny, protocol-agnostic bit-cycle engine** ("Layer 0"):
-  ~11 opcodes, ~1800 LUTs, no knowledge of I2C / I3C, just drives
+  ~15 opcodes, ~1800 LUTs, no knowledge of I2C / I3C, just drives
   quarter-bit patterns on SDA/SCL and compares them against expects.
 - **Host hosts a Scheme SDK** ("Layer 1"): all of I2C and I3C lives
   here as Scheme source --- spec-compliant primitives (`sdr/write-byte`,
@@ -42,7 +42,11 @@ Five consequences worth naming explicitly:
    imports.
 2. **Same engine plays both controller and target.** Role is a config
    bit; the SDK exposes `i3c/controller/*` and `i3c/target/*`
-   namespaces over a shared set of primitives.
+   namespaces over a shared set of primitives. In target role the
+   engine does **not** drive SCL --- it samples SCL edges driven
+   by the external controller and reacts via dedicated
+   `WAIT_START`, `WAIT_STOP`, `SAMPLE_BIT_ON_SCL`, and
+   `DRIVE_BIT_ON_SCL` opcodes (see ISA section).
 3. **Error injection is exact-by-construction.** All PRNG lives in the
    host compiler, never in the engine. `error_ratio = 0` produces a
    bytecode with zero errors written into it; reproducibility is
@@ -80,7 +84,7 @@ Five consequences worth naming explicitly:
    |    v                                            |
    | Bit-cycle engine (Layer 0)                      |
    |   - quarter-bit FSM                             |
-   |   - 11-opcode decoder                           |
+   |   - 15-opcode decoder                           |
    |   - expect comparator                           |
    |   - capture path                                |
    |   - timing dividers (pp/od/i2c-freq)            |
@@ -147,39 +151,129 @@ Every protocol-aware shortcut we resist baking into the engine is a
 place where "fix a spec bug" becomes "edit Scheme" instead of
 "respin the bitstream". This is the architectural win.
 
-### ISA (v0 --- 11 opcodes, 16-bit encoding)
+### ISA (v0 --- 15 opcodes, 16-bit encoding)
 
-Wire engine:
+The ISA splits into four buckets:
+
+- **Wire engine --- role-agnostic primitives** (`EMIT_BIT`,
+  `EMIT_QUARTER`, `STRETCH_SCL`): valid in both controller and
+  target roles. Timed by the engine's local quarter-bit clock
+  (free-running from `LOAD_TIMING`). In controller role they
+  produce normal SDA/SCL waveforms; in target role they are the
+  primitives for **asynchronous SDA glitch injection and
+  invalid-transfer fuzzing**, bracketed by `WAIT_*` sync points.
+  See "Target-side glitch and invalid-transfer injection" below.
+- **Wire engine --- controller-role helpers** (`WAIT_SCL_RELEASE`,
+  `WAIT_SDA_LOW`, `SET_BUS_MODE`): meaningful when the engine
+  generates SCL.
+- **Wire engine --- target-role helpers** (`WAIT_START`,
+  `WAIT_STOP`, `SAMPLE_BIT_ON_SCL`, `DRIVE_BIT_ON_SCL`):
+  meaningful when an external controller generates SCL; gate on
+  observed SCL edges rather than the engine's local divider.
+- **Control flow / bookkeeping** (`JMP`, `BRANCH_ON`, `HALT`,
+  `MARK`, `LOAD_TIMING`): role-agnostic.
+
+Role is a config bit, not an opcode: the same program may issue
+both role-agnostic ops and either-role helpers, but in practice
+a given test runs the engine in one role or the other.
+
+Wire engine --- role-agnostic primitives:
 
 - `EMIT_BIT drive_sda expect capture_en` --- one full bit (4
   quarters at canonical positions). `drive_sda` = **3-bit** drive
   field for SDA only (see "Drive field" below); `expect` = compare
   value + mask; `capture_en` = also write sampled SDA to result
-  ring. **SCL is not in the bitstream** --- the engine generates
-  the canonical SCL waveform per the current `BUS_MODE` register
-  (see "Bus mode register" below).
+  ring. **SCL is not in the bitstream** --- in controller role
+  the engine generates the canonical SCL waveform per the current
+  `BUS_MODE` register (see "Bus mode register" below); in target
+  role the engine releases SCL (Hi-Z) and the external controller
+  drives it. Timed by the engine's local quarter clock either
+  way. In target role, useful for **asynchronous** SDA glitch /
+  fake-byte injection only --- canonical target byte handling
+  uses `DRIVE_BIT_ON_SCL` / `SAMPLE_BIT_ON_SCL` because they
+  slave to external SCL edges and do not drift.
 - `EMIT_QUARTER drive_sda drive_scl expect capture_en` --- single
   quarter (glitches, sub-bit shaping). Carries **both** SDA and
   SCL 3-bit drive fields --- full per-quarter override of the
   engine's canonical waveform. This is the *only* opcode that
-  encodes SCL in the bitstream.
-- `STRETCH_SCL n` --- hold SCL low for `n` quarters (target-style
-  stretching or measured bus-hold).
+  encodes SCL in the bitstream. In target role, the
+  `drive_scl[2]` (drive_high) bit **must be 0** --- the target
+  may pull SCL low (stretching / fuzzing) but never PP-drives
+  SCL high. The SDK enforces this; the engine ignores
+  `drive_scl[2]` when the role bit is target.
+- `STRETCH_SCL n` --- hold SCL low for `n` quarters. In
+  controller role: measured bus-hold / forced stretching for
+  fuzzing. In target role: the canonical clock-stretching
+  primitive; the target actively pulls SCL low for `n` quarters
+  even though it does not generate the nominal SCL waveform.
+
+Wire engine --- controller-role helpers:
+
 - `WAIT_SCL_RELEASE timeout` --- async escape: pause the quarter
   clock until SCL goes high externally, or timeout fires.
 - `WAIT_SDA_LOW timeout` --- needed for IBI / Hot-Join (target
   signals by pulling SDA between Stop and next Start).
 - `SET_BUS_MODE mode` --- set the engine's `BUS_MODE` register
-  (3 bits: active timing divider {i2c, i3c-OD, i3c-PP} plus SCL
-  high-half drive class {OD-release, PP-high}). Affects all
-  subsequent `EMIT_BIT`s until the next `SET_BUS_MODE`. See "Bus
-  mode register" below.
+  (3 bits: active timing divider {`i2c`, `i3c-OD`, `i3c-PP`,
+  `hdr-ddr`} plus SCL high-half drive class {OD-release,
+  PP-high}). Affects all subsequent `EMIT_BIT`s until the next
+  `SET_BUS_MODE`. See "Bus mode register" below. In target role
+  the `mode[2]` SCL drive-class bit is ignored; only the
+  timing-divider selection matters.
+
+Wire engine --- target-role helpers (engine does **not** drive
+SCL; it samples SCL edges generated by the external controller
+and reacts):
+
+- `WAIT_START timeout` --- block until a Start condition (SDA
+  falling while SCL is high) or Repeated Start is observed on
+  the bus, or until `timeout` quarter-bit ticks elapse. The
+  target entry point: every target program begins with this
+  (or with `WAIT_ADDRESSED`, see "reserved opcode slot" below).
+- `WAIT_STOP timeout` --- block until a Stop condition (SDA
+  rising while SCL is high) is observed, or timeout. Used to
+  bound a target transaction.
+- `SAMPLE_BIT_ON_SCL expect mask capture_en` --- wait for the
+  next SCL rising edge (driven externally), sample SDA at the
+  canonical sample point in the high half, compare against
+  `expect`/`mask`, and optionally write the sampled value to
+  the result ring. Target-side read of one bit (address bit,
+  controller-write data bit, controller-driven ACK / NAK).
+- `DRIVE_BIT_ON_SCL drive_sda expect mask capture_en` --- on
+  the next SCL falling edge (driven externally), drive SDA per
+  `drive_sda` (3-bit drive field, same encoding as `EMIT_BIT`)
+  until the following SCL falling edge --- i.e. for one full
+  controller-clocked bit. **Concurrently**, on the SCL rising
+  edge inside that bit cell, sample SDA at the canonical sample
+  point, compare against `expect`/`mask`, and optionally write
+  to the result ring. The simultaneous drive + sample is what
+  enables **I3C DAA arbitration**: the target drives its PID
+  bit and observes the wire; if it drives 1 but the wire shows
+  0, another target won this bit and `MISMATCH_FLAG` is set so
+  `BRANCH_ON MISMATCH` can route to a drop-out handler.
+  Target-side write of one bit (ACK, T-bit, controller-read
+  data, IBI payload bit). Combined with `STRETCH_SCL`, this is
+  also how the target paces the controller: pull SCL low before
+  releasing SDA.
+
+The four target-role helpers carry the same quarter-bit timing
+alignment guarantees as `EMIT_BIT`; the difference is that the
+quarter clock is *gated by externally observed SCL edges* rather
+than free-running off the engine's divider.
 
 Control flow:
 
-- `JMP addr`
-- `BRANCH_ON_MISMATCH addr` --- conditional on the last `EMIT_*`'s
-  expect result.
+- `JMP addr` --- unconditional jump to absolute 12-bit
+  instruction address (4096-instruction range, whole program).
+- `BRANCH_ON cond, offset` --- conditional jump to a
+  PC-relative signed 8-bit offset (±128 instructions, local
+  loops). `cond` is a 4-bit condition code selecting which
+  engine state to test. The unified branch opcode replaces all
+  per-condition branch instructions: a new condition is a new
+  `cond_code` value, not a new opcode. v0 implements four
+  condition codes (`ALWAYS`, `NEVER`, `MISMATCH`,
+  `NOT_MISMATCH`); see "Engine flags" and "Reserved for v0.5"
+  below for the rest.
 - `HALT status` --- end of program, status code returned to host.
 
 Bookkeeping:
@@ -187,11 +281,17 @@ Bookkeeping:
 - `MARK label_id` --- insert labeled marker in result ring (also
   carries an implicit timestamp).
 - `LOAD_TIMING reg word` --- load divider words for `pp-freq`,
-  `od-freq`, `i2c-freq`. Programmable per-test. Pure --- does not
-  change the active mode (use `SET_BUS_MODE` for that).
+  `od-freq`, `i2c-freq`, `hdr-ddr-freq`. Programmable per-test.
+  Pure --- does not change the active mode (use `SET_BUS_MODE`
+  for that).
 
-Total: 11 opcodes. Comfortable headroom in a 16-bit encoding
-(4-bit opcode field holds 16 codes).
+Total: 15 opcodes. The 4-bit opcode field holds 16 codes; one
+slot is intentionally reserved for a future `WAIT_ADDRESSED`
+target-side accelerator (address compare in hardware) if the
+SDK-level loop of `SAMPLE_BIT_ON_SCL × 7 + compare + ACK` proves
+too slow for real targets at I3C SDR rates. A future
+`MISMATCH_CLEAR` opcode (see "Engine flags") would, if needed,
+repurpose this same slot --- one or the other, not both.
 
 #### Encoding width --- 16-bit fixed
 
@@ -199,18 +299,34 @@ The instruction word is **16 bits fixed-width**. Per-opcode field
 budget (post-SCL-move, locked):
 
 ```
-EMIT_BIT       [15:12]op [11:9]drive_sda [8]expect [7]mask [6]capture [5:0]reserved
-EMIT_QUARTER   [15:12]op [11:9]drive_sda [8:6]drive_scl [5]expect [4]mask [3]capture [2:0]reserved
-STRETCH_SCL    [15:12]op [11:0]n_quarters
-WAIT_SCL_REL   [15:12]op [11:0]timeout_quarters
-WAIT_SDA_LOW   [15:12]op [11:0]timeout_quarters
-SET_BUS_MODE   [15:12]op [11:9]mode [8:0]reserved
-JMP            [15:12]op [11:0]addr
-BRANCH_ON_MM   [15:12]op [11:0]addr
-HALT           [15:12]op [11:8]status [7:0]reserved
-MARK           [15:12]op [11:4]label [3:0]reserved
-LOAD_TIMING    [15:12]op [11:10]reg [9:0]divider_word
+EMIT_BIT           [15:12]op [11:9]drive_sda [8]expect [7]mask [6]capture [5:0]reserved
+EMIT_QUARTER       [15:12]op [11:9]drive_sda [8:6]drive_scl [5]expect [4]mask [3]capture [2:0]reserved
+STRETCH_SCL        [15:12]op [11:0]n_quarters
+WAIT_SCL_RELEASE   [15:12]op [11:0]timeout_quarters
+WAIT_SDA_LOW       [15:12]op [11:0]timeout_quarters
+SET_BUS_MODE       [15:12]op [11:9]mode [8:0]reserved
+WAIT_START         [15:12]op [11:0]timeout_quarters
+WAIT_STOP          [15:12]op [11:0]timeout_quarters
+SAMPLE_BIT_ON_SCL  [15:12]op [11]expect [10]mask [9]capture [8:0]reserved
+DRIVE_BIT_ON_SCL   [15:12]op [11:9]drive_sda [8]expect [7]mask [6]capture [5:0]reserved
+JMP                [15:12]op [11:0]addr
+BRANCH_ON          [15:12]op [11:8]cond_code [7:0]pc_rel_offset_signed
+HALT               [15:12]op [11:8]status [7:0]reserved
+MARK               [15:12]op [11:4]label [3:0]reserved
+LOAD_TIMING        [15:12]op [11:10]reg [9:0]divider_word
 ```
+
+The four target-role opcodes reuse field shapes already present
+in the controller-role opcodes: `WAIT_START` / `WAIT_STOP` mirror
+`WAIT_SCL_RELEASE` / `WAIT_SDA_LOW` (12-bit timeout in quarters);
+`SAMPLE_BIT_ON_SCL` mirrors the `expect`/`mask`/`capture` triple
+from `EMIT_BIT`; `DRIVE_BIT_ON_SCL` reuses the 3-bit `drive_sda`
+field **and** the `expect`/`mask`/`capture` triple (the simul-
+taneous drive + sample is what enables I3C DAA arbitration ---
+see "Engine flags" and the target-side examples). No new
+decoder shapes, just two new control verbs
+(wait-for-edge vs. wait-for-divider) and the inversion of who
+sources SCL.
 
 Two smaller widths were considered and rejected:
 
@@ -236,13 +352,117 @@ The SPRAM headroom on UP5K (256 Kbit = 16 K instructions at
 SDR 256-byte payload is ~2,500 instructions ≈ 15 % of one SPRAM
 bank. We are not memory-bound.
 
-**JMP / BRANCH address space.** 12 bits gives **4096 instructions
-= 8 KB program max**. Comfortably fits ~80 typical compliance
-tests (~50-100 insn each) in one program. If a future workload
-ever needs more, a v1 "jumbo-address" opcode is a follow-up, not
-a v0 blocker. The fixed-width encoding is part of the wire-format
-stability contract --- changing it counts as a bytecode-version
-bump, same as reordering opcodes.
+**JMP / BRANCH address space.** `JMP` carries a 12-bit absolute
+address: **4096 instructions = 8 KB program max**. Comfortably
+fits ~80 typical compliance tests (~50--100 insn each) in one
+program. `BRANCH_ON` carries an 8-bit **signed PC-relative
+offset** (±128 instructions) --- intentionally narrow: branches
+are local loops (address compare, DAA polling, retry on
+mismatch), not cross-program jumps. Long-distance control flow
+goes through `JMP`. If a future workload ever needs more than
+4096-instruction absolute range, a v1 "jumbo-address" opcode is
+a follow-up, not a v0 blocker. The fixed-width encoding is part
+of the wire-format stability contract --- changing it counts as
+a bytecode-version bump, same as reordering opcodes.
+
+#### Engine flags
+
+The engine maintains a small set of **implicit flags** that are
+set by certain opcodes and read by `BRANCH_ON cond`. Flags are
+deliberately implicit (no opcode reads or writes a named flag
+register) so that programs stay short: an `EMIT_BIT` followed by
+`BRANCH_ON MISMATCH` is two words, not four.
+
+**`MISMATCH_FLAG`** (the only flag in v0):
+
+| Aspect       | Definition                                                                                                                                                                       |
+|--------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Width        | 1 bit                                                                                                                                                                            |
+| Reset value  | 0 (cleared at program start / engine reset)                                                                                                                                      |
+| Set by       | `EMIT_BIT`, `EMIT_QUARTER`, `SAMPLE_BIT_ON_SCL`, `DRIVE_BIT_ON_SCL` whose `expect`/`mask` compare against the observed SDA value **fails**                                       |
+| Cleared by   | the same four opcodes when their compare **passes**                                                                                                                              |
+| Untouched by | every other opcode (`STRETCH_SCL`, `WAIT_*`, `SET_BUS_MODE`, `LOAD_TIMING`, `MARK`, `JMP`, `BRANCH_ON`, `HALT`) --- flag is **sticky** across non-expect ops                     |
+| Read by      | `BRANCH_ON MISMATCH` / `BRANCH_ON NOT_MISMATCH`                                                                                                                                  |
+
+Stickiness is the load-bearing property: it lets a program emit
+N bits and then branch once on "any of them failed", instead of
+having to bracket each emit with a clear. The "auto-clear on
+next passing compare" rule is what keeps the flag from going
+permanently stale: any successful expect resets it.
+
+v0 deliberately does **not** ship an explicit `MISMATCH_CLEAR`
+opcode; the one reserved opcode slot in §"ISA" (today held for
+`WAIT_ADDRESSED`) could be repurposed for it in v0.5 if a
+program ever needs to clear the flag without consuming a wire
+bit. One or the other --- not both, without an ISA-width bump.
+
+**`BRANCH_ON cond, offset`** condition codes:
+
+| code  | name           | v0   | semantics                                 |
+|-------|----------------|------|-------------------------------------------|
+| 0     | `ALWAYS`       | yes  | unconditional --- short relative jump     |
+| 1     | `NEVER`        | yes  | typed no-op / placeholder                 |
+| 2     | `MISMATCH`     | yes  | `MISMATCH_FLAG == 1`                      |
+| 3     | `NOT_MISMATCH` | yes  | `MISMATCH_FLAG == 0`                      |
+| 4     | `TIMEOUT`      | v0.5 | last `WAIT_*` opcode timed out            |
+| 5     | `NOT_TIMEOUT`  | v0.5 | last `WAIT_*` did not time out            |
+| 6     | `CAPTURE_LOW`  | v0.5 | last captured SDA bit was 0               |
+| 7     | `CAPTURE_HIGH` | v0.5 | last captured SDA bit was 1               |
+| 8--15 | reserved       | ---  | future: `REG_MASK_EQ`, `IBI_PENDING`, ... |
+
+Adding a v0.5 condition is **not** a wire-format break: existing
+programs that never emit those codes continue to assemble and
+execute unchanged. Reordering or repurposing a code already in
+use **is** a break --- same status as reordering opcodes.
+
+#### Target-side glitch and invalid-transfer injection
+
+Compliance testing requires deliberately ill-formed traffic ---
+fake Start edges, mid-bit SDA flips, ACK released a quarter too
+early, IBI requested at illegal moments, drop-out partway
+through DAA. None of these need a new opcode: they all fall out
+of the orthogonality between the role-agnostic primitives
+(`EMIT_BIT`, `EMIT_QUARTER`, `STRETCH_SCL` --- timed by the
+engine's local quarter clock) and the target-role helpers
+(`SAMPLE_BIT_ON_SCL`, `DRIVE_BIT_ON_SCL`, `WAIT_*` --- timed by
+externally observed SCL edges). A target program brackets a
+free-running glitch with `WAIT_*` sync points to anchor it to
+the controller's frame.
+
+Worked sketches:
+
+| Glitch                                       | Sequence sketch                                                                |
+|----------------------------------------------|--------------------------------------------------------------------------------|
+| SDA flip mid-bit during controller read      | `SAMPLE_BIT_ON_SCL` → `EMIT_QUARTER × k` (drive SDA opposite) → resume         |
+| ACK released too early / too late            | `WAIT_SCL_RELEASE` → `EMIT_QUARTER × k` shifting the release point             |
+| Fake Start / Stop edge while addressed       | `WAIT_*` → `EMIT_QUARTER × 2` (SDA edge while SCL high)                        |
+| IBI request at illegal moment                | `WAIT_STOP` → `EMIT_QUARTER × N` (pull SDA low between Stop and next Start)    |
+| Non-canonical SCL stretch                    | `STRETCH_SCL n` at an arbitrary point in the byte                              |
+| Bad T-bit / parity                           | `DRIVE_BIT_ON_SCL drive_sda=<wrong>` in place of the correct T-bit            |
+| DAA drop-out partway through                 | `DRIVE_BIT_ON_SCL` with `expect/mask` + `BRANCH_ON MISMATCH lost_arbitration` |
+
+The orthogonality fits a four-quadrant table:
+
+|                | engine-clocked (free-running)         | external-SCL-gated                |
+|----------------|---------------------------------------|-----------------------------------|
+| Sample only    | `EMIT_BIT` with `drive_sda=Hi-Z`      | `SAMPLE_BIT_ON_SCL`               |
+| Drive only     | `EMIT_BIT` with `capture=0`           | `DRIVE_BIT_ON_SCL` (no expect)    |
+| Drive + sample | `EMIT_BIT` full form                  | `DRIVE_BIT_ON_SCL` with `expect`  |
+| Per-quarter    | `EMIT_QUARTER`                        | `WAIT_*` then `EMIT_QUARTER`      |
+
+Two SDK-level lints follow from this and are documented here
+(enforced by the host compiler, not the engine):
+
+1. In target role, reject `EMIT_QUARTER` whose `drive_scl[2]`
+   bit is 1. The target never PP-drives SCL; the engine
+   ignores the bit but the SDK refuses to emit it so the
+   bytecode disassembly stays honest.
+2. In target role, warn (not reject) on `EMIT_BIT` used for
+   normal byte handling --- it free-runs off the engine
+   divider and will drift relative to the controller's SCL.
+   Canonical target byte handling uses `DRIVE_BIT_ON_SCL` /
+   `SAMPLE_BIT_ON_SCL`. `EMIT_BIT` in target programs is
+   reserved for deliberate asynchronous glitch injection.
 
 ### Canonical `EMIT_BIT` shape
 
@@ -344,14 +564,14 @@ bounded:
 **Frequency in a typical program.** A representative I3C SDR
 write of a 16-byte payload:
 
-| Phase                  | Count | Opcode used                  |
-|------------------------|------:|------------------------------|
-| Start                  |     1 | `EMIT_QUARTER` × ~3          |
-| Address + RnW + ACK    |     1 | `EMIT_BIT` × 9               |
-| `SET_BUS_MODE i3c-PP`  |     1 | `SET_BUS_MODE`               |
-| Data + T-bit × 16      |    16 | `EMIT_BIT` × 9 each (144)    |
-| `SET_BUS_MODE i3c-OD`  |     1 | `SET_BUS_MODE`               |
-| Stop                   |     1 | `EMIT_QUARTER` × ~3          |
+| Phase                 | Count | Opcode used               |
+|-----------------------|------:|---------------------------|
+| Start                 |     1 | `EMIT_QUARTER` × ~3       |
+| Address + RnW + ACK   |     1 | `EMIT_BIT` × 9            |
+| `SET_BUS_MODE i3c-PP` |     1 | `SET_BUS_MODE`            |
+| Data + T-bit × 16     |    16 | `EMIT_BIT` × 9 each (144) |
+| `SET_BUS_MODE i3c-OD` |     1 | `SET_BUS_MODE`            |
+| Stop                  |     1 | `EMIT_QUARTER` × ~3       |
 
 ≈ 156 instructions total, of which ~6 are `EMIT_QUARTER` ---
 about **4 %**. The rest is `EMIT_BIT`. That ratio is the design
@@ -375,25 +595,39 @@ BUS_MODE register (3 bits):
   mode[1:0] = active mode:   00 = i2c
                              01 = i3c-OD
                              10 = i3c-PP
-                             11 = reserved
+                             11 = hdr-ddr
   mode[2]   = SCL drive class: 0 = OD release on high half
                               (Hi-Z, external pull-up wins)
                              1 = PP active drive high on high half
 ```
 
-`mode[1:0]` selects which of the three `LOAD_TIMING` divider
-registers (`pp-freq`, `od-freq`, `i2c-freq`) feeds the quarter-bit
-timer for subsequent `EMIT_BIT`s. `mode[2]` directly controls
-SCL's high-half drive style during `EMIT_BIT`.
+`mode[1:0]` selects which of the four `LOAD_TIMING` divider
+registers (`pp-freq`, `od-freq`, `i2c-freq`, `hdr-ddr-freq`)
+feeds the quarter-bit timer for subsequent `EMIT_BIT`s.
+`mode[2]` directly controls SCL's high-half drive style during
+`EMIT_BIT`.
 
 For convenience, `SET_BUS_MODE` accepts a named symbol that the
 encoder maps to the right `mode[2:0]` combination:
 
-| Symbol      | mode[1:0] | mode[2] | SCL high-half        | Used for                                  |
-|---|---|---|---|---|
-| `i2c`       | 00        | 0       | OD release           | I2C transactions                          |
-| `i3c-OD`    | 01        | 0       | OD release           | I3C Start / address / ACK slot / CCC hdr  |
-| `i3c-PP`    | 10        | 1       | PP active high       | I3C SDR data + T-bit                      |
+| Symbol    | mode[1:0] | mode[2] | SCL high-half  | Used for                                 |
+|-----------|-----------|---------|----------------|------------------------------------------|
+| `i2c`     | 00        | 0       | OD release     | I2C transactions                         |
+| `i3c-OD`  | 01        | 0       | OD release     | I3C Start / address / ACK slot / CCC hdr |
+| `i3c-PP`  | 10        | 1       | PP active high | I3C SDR data + T-bit                     |
+| `hdr-ddr` | 11        | 1       | PP active high | I3C HDR-DDR data words (16b + parity)    |
+
+`hdr-ddr` uses the same push-pull SCL driver class as `i3c-PP`
+but reads its quarter-bit timing word from a separate
+`LOAD_TIMING reg=11` slot (`hdr-ddr-freq`) so that HDR-DDR's
+higher bit rate does not require reloading `pp-freq` whenever a
+program toggles between SDR data phases and HDR-DDR data words.
+HDR-DDR data words themselves (16 bits + parity + CRC-5
+framing) are still expressed as **compile-time-unrolled**
+`EMIT_BIT` / `EMIT_QUARTER` sequences emitted by the SDK ---
+no new opcode is needed for HDR-DDR. Programs that never use
+HDR-DDR never load `hdr-ddr-freq`. HDR-TSP / HDR-TSL remain
+explicitly out of scope (require analog PHY --- see §"Problem").
 
 A typical I3C SDR write frame becomes:
 
@@ -409,6 +643,20 @@ HALT
 
 Three to four `SET_BUS_MODE`s per frame. Negligible memory cost;
 huge disassembly-readability win.
+
+**Target-role usage.** `BUS_MODE` still selects the active
+timing-divider register (so `STRETCH_SCL` durations and any
+`SAMPLE_BIT_ON_SCL` timeout are interpreted in the correct
+quarter-bit unit) and still gates SDA's OD-vs-PP class via the
+SDK's `drive_sda` choices, but `mode[2]` (SCL high-half drive
+class) is **ignored** in target role: the target never drives
+SCL high. The legal target modes are `i2c` and `i3c-OD`; the
+SDK rejects `i3c-PP` and `hdr-ddr` in target context because
+their `mode[2]=1` would request SCL push-pull, which a target
+cannot do. Receiving HDR-DDR data as a target is still
+possible: it is built from `SAMPLE_BIT_ON_SCL` /
+`DRIVE_BIT_ON_SCL` sequences clocked by the external SCL, with
+the `i3c-OD` bus mode active for divider-unit purposes.
 
 #### Why SDA does *not* live in `BUS_MODE`
 
@@ -466,13 +714,13 @@ drive[0] = drive_enable    0 = total Hi-Z, ignore bit_value
 Four useful combinations (apply to SDA in `EMIT_BIT`; apply to
 either SDA or SCL in `EMIT_QUARTER`):
 
-| `drive_high` | `bit_value` | `drive_enable` | Effect                      | Used for                            |
-|---|---|---|---|---|
-| 0            | 0           | 1              | pull low (NMOS on)          | I2C/I3C "0"                         |
-| 0            | 1           | 1              | release (Hi-Z, pull-up wins)| I2C/I3C OD "1"                      |
-| 1            | 0           | 1              | drive low (push-pull)       | I3C PP "0"                          |
-| 1            | 1           | 1              | drive high (push-pull)      | I3C PP "1"                          |
-| -            | -           | 0              | total Hi-Z                  | reads, target idle, bus hand-off    |
+| `drive_high` | `bit_value` | `drive_enable` | Effect                       | Used for                         |
+|--------------|-------------|----------------|------------------------------|----------------------------------|
+| 0            | 0           | 1              | pull low (NMOS on)           | I2C/I3C "0"                      |
+| 0            | 1           | 1              | release (Hi-Z, pull-up wins) | I2C/I3C OD "1"                   |
+| 1            | 0           | 1              | drive low (push-pull)        | I3C PP "0"                       |
+| 1            | 1           | 1              | drive high (push-pull)       | I3C PP "1"                       |
+| -            | -           | 0              | total Hi-Z                   | reads, target idle, bus hand-off |
 
 The engine has **no knowledge** of which mode applies where. The
 Scheme SDK encodes the OD-vs-PP choice for **SDA** in the
@@ -520,14 +768,14 @@ that emits 8 bits in one fetch. **We don't.** Reason number one is
 that a "byte" on the wire is **9 bits, not 8**, and the 9th bit is
 structurally different from the first 8:
 
-| Phase                                      | Bits | 9th bit             |
-|---|---|---|
-| I3C SDR controller-write data              | 9    | T-bit (PP, driven)  |
-| I3C SDR controller-read data               | 9    | T-bit (controller-driven ACK-of-continue / NAK-to-end) |
-| I3C SDR / I2C address byte                 | 9    | ACK (target, OD)    |
-| I2C data byte (write)                      | 9    | ACK (target, OD)    |
-| I2C data byte (read)                       | 9    | ACK/NAK (controller, OD) |
-| CCC code byte                              | 9    | T-bit / parity      |
+| Phase                         | Bits | 9th bit                                                |
+|-------------------------------|------|--------------------------------------------------------|
+| I3C SDR controller-write data | 9    | T-bit (PP, driven)                                     |
+| I3C SDR controller-read data  | 9    | T-bit (controller-driven ACK-of-continue / NAK-to-end) |
+| I3C SDR / I2C address byte    | 9    | ACK (target, OD)                                       |
+| I2C data byte (write)         | 9    | ACK (target, OD)                                       |
+| I2C data byte (read)          | 9    | ACK/NAK (controller, OD)                               |
+| CCC code byte                 | 9    | T-bit / parity                                         |
 
 The 9th bit always:
 
@@ -586,10 +834,10 @@ make `EMIT_BIT` equally wrong? Shouldn't we drop to
 **Answer: no, and the asymmetry is precisely what saves
 `EMIT_BIT`.**
 
-| Container       | Substructure              | Substructure uniform in normal operation? | Escape hatch for non-uniform case |
-|-----------------|---------------------------|-------------------------------------------|-----------------------------------|
-| Byte (9 bits)   | 8 data + 1 ACK/T-bit      | **No** --- 9th bit always has a different driver, OD/PP class, and `expect`. | --- (no opcode could carry it) |
-| Bit (4 quarters)| canonical SCL + SDA hold  | **Yes** --- canonical Q0--Q3 shape applies to every normal bit. | `EMIT_QUARTER` for glitches and sub-bit shaping. |
+| Container        | Substructure             | Substructure uniform in normal operation?                                    | Escape hatch for non-uniform case                |
+|------------------|--------------------------|------------------------------------------------------------------------------|--------------------------------------------------|
+| Byte (9 bits)    | 8 data + 1 ACK/T-bit     | **No** --- 9th bit always has a different driver, OD/PP class, and `expect`. | --- (no opcode could carry it)                   |
+| Bit (4 quarters) | canonical SCL + SDA hold | **Yes** --- canonical Q0--Q3 shape applies to every normal bit.              | `EMIT_QUARTER` for glitches and sub-bit shaping. |
 
 The byte's substructure is *structurally non-uniform*; the bit's
 substructure is *structurally uniform* in normal operation. The
@@ -622,28 +870,174 @@ wasted memory.
 
 ### Reserved for v0.5 (do not implement yet)
 
-- `LOAD_REG reg, value`, `BRANCH_ON_CAPTURED_MASK reg, mask, addr`
-  --- needed for runtime reactions (DAA arbitration where we react
-  to PID bits as they come in). Defer until pure capture +
-  host-post-process proves insufficient.
+Opcodes (held in the single free opcode-field slot --- see
+§"ISA"):
+
+- `WAIT_ADDRESSED my_addr, timeout` --- target-side accelerator:
+  wait for Start, sample 8 bits, compare against `my_addr`, ACK
+  on hit / release on miss --- all in hardware. Defer until the
+  SDK-level expansion (`WAIT_START` + 8 × `SAMPLE_BIT_ON_SCL` +
+  host-compiled compare + conditional `DRIVE_BIT_ON_SCL`) proves
+  too slow for I3C SDR target emulation at full rate.
+- `MISMATCH_CLEAR` --- explicitly clear `MISMATCH_FLAG` without
+  consuming a wire bit. If ever needed, it repurposes the
+  `WAIT_ADDRESSED` slot above (one or the other, not both ---
+  the 4-bit opcode field is full otherwise).
 - `CAPTURE_RUN n into addr` --- pure listening for `n` quarters,
-  no drive, no expect. Defer until loop-based capture shows
-  measurable timing jitter.
+  no drive, no expect. Would require another opcode slot;
+  defer until loop-based capture shows measurable timing
+  jitter.
 - `CALL / RET` --- defer; inline SDK macros at compile time.
+
+`BRANCH_ON` condition codes (held in the 12 free `cond_code`
+slots --- see §"Engine flags"):
+
+- `TIMEOUT` / `NOT_TIMEOUT` (codes 4, 5) --- branch on whether
+  the previous `WAIT_*` opcode timed out. Needs a `TIMEOUT_FLAG`
+  setter/clearer entry under "Engine flags".
+- `CAPTURE_LOW` / `CAPTURE_HIGH` (codes 6, 7) --- branch on the
+  bit most recently written to the result ring. Subsumes the
+  "react to PID bits during DAA arbitration" use case originally
+  reserved as `BRANCH_ON_CAPTURED_MASK`. Adding multi-bit mask
+  compare is a future `REG_MASK_EQ` condition (code 8+), backed
+  by a small register file in the engine.
+- `IBI_PENDING` and friends --- bus-state observations the
+  engine already tracks for `WAIT_SDA_LOW` / `WAIT_START`.
+
+Adding a v0.5 condition code or a v0.5 opcode in a reserved slot
+is **not** a wire-format break; reordering or repurposing one
+already used **is**.
+
+### Example: I2C write-one-byte in moleasm
+
+The full ISA is small enough that a real transaction fits in
+one screen of disassembly. The example below is the canonical
+shape the encoder / disassembler emits ("moleasm"); locking
+the syntax down here keeps tooling honest.
+
+**moleasm conventions** (locked):
+
+- One instruction per line; `;;` introduces a line comment.
+- Opcode mnemonics in upper case, operands in lower case.
+- Named symbols for drive fields (`od_low`, `od_release`,
+  `pp_high`, `hiz`), bus modes (`i2c`, `i3c-OD`, `i3c-PP`,
+  `hdr-ddr`), and `BRANCH_ON` condition codes (`ALWAYS`,
+  `MISMATCH`, ...) --- never raw bit values.
+- `EMIT_BIT` / `EMIT_QUARTER` / `SAMPLE_BIT_ON_SCL` /
+  `DRIVE_BIT_ON_SCL` operands written
+  `sda=<drive> expect=<0|1|X> mask=<0|1> capture=<0|1>`, with
+  the defaults `expect=X` (don't-care), `mask=0`, `capture=0`
+  omitted when unset.
+- Branch targets are labels (`name:`); the assembler resolves
+  them to absolute 12-bit addresses (`JMP`) or signed 8-bit
+  PC-relative offsets (`BRANCH_ON`) per opcode.
+
+I2C write of byte `0xAB` to 7-bit address `0x50` (address byte
+on the wire = `(0x50 << 1) | 0 = 0xA0`, MSB first, R/W = 0):
+
+```moleasm
+;; I2C write-one-byte: addr 0x50, data 0xAB
+
+        LOAD_TIMING   i2c_freq, 250          ; ~100 kHz @ 100 MHz fabric (illustrative)
+        SET_BUS_MODE  i2c                    ; SCL+SDA both OD-release on high half
+
+        ;; -- Start condition: SDA falling while SCL high --
+        EMIT_QUARTER  sda=od_release scl=od_release    ; Q0: idle bus
+        EMIT_QUARTER  sda=od_low     scl=od_release    ; Q1: SDA pulled low (Start edge)
+        EMIT_QUARTER  sda=od_low     scl=od_low        ; Q2: SCL goes low
+
+        ;; -- Address byte 0xA0 = 1010_0000 (MSB first) + R/W=0 --
+        EMIT_BIT      sda=od_release         ; bit 7 = 1
+        EMIT_BIT      sda=od_low             ; bit 6 = 0
+        EMIT_BIT      sda=od_release         ; bit 5 = 1
+        EMIT_BIT      sda=od_low             ; bit 4 = 0
+        EMIT_BIT      sda=od_low             ; bit 3 = 0
+        EMIT_BIT      sda=od_low             ; bit 2 = 0
+        EMIT_BIT      sda=od_low             ; bit 1 = 0
+        EMIT_BIT      sda=od_low             ; bit 0 = R/W = 0 (write)
+
+        ;; -- ACK slot: release SDA, expect target to pull low --
+        EMIT_BIT      sda=hiz expect=0 mask=1 capture=1
+        BRANCH_ON     MISMATCH, nak          ; PC-relative, ±128 insn
+
+        ;; -- Data byte 0xAB = 1010_1011 --
+        EMIT_BIT      sda=od_release         ; bit 7 = 1
+        EMIT_BIT      sda=od_low             ; bit 6 = 0
+        EMIT_BIT      sda=od_release         ; bit 5 = 1
+        EMIT_BIT      sda=od_low             ; bit 4 = 0
+        EMIT_BIT      sda=od_release         ; bit 3 = 1
+        EMIT_BIT      sda=od_low             ; bit 2 = 0
+        EMIT_BIT      sda=od_release         ; bit 1 = 1
+        EMIT_BIT      sda=od_release         ; bit 0 = 1
+
+        ;; -- ACK slot --
+        EMIT_BIT      sda=hiz expect=0 mask=1 capture=1
+        BRANCH_ON     MISMATCH, nak
+
+        ;; -- Stop condition: SDA rising while SCL high --
+        EMIT_QUARTER  sda=od_low     scl=od_low        ; Q0: both low
+        EMIT_QUARTER  sda=od_low     scl=od_release    ; Q1: SCL goes high
+        EMIT_QUARTER  sda=od_release scl=od_release    ; Q2: SDA goes high (Stop edge)
+
+        MARK          label=ok
+        HALT          status=0
+
+nak:    MARK          label=nak
+        HALT          status=1
+```
+
+Observations:
+
+- The whole transaction is **31 instructions = 62 bytes** of
+  bytecode. A 256-byte payload extrapolates linearly to ~280
+  instructions, well inside the 4096-instruction `JMP` range
+  and a tiny fraction of one SPRAM bank.
+- Eight address bits and eight data bits are literal
+  `EMIT_BIT`s --- this is what justifies `EMIT_BIT` being the
+  dominant opcode (see §"Why not `EMIT_QUARTER`-only?": if a
+  future program is dominated by `EMIT_QUARTER`, the ISA is
+  wrong).
+- Start and Stop are 3 × `EMIT_QUARTER` each --- the canonical
+  SDA-edge-while-SCL-high shapes. No special opcode for them;
+  they're an SDK macro expanding to these three quarters.
+- ACK handling uses `expect=0 mask=1 capture=1`: the bit is
+  written to the result ring **and** compared, with mismatch
+  routed via `BRANCH_ON` to an error label. This is the
+  canonical I2C / I3C-OD ACK pattern; the SDK exposes it as
+  `(i2c/ack-slot)`.
+- `MARK` tags the OK / NAK paths so the host result decoder
+  distinguishes them without parsing bytecode addresses.
+
+The same transaction at the SDK level (six lines of Scheme,
+compiling to the 31 wire instructions above):
+
+```scheme
+(define (i2c/write-byte addr byte)
+  (i2c/start)
+  (i2c/emit-byte (logior (ash addr 1) 0))   ; addr + RnW=0
+  (i2c/ack-slot)                            ; halts on NAK
+  (i2c/emit-byte byte)
+  (i2c/ack-slot)
+  (i2c/stop)
+  (halt 'ok))
+```
+
+The disassembly is the auditable, diff-able truth; the Scheme
+is the readable surface.
 
 ### Why this fits in iCE40 UP5K (5280 LUTs)
 
-| Block | LUT estimate |
-|---|---|
-| Quarter-bit FSM + timing dividers | ~250 |
-| 11-opcode decoder + dispatch | ~160 |
-| PC + JMP / branch logic | ~120 |
-| Expect comparator + capture path | ~250 |
-| Result ring controller | ~250 |
-| UART RX/TX + framing | ~300 |
-| SPRAM interface | ~200 |
-| Misc (timestamps, reset, status LEDs) | ~280 |
-| **Total** | **~1800** |
+| Block                                 | LUT estimate |
+|---------------------------------------|--------------|
+| Quarter-bit FSM + timing dividers     | ~250         |
+| 15-opcode decoder + dispatch          | ~160         |
+| PC + JMP / branch logic               | ~120         |
+| Expect comparator + capture path      | ~250         |
+| Result ring controller                | ~250         |
+| UART RX/TX + framing                  | ~300         |
+| SPRAM interface                       | ~200         |
+| Misc (timestamps, reset, status LEDs) | ~280         |
+| **Total**                             | **~1800**    |
 
 Leaves ~3400 LUTs free for headroom, second engine instance, or
 debug instrumentation. SPRAM (1 Mbit = 128 KB) holds the bytecode
@@ -769,6 +1163,15 @@ Same target-role plumbing, dressed up:
       (else   (i3c/target/respond-nack)))))
 ```
 
+`i3c/target/wait-for-addressed` expands to a `WAIT_START`
+followed by `SAMPLE_BIT_ON_SCL × 8` (7 address bits + RnW),
+a host-compiled address-compare, and a conditional
+`DRIVE_BIT_ON_SCL` ACK / NAK; `i3c/target/read-byte` is
+`SAMPLE_BIT_ON_SCL × 8` plus a controller-driven T-bit sample;
+`i3c/target/respond-bytes` is `DRIVE_BIT_ON_SCL × 9 × N`. Every
+target macro is built on the four target-role opcodes; the
+engine itself stays protocol-agnostic.
+
 Ship as `i3c-peripheral-emulators` SDK alongside the compliance
 suite. Catalog grows organically: TMP108, INA4230, BQ40Z50, the
 fuel-gauge and charger catalog we already use in pico-de-gallo, etc.
@@ -814,11 +1217,11 @@ trace.
 
 ## Hardware tiers
 
-| SKU | FPGA | I3C ceiling | I2C | HDR-DDR | Form factor | Target price |
-|---|---|---|---|---|---|---|
-| **Mole Verde** (pocket) | iCE40 UP5K-SG48 | 12 MHz SDR | all modes | no | icebreaker today; USB-stick PCB later | $299 |
-| **Mole Rojo** (bench) | ECP5-45F-CABGA381 | 25 MHz | all modes | yes | small custom PCB | $599 |
-| **Mole Negro** (future) | TBD (CertusPro-NX class) | per spec | all modes | yes + HDR-T | rack-friendly | premium |
+| SKU                     | FPGA                     | I3C ceiling | I2C       | HDR-DDR     | Form factor                           | Target price |
+|-------------------------|--------------------------|-------------|-----------|-------------|---------------------------------------|--------------|
+| **Mole Verde** (pocket) | iCE40 UP5K-SG48          | 12 MHz SDR  | all modes | no          | icebreaker today; USB-stick PCB later | $299         |
+| **Mole Rojo** (bench)   | ECP5-45F-CABGA381        | 25 MHz      | all modes | yes         | small custom PCB                      | $599         |
+| **Mole Negro** (future) | TBD (CertusPro-NX class) | per spec    | all modes | yes + HDR-T | rack-friendly                         | premium      |
 
 Both tiers share: Scheme SDK, bytecode format, ISA, error-injection
 model, peripheral emulation library, transport protocol.
@@ -890,9 +1293,11 @@ substitute for the formal CTS lab.
 
 ### v0 --- pocket prototype on icebreaker (no Pico, no flash, no PCB)
 
-- **Phase 0 --- ISA + compiler skeleton**: finalize the 11-opcode ISA
-  encoding. Write a host-side bytecode encoder in Rust. Hand-assemble
-  one tiny test program. Validate the encoding by simulation.
+- **Phase 0 --- ISA + compiler skeleton**: finalize the 15-opcode ISA
+  encoding (controller-role + target-role + control flow). Write a
+  host-side bytecode encoder in Rust. Hand-assemble one tiny
+  controller test program *and* one tiny target test program.
+  Validate the encoding by simulation.
 - **Phase 1 --- bit engine in HDL**: SpinalHDL or Amaranth. Implement
   the engine + UART RX/TX + SPRAM controller. Self-test by emitting a
   blinking-LED pattern from a hand-assembled program loaded over UART.
@@ -906,7 +1311,9 @@ substitute for the formal CTS lab.
 - **Phase 4 --- DAA + CCC coverage**: full CCC catalog, DAA edge
   cases. Compliance-style test catalog begins here.
 - **Phase 5 --- target role + peripheral emulation**: implement
-  `i3c/target/*` in the SDK. Build emulator for one well-known
+  `i3c/target/*` in the SDK as macros over the Phase-0 target-role
+  opcodes (`WAIT_START`, `WAIT_STOP`, `SAMPLE_BIT_ON_SCL`,
+  `DRIVE_BIT_ON_SCL`). Build emulator for one well-known
   peripheral (e.g., TMP108). Validate the rig as a virtual sensor
   against an MCXA controller.
 - **Phase 6 --- error injection**: compile-time PRNG-driven
@@ -957,11 +1364,11 @@ musical measure --- literally describes a quarter-bit timing engine),
 
 ### Pricing
 
-| SKU | Price | Anchor | Margin posture |
-|---|---|---|---|
-| Mole Verde | $299 | vs. $30 hobbyist FPGA boards | 8--12× BoM markup; software/SDK carries the price |
-| Mole Rojo | $599 | vs. SuperMITT $995 (-40 %) | 5--7× BoM markup; healthy room for distributor channel |
-| Mole Negro | TBD | premium tier, post-product-market-fit | --- |
+| SKU        | Price | Anchor                                | Margin posture                                         |
+|------------|-------|---------------------------------------|--------------------------------------------------------|
+| Mole Verde | $299  | vs. $30 hobbyist FPGA boards          | 8--12× BoM markup; software/SDK carries the price      |
+| Mole Rojo  | $599  | vs. SuperMITT $995 (-40 %)            | 5--7× BoM markup; healthy room for distributor channel |
+| Mole Negro | TBD   | premium tier, post-product-market-fit | ---                                                    |
 
 **BoM estimates (small-volume direct)**:
 
