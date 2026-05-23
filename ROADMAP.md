@@ -26,7 +26,7 @@ already on the icebreaker).
 The architecture is a **bit-stream + Scheme SDK** design:
 
 - **FPGA hosts a tiny, protocol-agnostic bit-cycle engine** ("Layer 0"):
-  ~15 opcodes, ~1800 LUTs, no knowledge of I2C / I3C, just drives
+  ~12 opcodes, ~1700 LUTs, no knowledge of I2C / I3C, just drives
   quarter-bit patterns on SDA/SCL and compares them against expects.
 - **Host hosts a Scheme SDK** ("Layer 1"): all of I2C and I3C lives
   here as Scheme source --- spec-compliant primitives (`sdr/write-byte`,
@@ -45,8 +45,9 @@ Five consequences worth naming explicitly:
    namespaces over a shared set of primitives. In target role the
    engine does **not** drive SCL --- it samples SCL edges driven
    by the external controller and reacts via dedicated
-   `WAIT_START`, `WAIT_STOP`, `SAMPLE_BIT_ON_SCL`, and
-   `DRIVE_BIT_ON_SCL` opcodes (see ISA section).
+   `WAIT_ON START_SEEN`, `WAIT_ON STOP_SEEN`,
+   `SAMPLE_BIT_ON_SCL`, and `DRIVE_BIT_ON_SCL` opcodes (see
+   ISA section).
 3. **Error injection is exact-by-construction.** All PRNG lives in the
    host compiler, never in the engine. `error_ratio = 0` produces a
    bytecode with zero errors written into it; reproducibility is
@@ -84,7 +85,7 @@ Five consequences worth naming explicitly:
    |    v                                            |
    | Bit-cycle engine (Layer 0)                      |
    |   - quarter-bit FSM                             |
-   |   - 15-opcode decoder                           |
+   |   - 12-opcode decoder                           |
    |   - expect comparator                           |
    |   - capture path                                |
    |   - timing dividers (pp/od/i2c-freq)            |
@@ -151,25 +152,30 @@ Every protocol-aware shortcut we resist baking into the engine is a
 place where "fix a spec bug" becomes "edit Scheme" instead of
 "respin the bitstream". This is the architectural win.
 
-### ISA (v0 --- 15 opcodes, 16-bit encoding)
+### ISA (v0 --- 12 opcodes, 16-bit encoding)
 
 The ISA splits into four buckets:
 
 - **Wire engine --- role-agnostic primitives** (`EMIT_BIT`,
-  `EMIT_QUARTER`, `STRETCH_SCL`): valid in both controller and
-  target roles. Timed by the engine's local quarter-bit clock
-  (free-running from `LOAD_TIMING`). In controller role they
-  produce normal SDA/SCL waveforms; in target role they are the
-  primitives for **asynchronous SDA glitch injection and
-  invalid-transfer fuzzing**, bracketed by `WAIT_*` sync points.
-  See "Target-side glitch and invalid-transfer injection" below.
-- **Wire engine --- controller-role helpers** (`WAIT_SCL_RELEASE`,
-  `WAIT_SDA_LOW`, `SET_BUS_MODE`): meaningful when the engine
-  generates SCL.
-- **Wire engine --- target-role helpers** (`WAIT_START`,
-  `WAIT_STOP`, `SAMPLE_BIT_ON_SCL`, `DRIVE_BIT_ON_SCL`):
-  meaningful when an external controller generates SCL; gate on
-  observed SCL edges rather than the engine's local divider.
+  `EMIT_QUARTER`, `STRETCH_SCL`, `WAIT_ON`): valid in both
+  controller and target roles. `EMIT_BIT`/`EMIT_QUARTER`/
+  `STRETCH_SCL` are timed by the engine's local quarter-bit
+  clock (free-running from `LOAD_TIMING`); in target role they
+  are the primitives for **asynchronous SDA glitch injection
+  and invalid-transfer fuzzing**, bracketed by `WAIT_ON` sync
+  points. See "Target-side glitch and invalid-transfer
+  injection" below. `WAIT_ON` itself reads bus state / engine
+  flags and is the sole bus-event escape valve in either role.
+- **Wire engine --- controller-role helpers** (`SET_BUS_MODE`):
+  meaningful when the engine generates SCL. (The old
+  `WAIT_SCL_RELEASE` and `WAIT_SDA_LOW` are now `WAIT_ON
+  SCL_HIGH, t` / `WAIT_ON SDA_LOW, t`; see "Replacement
+  mapping" below.)
+- **Wire engine --- target-role helpers** (`SAMPLE_BIT_ON_SCL`,
+  `DRIVE_BIT_ON_SCL`): meaningful when an external controller
+  generates SCL; gate on observed SCL edges rather than the
+  engine's local divider. (The old `WAIT_START` and `WAIT_STOP`
+  are now `WAIT_ON START_SEEN, t` / `WAIT_ON STOP_SEEN, t`.)
 - **Control flow / bookkeeping** (`JMP`, `BRANCH_ON`, `HALT`,
   `MARK`, `LOAD_TIMING`): role-agnostic.
 
@@ -206,13 +212,21 @@ Wire engine --- role-agnostic primitives:
   fuzzing. In target role: the canonical clock-stretching
   primitive; the target actively pulls SCL low for `n` quarters
   even though it does not generate the nominal SCL waveform.
+- `WAIT_ON cond, timeout` --- block program execution until
+  `cond` becomes true, or until `timeout` quarter-bit ticks
+  elapse. `cond` is a 4-bit condition code drawn from the same
+  shared namespace as `BRANCH_ON cond` (see "Engine flags --
+  unified condition codes" below); `timeout` is 8-bit unsigned
+  quarters with `timeout = 0` meaning **wait forever** (no
+  timeout). After return, `TIMEOUT_FLAG` is set iff the wait
+  fell out because the timeout expired (cond did not fire);
+  `BRANCH_ON TIMEOUT, ...` reads it. This single opcode replaces
+  the v0 `WAIT_START` / `WAIT_STOP` / `WAIT_SCL_RELEASE` /
+  `WAIT_SDA_LOW` quartet --- same way `BRANCH_ON` replaced the
+  per-condition branch quartet.
 
 Wire engine --- controller-role helpers:
 
-- `WAIT_SCL_RELEASE timeout` --- async escape: pause the quarter
-  clock until SCL goes high externally, or timeout fires.
-- `WAIT_SDA_LOW timeout` --- needed for IBI / Hot-Join (target
-  signals by pulling SDA between Stop and next Start).
 - `SET_BUS_MODE mode` --- set the engine's `BUS_MODE` register
   (3 bits: active timing divider {`i2c`, `i3c-OD`, `i3c-PP`,
   `hdr-ddr`} plus SCL high-half drive class {OD-release,
@@ -225,14 +239,6 @@ Wire engine --- target-role helpers (engine does **not** drive
 SCL; it samples SCL edges generated by the external controller
 and reacts):
 
-- `WAIT_START timeout` --- block until a Start condition (SDA
-  falling while SCL is high) or Repeated Start is observed on
-  the bus, or until `timeout` quarter-bit ticks elapse. The
-  target entry point: every target program begins with this
-  (or with `WAIT_ADDRESSED`, see "reserved opcode slot" below).
-- `WAIT_STOP timeout` --- block until a Stop condition (SDA
-  rising while SCL is high) is observed, or timeout. Used to
-  bound a target transaction.
 - `SAMPLE_BIT_ON_SCL expect mask capture_en` --- wait for the
   next SCL rising edge (driven externally), sample SDA at the
   canonical sample point in the high half, compare against
@@ -256,10 +262,15 @@ and reacts):
   also how the target paces the controller: pull SCL low before
   releasing SDA.
 
-The four target-role helpers carry the same quarter-bit timing
+The two target-role helpers carry the same quarter-bit timing
 alignment guarantees as `EMIT_BIT`; the difference is that the
 quarter clock is *gated by externally observed SCL edges* rather
 than free-running off the engine's divider.
+
+The canonical target entry point is `WAIT_ON START_SEEN, 0`
+(wait forever for the next Start edge); the canonical target
+exit point is `WAIT_ON STOP_SEEN, t` with whatever bound is
+appropriate to the test.
 
 Control flow:
 
@@ -267,13 +278,11 @@ Control flow:
   instruction address (4096-instruction range, whole program).
 - `BRANCH_ON cond, offset` --- conditional jump to a
   PC-relative signed 8-bit offset (±128 instructions, local
-  loops). `cond` is a 4-bit condition code selecting which
-  engine state to test. The unified branch opcode replaces all
-  per-condition branch instructions: a new condition is a new
-  `cond_code` value, not a new opcode. v0 implements four
-  condition codes (`ALWAYS`, `NEVER`, `MISMATCH`,
-  `NOT_MISMATCH`); see "Engine flags" and "Reserved for v0.5"
-  below for the rest.
+  loops). `cond` is a 4-bit condition code drawn from the
+  shared namespace described under "Engine flags --- unified
+  condition codes" below. The unified branch opcode replaces
+  all per-condition branch instructions: a new condition is a
+  new `cond_code` value, not a new opcode.
 - `HALT status` --- end of program, status code returned to host.
 
 Bookkeeping:
@@ -285,14 +294,49 @@ Bookkeeping:
   Pure --- does not change the active mode (use `SET_BUS_MODE`
   for that).
 
-Total: 15 opcodes. The 4-bit opcode field holds 16 codes; one
-slot is intentionally reserved for a future `WAIT_ADDRESSED`
-target-side accelerator (address compare in hardware) if the
-SDK-level loop of `SAMPLE_BIT_ON_SCL × 7 + compare + ACK` proves
-too slow for real targets at I3C SDR rates. A future
-`MISMATCH_CLEAR` opcode (see "Engine flags") would, if needed,
-repurpose this same slot --- one or the other, not both.
+Total: 12 opcodes. The 4-bit opcode field holds 16 codes; four
+slots are intentionally reserved. The first reserved slot is
+earmarked for a future `WAIT_ADDRESSED` target-side accelerator
+(address compare in hardware) if the SDK-level loop of
+`SAMPLE_BIT_ON_SCL × 7 + compare + ACK` proves too slow at I3C
+SDR rates. A future `MISMATCH_CLEAR` opcode (see "Engine
+flags") would, if needed, take a second slot. Two more remain
+genuinely uncommitted --- ample headroom for `FLAG_CLEAR`,
+`CAPTURE_RUN`, or whatever v0.5 demands.
 
+#### Replacement mapping (WAIT_* → WAIT_ON)
+
+The v0 ISA used four dedicated wait opcodes. They are now
+spellings of `WAIT_ON cond, timeout`:
+
+| Old opcode             | New equivalent                |
+|------------------------|-------------------------------|
+| `WAIT_START t`         | `WAIT_ON START_SEEN, t`       |
+| `WAIT_STOP t`          | `WAIT_ON STOP_SEEN, t`        |
+| `WAIT_SCL_RELEASE t`   | `WAIT_ON SCL_HIGH, t`         |
+| `WAIT_SDA_LOW t`       | `WAIT_ON SDA_LOW, t`          |
+
+There is no v0 bytecode in the wild yet, so no compatibility
+shim is needed; this is a clean break before Phase 0.
+
+The `timeout` operand is **8-bit unsigned (1..255 quarters)**
+with two special values: `timeout = 0` means "wait forever"
+(no timeout) and `timeout = 0xFF` is the maximum bounded wait
+(255 quarters). Long waits use a loop idiom built from
+`BRANCH_ON TIMEOUT, offset`:
+
+```moleasm
+big_wait:
+        WAIT_ON     SCL_HIGH, 0xFF
+        BRANCH_ON   TIMEOUT, big_wait    ; loop while still waiting
+        ;; SCL went high (or program proceeds when cond fires)
+```
+
+At a 12.5 MHz quarter clock (~80 ns), 255 quarters ≈ 20 µs ---
+comfortably above bus-event latencies for tight loops. The
+branch costs 4 quarters per iteration → ~1.5 % time-resolution
+loss in the long-wait idiom. Acceptable; the explicit loop also
+makes the long-wait behavior auditable in disassembly.
 #### Encoding width --- 16-bit fixed
 
 The instruction word is **16 bits fixed-width**. Per-opcode field
@@ -302,11 +346,8 @@ budget (post-SCL-move, locked):
 EMIT_BIT           [15:12]op [11:9]drive_sda [8]expect [7]mask [6]capture [5:0]reserved
 EMIT_QUARTER       [15:12]op [11:9]drive_sda [8:6]drive_scl [5]expect [4]mask [3]capture [2:0]reserved
 STRETCH_SCL        [15:12]op [11:0]n_quarters
-WAIT_SCL_RELEASE   [15:12]op [11:0]timeout_quarters
-WAIT_SDA_LOW       [15:12]op [11:0]timeout_quarters
+WAIT_ON            [15:12]op [11:8]cond_code [7:0]timeout_quarters_unsigned
 SET_BUS_MODE       [15:12]op [11:9]mode [8:0]reserved
-WAIT_START         [15:12]op [11:0]timeout_quarters
-WAIT_STOP          [15:12]op [11:0]timeout_quarters
 SAMPLE_BIT_ON_SCL  [15:12]op [11]expect [10]mask [9]capture [8:0]reserved
 DRIVE_BIT_ON_SCL   [15:12]op [11:9]drive_sda [8]expect [7]mask [6]capture [5:0]reserved
 JMP                [15:12]op [11:0]addr
@@ -316,17 +357,18 @@ MARK               [15:12]op [11:4]label [3:0]reserved
 LOAD_TIMING        [15:12]op [11:10]reg [9:0]divider_word
 ```
 
-The four target-role opcodes reuse field shapes already present
-in the controller-role opcodes: `WAIT_START` / `WAIT_STOP` mirror
-`WAIT_SCL_RELEASE` / `WAIT_SDA_LOW` (12-bit timeout in quarters);
-`SAMPLE_BIT_ON_SCL` mirrors the `expect`/`mask`/`capture` triple
-from `EMIT_BIT`; `DRIVE_BIT_ON_SCL` reuses the 3-bit `drive_sda`
-field **and** the `expect`/`mask`/`capture` triple (the simul-
-taneous drive + sample is what enables I3C DAA arbitration ---
-see "Engine flags" and the target-side examples). No new
-decoder shapes, just two new control verbs
-(wait-for-edge vs. wait-for-divider) and the inversion of who
-sources SCL.
+`WAIT_ON` and `BRANCH_ON` share field shape (`[11:8]cond_code
+[7:0]operand`); only the operand semantics differ ---
+unsigned-timeout vs signed-PC-offset. The shared `cond_code`
+namespace is described under "Engine flags --- unified
+condition codes" below. `SAMPLE_BIT_ON_SCL` mirrors the
+`expect`/`mask`/`capture` triple from `EMIT_BIT`;
+`DRIVE_BIT_ON_SCL` reuses the 3-bit `drive_sda` field **and**
+the `expect`/`mask`/`capture` triple (the simultaneous drive +
+sample is what enables I3C DAA arbitration --- see "Engine
+flags" and the target-side examples). No new decoder shapes,
+just two control verbs (wait-for-condition vs.
+wait-for-divider) and the inversion of who sources SCL.
 
 Two smaller widths were considered and rejected:
 
@@ -367,13 +409,16 @@ a bytecode-version bump, same as reordering opcodes.
 
 #### Engine flags
 
-The engine maintains a small set of **implicit flags** that are
-set by certain opcodes and read by `BRANCH_ON cond`. Flags are
-deliberately implicit (no opcode reads or writes a named flag
-register) so that programs stay short: an `EMIT_BIT` followed by
-`BRANCH_ON MISMATCH` is two words, not four.
+#### Engine flags
 
-**`MISMATCH_FLAG`** (the only flag in v0):
+The engine maintains a small set of **implicit flags** that are
+set by certain opcodes and read by `BRANCH_ON cond` /
+`WAIT_ON cond`. Flags are deliberately implicit (no opcode
+reads or writes a named flag register) so that programs stay
+short: an `EMIT_BIT` followed by `BRANCH_ON MISMATCH` is two
+words, not four.
+
+**`MISMATCH_FLAG`**:
 
 | Aspect       | Definition                                                                                                                                                                       |
 |--------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
@@ -381,8 +426,8 @@ register) so that programs stay short: an `EMIT_BIT` followed by
 | Reset value  | 0 (cleared at program start / engine reset)                                                                                                                                      |
 | Set by       | `EMIT_BIT`, `EMIT_QUARTER`, `SAMPLE_BIT_ON_SCL`, `DRIVE_BIT_ON_SCL` whose `expect`/`mask` compare against the observed SDA value **fails**                                       |
 | Cleared by   | the same four opcodes when their compare **passes**                                                                                                                              |
-| Untouched by | every other opcode (`STRETCH_SCL`, `WAIT_*`, `SET_BUS_MODE`, `LOAD_TIMING`, `MARK`, `JMP`, `BRANCH_ON`, `HALT`) --- flag is **sticky** across non-expect ops                     |
-| Read by      | `BRANCH_ON MISMATCH` / `BRANCH_ON NOT_MISMATCH`                                                                                                                                  |
+| Untouched by | every other opcode (`STRETCH_SCL`, `WAIT_ON`, `SET_BUS_MODE`, `LOAD_TIMING`, `MARK`, `JMP`, `BRANCH_ON`, `HALT`) --- flag is **sticky** across non-expect ops                    |
+| Read by      | `BRANCH_ON MISMATCH` / `BRANCH_ON NOT_MISMATCH` (and, technically, `WAIT_ON MISMATCH` --- legal but SDK warns; the engine cannot *make* this flag change without wire ops)       |
 
 Stickiness is the load-bearing property: it lets a program emit
 N bits and then branch once on "any of them failed", instead of
@@ -391,24 +436,89 @@ next passing compare" rule is what keeps the flag from going
 permanently stale: any successful expect resets it.
 
 v0 deliberately does **not** ship an explicit `MISMATCH_CLEAR`
-opcode; the one reserved opcode slot in §"ISA" (today held for
-`WAIT_ADDRESSED`) could be repurposed for it in v0.5 if a
+opcode; one of the four reserved opcode slots in §"ISA" (first
+earmarked for `WAIT_ADDRESSED`) could host it in v0.5 if a
 program ever needs to clear the flag without consuming a wire
-bit. One or the other --- not both, without an ISA-width bump.
+bit.
 
-**`BRANCH_ON cond, offset`** condition codes:
+**`TIMEOUT_FLAG`**:
 
-| code  | name           | v0   | semantics                                 |
-|-------|----------------|------|-------------------------------------------|
-| 0     | `ALWAYS`       | yes  | unconditional --- short relative jump     |
-| 1     | `NEVER`        | yes  | typed no-op / placeholder                 |
-| 2     | `MISMATCH`     | yes  | `MISMATCH_FLAG == 1`                      |
-| 3     | `NOT_MISMATCH` | yes  | `MISMATCH_FLAG == 0`                      |
-| 4     | `TIMEOUT`      | v0.5 | last `WAIT_*` opcode timed out            |
-| 5     | `NOT_TIMEOUT`  | v0.5 | last `WAIT_*` did not time out            |
-| 6     | `CAPTURE_LOW`  | v0.5 | last captured SDA bit was 0               |
-| 7     | `CAPTURE_HIGH` | v0.5 | last captured SDA bit was 1               |
-| 8--15 | reserved       | ---  | future: `REG_MASK_EQ`, `IBI_PENDING`, ... |
+| Aspect       | Definition                                                                                                                                                                       |
+|--------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Width        | 1 bit                                                                                                                                                                            |
+| Reset value  | 0 (cleared at program start / engine reset)                                                                                                                                      |
+| Set by       | `WAIT_ON` whose `timeout` quarters elapse before `cond` becomes true                                                                                                             |
+| Cleared by   | `WAIT_ON` whose `cond` becomes true within the timeout (or whose `timeout = 0` and `cond` eventually fires)                                                                      |
+| Untouched by | every other opcode --- flag is **sticky** across non-`WAIT_ON` ops                                                                                                               |
+| Read by      | `BRANCH_ON TIMEOUT` / `BRANCH_ON NOT_TIMEOUT`                                                                                                                                    |
+
+The "long timeout via loop" idiom relies on `TIMEOUT_FLAG`:
+
+```moleasm
+big_wait:
+        WAIT_ON     SCL_HIGH, 0xFF       ; 255 quarters max
+        BRANCH_ON   TIMEOUT, big_wait    ; cycle while still waiting
+        ;; fall through when SCL went high
+```
+
+**`START_FLAG`** and **`STOP_FLAG`** (Start / Stop edge
+detectors):
+
+| Aspect       | Definition                                                                                                                                                                       |
+|--------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Width        | 1 bit each                                                                                                                                                                       |
+| Reset value  | 0 (cleared at program start / engine reset)                                                                                                                                      |
+| Set by       | the corresponding edge detector firing **while armed** (i.e. while a `WAIT_ON START_SEEN, ...` / `WAIT_ON STOP_SEEN, ...` is in progress)                                        |
+| Cleared by   | entering the next `WAIT_ON` on that same edge condition (re-arm clears stale state)                                                                                              |
+| Untouched by | every other opcode                                                                                                                                                               |
+| Read by      | `WAIT_ON START_SEEN` / `WAIT_ON STOP_SEEN` exit condition; `BRANCH_ON START_SEEN` / `BRANCH_ON STOP_SEEN` for "did the last waited-for edge happen?" queries                     |
+
+Re-arm-on-entry (vs. always-latching) is the deliberate choice:
+edges that fire while no `WAIT_ON` is active are dropped. This
+matches the `MISMATCH_FLAG` philosophy --- flags reflect
+*recent intentional observations*, not eternal history. A
+future `FLAG_CLEAR` opcode (reserved-slot candidate) could lift
+this restriction if a use case ever demands it.
+
+**Level conditions** (`SCL_HIGH`, `SDA_LOW`) are **not**
+flags: they are combinational reads of the registered SDA / SCL
+sample line. There is no state to clear; the wire either is or
+isn't in the requested level at any given cycle. `WAIT_ON
+SCL_HIGH, t` returns the instant SCL is sampled high (which may
+be cycle zero if it's already high); `BRANCH_ON SCL_HIGH,
+offset` branches iff SCL is sampled high *now*.
+
+#### Unified condition codes (shared by `BRANCH_ON` and `WAIT_ON`)
+
+The 4-bit `cond_code` field is a single shared namespace. Both
+opcodes read it through the same decoder. Semantics depend on
+the cond's class (level / edge / flag / constant) more than on
+the opcode:
+
+| code  | name           | class    | v0   | meaning                                                            |
+|-------|----------------|----------|------|--------------------------------------------------------------------|
+| 0     | `ALWAYS`       | constant | yes  | true. `BRANCH_ON`: short jump. `WAIT_ON`: sleep for `timeout` Q    |
+| 1     | `NEVER`        | constant | yes  | false. `BRANCH_ON`: typed no-op. `WAIT_ON`: always times out       |
+| 2     | `MISMATCH`     | flag     | yes  | `MISMATCH_FLAG == 1`                                               |
+| 3     | `NOT_MISMATCH` | flag     | yes  | `MISMATCH_FLAG == 0`                                               |
+| 4     | `SCL_HIGH`     | level    | yes  | SCL line currently sampled high                                    |
+| 5     | `SDA_LOW`      | level    | yes  | SDA line currently sampled low                                     |
+| 6     | `START_SEEN`   | edge     | yes  | Start (or repeated Start) edge observed since `WAIT_ON` armed      |
+| 7     | `STOP_SEEN`    | edge     | yes  | Stop edge observed since `WAIT_ON` armed                           |
+| 8     | `TIMEOUT`      | flag     | yes  | last `WAIT_ON` timed out                                           |
+| 9     | `NOT_TIMEOUT`  | flag     | yes  | last `WAIT_ON` did not time out                                    |
+| 10    | `CAPTURE_LOW`  | flag     | v0.5 | last captured SDA bit was 0                                        |
+| 11    | `CAPTURE_HIGH` | flag     | v0.5 | last captured SDA bit was 1                                        |
+| 12-15 | reserved       | ---      | ---  | future: `IBI_PENDING`, `REG_MASK_EQ`, ...                          |
+
+Cond-by-opcode quick reference:
+
+| Class    | `BRANCH_ON cond, offset`                  | `WAIT_ON cond, timeout`                                              |
+|----------|-------------------------------------------|----------------------------------------------------------------------|
+| constant | unconditional / no-op                     | sleep / forced timeout                                               |
+| flag     | branch if flag set                        | block until flag set --- usually useless; SDK warns on `MISMATCH`    |
+| level    | branch if line currently at that level    | block until line at that level (or timeout)                          |
+| edge     | branch if edge flag set                   | re-arm detector, block until edge or timeout                         |
 
 Adding a v0.5 condition is **not** a wire-format break: existing
 programs that never emit those codes continue to assemble and
@@ -424,19 +534,19 @@ through DAA. None of these need a new opcode: they all fall out
 of the orthogonality between the role-agnostic primitives
 (`EMIT_BIT`, `EMIT_QUARTER`, `STRETCH_SCL` --- timed by the
 engine's local quarter clock) and the target-role helpers
-(`SAMPLE_BIT_ON_SCL`, `DRIVE_BIT_ON_SCL`, `WAIT_*` --- timed by
-externally observed SCL edges). A target program brackets a
-free-running glitch with `WAIT_*` sync points to anchor it to
-the controller's frame.
+(`SAMPLE_BIT_ON_SCL`, `DRIVE_BIT_ON_SCL`, `WAIT_ON` --- timed
+by externally observed SCL edges or sticky engine flags). A
+target program brackets a free-running glitch with `WAIT_ON`
+sync points to anchor it to the controller's frame.
 
 Worked sketches:
 
 | Glitch                                       | Sequence sketch                                                                |
 |----------------------------------------------|--------------------------------------------------------------------------------|
 | SDA flip mid-bit during controller read      | `SAMPLE_BIT_ON_SCL` → `EMIT_QUARTER × k` (drive SDA opposite) → resume         |
-| ACK released too early / too late            | `WAIT_SCL_RELEASE` → `EMIT_QUARTER × k` shifting the release point             |
-| Fake Start / Stop edge while addressed       | `WAIT_*` → `EMIT_QUARTER × 2` (SDA edge while SCL high)                        |
-| IBI request at illegal moment                | `WAIT_STOP` → `EMIT_QUARTER × N` (pull SDA low between Stop and next Start)    |
+| ACK released too early / too late            | `WAIT_ON SCL_HIGH, t` → `EMIT_QUARTER × k` shifting the release point          |
+| Fake Start / Stop edge while addressed       | `WAIT_ON ...` → `EMIT_QUARTER × 2` (SDA edge while SCL high)                   |
+| IBI request at illegal moment                | `WAIT_ON STOP_SEEN, t` → `EMIT_QUARTER × N` (pull SDA low between Stop/Start)  |
 | Non-canonical SCL stretch                    | `STRETCH_SCL n` at an arbitrary point in the byte                              |
 | Bad T-bit / parity                           | `DRIVE_BIT_ON_SCL drive_sda=<wrong>` in place of the correct T-bit            |
 | DAA drop-out partway through                 | `DRIVE_BIT_ON_SCL` with `expect/mask` + `BRANCH_ON MISMATCH lost_arbitration` |
@@ -448,7 +558,7 @@ The orthogonality fits a four-quadrant table:
 | Sample only    | `EMIT_BIT` with `drive_sda=Hi-Z`      | `SAMPLE_BIT_ON_SCL`               |
 | Drive only     | `EMIT_BIT` with `capture=0`           | `DRIVE_BIT_ON_SCL` (no expect)    |
 | Drive + sample | `EMIT_BIT` full form                  | `DRIVE_BIT_ON_SCL` with `expect`  |
-| Per-quarter    | `EMIT_QUARTER`                        | `WAIT_*` then `EMIT_QUARTER`      |
+| Per-quarter    | `EMIT_QUARTER`                        | `WAIT_ON ... ` then `EMIT_QUARTER`|
 
 Two SDK-level lints follow from this and are documented here
 (enforced by the host compiler, not the engine):
@@ -870,39 +980,49 @@ wasted memory.
 
 ### Reserved for v0.5 (do not implement yet)
 
-Opcodes (held in the single free opcode-field slot --- see
+Opcodes (held in the four free opcode-field slots --- see
 §"ISA"):
 
 - `WAIT_ADDRESSED my_addr, timeout` --- target-side accelerator:
   wait for Start, sample 8 bits, compare against `my_addr`, ACK
   on hit / release on miss --- all in hardware. Defer until the
-  SDK-level expansion (`WAIT_START` + 8 × `SAMPLE_BIT_ON_SCL` +
-  host-compiled compare + conditional `DRIVE_BIT_ON_SCL`) proves
-  too slow for I3C SDR target emulation at full rate.
+  SDK-level expansion (`WAIT_ON START_SEEN, t` + 8 ×
+  `SAMPLE_BIT_ON_SCL` + host-compiled compare + conditional
+  `DRIVE_BIT_ON_SCL`) proves too slow for I3C SDR target
+  emulation at full rate.
 - `MISMATCH_CLEAR` --- explicitly clear `MISMATCH_FLAG` without
-  consuming a wire bit. If ever needed, it repurposes the
-  `WAIT_ADDRESSED` slot above (one or the other, not both ---
-  the 4-bit opcode field is full otherwise).
+  consuming a wire bit. Defer until a real program needs to
+  branch on stale-vs-fresh mismatch state.
+- `FLAG_CLEAR mask` --- broader cousin: clear any subset of the
+  sticky engine flags (`MISMATCH_FLAG`, `TIMEOUT_FLAG`,
+  `START_FLAG`, `STOP_FLAG`) in one shot. Would subsume
+  `MISMATCH_CLEAR`; defer until at least one use case wants
+  multi-flag reset.
 - `CAPTURE_RUN n into addr` --- pure listening for `n` quarters,
-  no drive, no expect. Would require another opcode slot;
-  defer until loop-based capture shows measurable timing
-  jitter.
+  no drive, no expect. Defer until loop-based capture shows
+  measurable timing jitter.
 - `CALL / RET` --- defer; inline SDK macros at compile time.
 
-`BRANCH_ON` condition codes (held in the 12 free `cond_code`
-slots --- see §"Engine flags"):
+The opcode field has **four free slots**, so two or three of
+the above can land in v0.5 without an ISA-width bump.
 
-- `TIMEOUT` / `NOT_TIMEOUT` (codes 4, 5) --- branch on whether
-  the previous `WAIT_*` opcode timed out. Needs a `TIMEOUT_FLAG`
-  setter/clearer entry under "Engine flags".
-- `CAPTURE_LOW` / `CAPTURE_HIGH` (codes 6, 7) --- branch on the
-  bit most recently written to the result ring. Subsumes the
-  "react to PID bits during DAA arbitration" use case originally
-  reserved as `BRANCH_ON_CAPTURED_MASK`. Adding multi-bit mask
-  compare is a future `REG_MASK_EQ` condition (code 8+), backed
-  by a small register file in the engine.
+`BRANCH_ON` / `WAIT_ON` condition codes (held in the 6 free
+`cond_code` slots --- codes 10..15 ---  see §"Engine flags ---
+unified condition codes"):
+
+- `CAPTURE_LOW` / `CAPTURE_HIGH` (codes 10, 11) --- branch on
+  the bit most recently written to the result ring. Subsumes
+  the "react to PID bits during DAA arbitration" use case
+  originally reserved as `BRANCH_ON_CAPTURED_MASK`. Adding
+  multi-bit mask compare is a future `REG_MASK_EQ` condition
+  (code 12+), backed by a small register file in the engine.
 - `IBI_PENDING` and friends --- bus-state observations the
-  engine already tracks for `WAIT_SDA_LOW` / `WAIT_START`.
+  engine already tracks for the `WAIT_ON SDA_LOW, t` /
+  `WAIT_ON START_SEEN, t` paths.
+
+Note: `TIMEOUT` / `NOT_TIMEOUT` (codes 8, 9) graduated from
+v0.5 to v0 as part of `WAIT_ON` unification --- they are the
+load-bearing conditions for the long-wait loop idiom.
 
 Adding a v0.5 condition code or a v0.5 opcode in a reserved slot
 is **not** a wire-format break; reordering or repurposing one
@@ -1030,7 +1150,7 @@ is the readable surface.
 | Block                                 | LUT estimate |
 |---------------------------------------|--------------|
 | Quarter-bit FSM + timing dividers     | ~250         |
-| 15-opcode decoder + dispatch          | ~160         |
+| 12-opcode decoder + dispatch          | ~150         |
 | PC + JMP / branch logic               | ~120         |
 | Expect comparator + capture path      | ~250         |
 | Result ring controller                | ~250         |
@@ -1163,14 +1283,15 @@ Same target-role plumbing, dressed up:
       (else   (i3c/target/respond-nack)))))
 ```
 
-`i3c/target/wait-for-addressed` expands to a `WAIT_START`
-followed by `SAMPLE_BIT_ON_SCL × 8` (7 address bits + RnW),
-a host-compiled address-compare, and a conditional
-`DRIVE_BIT_ON_SCL` ACK / NAK; `i3c/target/read-byte` is
-`SAMPLE_BIT_ON_SCL × 8` plus a controller-driven T-bit sample;
-`i3c/target/respond-bytes` is `DRIVE_BIT_ON_SCL × 9 × N`. Every
-target macro is built on the four target-role opcodes; the
-engine itself stays protocol-agnostic.
+`i3c/target/wait-for-addressed` expands to a
+`WAIT_ON START_SEEN, t` followed by `SAMPLE_BIT_ON_SCL × 8`
+(7 address bits + RnW), a host-compiled address-compare, and a
+conditional `DRIVE_BIT_ON_SCL` ACK / NAK; `i3c/target/read-byte`
+is `SAMPLE_BIT_ON_SCL × 8` plus a controller-driven T-bit
+sample; `i3c/target/respond-bytes` is `DRIVE_BIT_ON_SCL × 9 ×
+N`. Every target macro is built on `WAIT_ON` plus the two
+target-role helpers; the engine itself stays
+protocol-agnostic.
 
 Ship as `i3c-peripheral-emulators` SDK alongside the compliance
 suite. Catalog grows organically: TMP108, INA4230, BQ40Z50, the
@@ -1278,10 +1399,11 @@ substitute for the formal CTS lab.
 3. **iCE40 UP5K fabric speed**: 60--80 MHz routable in practice;
    12 MHz I3C SDR ceiling is comfortable but HDR-DDR is out of reach
    on this tier. Mitigation: HDR-DDR is bench-tier only by design.
-4. **Async clock-stretching semantics**: `WAIT_SCL_RELEASE` is the
-   one "real-time, not pre-computed" operation in the engine. Need
-   to specify cleanly how it composes with the quarter-bit clock
-   (recommend: pauses the divider, resumes from the same quarter).
+4. **Async clock-stretching semantics**: `WAIT_ON SCL_HIGH, t`
+   is the one "real-time, not pre-computed" operation in the
+   engine. Need to specify cleanly how it composes with the
+   quarter-bit clock (recommend: pauses the divider, resumes
+   from the same quarter).
 5. **Result ring overflow on long runs**: 128 KB SPRAM caps single-
    run capture. Mitigation: stream results out over UART concurrently
    with execution, or split long tests into chunks.
@@ -1293,7 +1415,7 @@ substitute for the formal CTS lab.
 
 ### v0 --- pocket prototype on icebreaker (no Pico, no flash, no PCB)
 
-- **Phase 0 --- ISA + compiler skeleton**: finalize the 15-opcode ISA
+- **Phase 0 --- ISA + compiler skeleton**: finalize the 12-opcode ISA
   encoding (controller-role + target-role + control flow). Write a
   host-side bytecode encoder in Rust. Hand-assemble one tiny
   controller test program *and* one tiny target test program.
@@ -1312,7 +1434,7 @@ substitute for the formal CTS lab.
   cases. Compliance-style test catalog begins here.
 - **Phase 5 --- target role + peripheral emulation**: implement
   `i3c/target/*` in the SDK as macros over the Phase-0 target-role
-  opcodes (`WAIT_START`, `WAIT_STOP`, `SAMPLE_BIT_ON_SCL`,
+  opcodes (`WAIT_ON START_SEEN`, `WAIT_ON STOP_SEEN`, `SAMPLE_BIT_ON_SCL`,
   `DRIVE_BIT_ON_SCL`). Build emulator for one well-known
   peripheral (e.g., TMP108). Validate the rig as a virtual sensor
   against an MCXA controller.
