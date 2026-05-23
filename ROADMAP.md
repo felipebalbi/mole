@@ -185,28 +185,34 @@ a given test runs the engine in one role or the other.
 
 Wire engine --- role-agnostic primitives:
 
-- `EMIT_BIT drive_sda expect capture_en` --- one full bit (4
-  quarters at canonical positions). `drive_sda` = **3-bit** drive
-  field for SDA only (see "Drive field" below); `expect` = compare
-  value + mask; `capture_en` = also write sampled SDA to result
-  ring. **SCL is not in the bitstream** --- in controller role
-  the engine generates the canonical SCL waveform per the current
-  `BUS_MODE` register (see "Bus mode register" below); in target
-  role the engine releases SCL (Hi-Z) and the external controller
-  drives it. Timed by the engine's local quarter clock either
-  way. In target role, useful for **asynchronous** SDA glitch /
-  fake-byte injection only --- canonical target byte handling
-  uses `DRIVE_BIT_ON_SCL` / `SAMPLE_BIT_ON_SCL` because they
-  slave to external SCL edges and do not drift.
-- `EMIT_QUARTER drive_sda drive_scl expect capture_en` --- single
-  quarter (glitches, sub-bit shaping). Carries **both** SDA and
-  SCL 3-bit drive fields --- full per-quarter override of the
-  engine's canonical waveform. This is the *only* opcode that
-  encodes SCL in the bitstream. In target role, the
-  `drive_scl[2]` (drive_high) bit **must be 0** --- the target
-  may pull SCL low (stretching / fuzzing) but never PP-drives
-  SCL high. The SDK enforces this; the engine ignores
-  `drive_scl[2]` when the role bit is target.
+- `EMIT_BIT tx_symbol expect mask capture_en` --- one full bit
+  (4 quarters at canonical positions). `tx_symbol` = **2-bit**
+  symbolic drive value (see "TX symbol" below: `dominant`,
+  `recessive`, `hiz`, or reserved). The engine maps the symbol
+  to the actual SDA electrical state through the active
+  `BUS_MODE` register: in OD modes `dominant` is OD-low and
+  `recessive` is OD-release; in PP modes `dominant` is PP-drive-0
+  and `recessive` is PP-drive-1; `hiz` is always driver-disabled.
+  `expect`/`mask` = compare value + mask against the sampled SDA
+  symbol; `capture_en` = also write sampled SDA to result ring.
+  **SCL is not in the bitstream** --- in controller role the
+  engine generates the canonical SCL waveform per `BUS_MODE`;
+  in target role the engine releases SCL and the external
+  controller drives it. Timed by the engine's local quarter
+  clock either way. In target role, useful for **asynchronous**
+  SDA glitch / fake-byte injection only --- canonical target
+  byte handling uses `DRIVE_BIT_ON_SCL` / `SAMPLE_BIT_ON_SCL`
+  because they slave to external SCL edges and do not drift.
+- `EMIT_QUARTER sda_symbol scl_symbol expect mask capture_en` ---
+  single quarter (glitches, sub-bit shaping). Carries **both**
+  SDA and SCL 2-bit `tx_symbol` fields --- full per-quarter
+  override of the engine's canonical waveform. This is the
+  *only* opcode that encodes SCL in the bitstream. In target
+  role, `scl_symbol = recessive` is **rejected by the SDK** when
+  the active `BUS_MODE` is a PP class --- in that case
+  `recessive` would request PP-drive-1 of SCL, which a target
+  must never do. `scl_symbol = dominant` (pull SCL low) and
+  `scl_symbol = hiz` are always legal in target role.
 - `STRETCH_SCL n` --- hold SCL low for `n` quarters. In
   controller role: measured bus-hold / forced stretching for
   fuzzing. In target role: the canonical clock-stretching
@@ -245,17 +251,19 @@ and reacts):
   `expect`/`mask`, and optionally write the sampled value to
   the result ring. Target-side read of one bit (address bit,
   controller-write data bit, controller-driven ACK / NAK).
-- `DRIVE_BIT_ON_SCL drive_sda expect mask capture_en` --- on
+- `DRIVE_BIT_ON_SCL tx_symbol expect mask capture_en` --- on
   the next SCL falling edge (driven externally), drive SDA per
-  `drive_sda` (3-bit drive field, same encoding as `EMIT_BIT`)
-  until the following SCL falling edge --- i.e. for one full
-  controller-clocked bit. **Concurrently**, on the SCL rising
-  edge inside that bit cell, sample SDA at the canonical sample
-  point, compare against `expect`/`mask`, and optionally write
-  to the result ring. The simultaneous drive + sample is what
-  enables **I3C DAA arbitration**: the target drives its PID
-  bit and observes the wire; if it drives 1 but the wire shows
-  0, another target won this bit and `MISMATCH_FLAG` is set so
+  `tx_symbol` (2-bit symbolic drive, same encoding as
+  `EMIT_BIT`) until the following SCL falling edge --- i.e. for
+  one full controller-clocked bit. **Concurrently**, on the SCL
+  rising edge inside that bit cell, sample SDA at the canonical
+  sample point, compare against `expect`/`mask`, and optionally
+  write to the result ring. The simultaneous drive + sample is
+  what enables **I3C DAA arbitration**: the target drives its
+  PID bit (`tx_symbol = dominant` for a `0`, `recessive` for a
+  `1`) with `expect = tx_symbol mask = 1`; if it drives
+  `recessive` but the wire reads `dominant`, another target
+  pulled the line low and `MISMATCH_FLAG` is set so
   `BRANCH_ON MISMATCH` can route to a drop-out handler.
   Target-side write of one bit (ACK, T-bit, controller-read
   data, IBI payload bit). Combined with `STRETCH_SCL`, this is
@@ -343,13 +351,13 @@ The instruction word is **16 bits fixed-width**. Per-opcode field
 budget (post-SCL-move, locked):
 
 ```
-EMIT_BIT           [15:12]op [11:9]drive_sda [8]expect [7]mask [6]capture [5:0]reserved
-EMIT_QUARTER       [15:12]op [11:9]drive_sda [8:6]drive_scl [5]expect [4]mask [3]capture [2:0]reserved
+EMIT_BIT           [15:12]op [11:10]tx_symbol [9:3]reserved [2]expect [1]mask [0]capture
+EMIT_QUARTER       [15:12]op [11:10]sda_symbol [9:8]scl_symbol [7:3]reserved [2]expect [1]mask [0]capture
 STRETCH_SCL        [15:12]op [11:0]n_quarters
 WAIT_ON            [15:12]op [11:8]cond_code [7:0]timeout_quarters_unsigned
 SET_BUS_MODE       [15:12]op [11:9]mode [8:0]reserved
-SAMPLE_BIT_ON_SCL  [15:12]op [11]expect [10]mask [9]capture [8:0]reserved
-DRIVE_BIT_ON_SCL   [15:12]op [11:9]drive_sda [8]expect [7]mask [6]capture [5:0]reserved
+SAMPLE_BIT_ON_SCL  [15:12]op [11:3]reserved [2]expect [1]mask [0]capture
+DRIVE_BIT_ON_SCL   [15:12]op [11:10]tx_symbol [9:3]reserved [2]expect [1]mask [0]capture
 JMP                [15:12]op [11:0]addr
 BRANCH_ON          [15:12]op [11:8]cond_code [7:0]pc_rel_offset_signed
 HALT               [15:12]op [11:8]status [7:0]reserved
@@ -363,7 +371,7 @@ unsigned-timeout vs signed-PC-offset. The shared `cond_code`
 namespace is described under "Engine flags --- unified
 condition codes" below. `SAMPLE_BIT_ON_SCL` mirrors the
 `expect`/`mask`/`capture` triple from `EMIT_BIT`;
-`DRIVE_BIT_ON_SCL` reuses the 3-bit `drive_sda` field **and**
+`DRIVE_BIT_ON_SCL` reuses the 2-bit `tx_symbol` field **and**
 the `expect`/`mask`/`capture` triple (the simultaneous drive +
 sample is what enables I3C DAA arbitration --- see "Engine
 flags" and the target-side examples). No new decoder shapes,
@@ -548,14 +556,14 @@ Worked sketches:
 | Fake Start / Stop edge while addressed       | `WAIT_ON ...` → `EMIT_QUARTER × 2` (SDA edge while SCL high)                   |
 | IBI request at illegal moment                | `WAIT_ON STOP_SEEN, t` → `EMIT_QUARTER × N` (pull SDA low between Stop/Start)  |
 | Non-canonical SCL stretch                    | `STRETCH_SCL n` at an arbitrary point in the byte                              |
-| Bad T-bit / parity                           | `DRIVE_BIT_ON_SCL drive_sda=<wrong>` in place of the correct T-bit            |
+| Bad T-bit / parity                           | `DRIVE_BIT_ON_SCL tx_symbol=<wrong>` in place of the correct T-bit            |
 | DAA drop-out partway through                 | `DRIVE_BIT_ON_SCL` with `expect/mask` + `BRANCH_ON MISMATCH lost_arbitration` |
 
 The orthogonality fits a four-quadrant table:
 
 |                | engine-clocked (free-running)         | external-SCL-gated                |
 |----------------|---------------------------------------|-----------------------------------|
-| Sample only    | `EMIT_BIT` with `drive_sda=Hi-Z`      | `SAMPLE_BIT_ON_SCL`               |
+| Sample only    | `EMIT_BIT` with `tx_symbol=hiz`       | `SAMPLE_BIT_ON_SCL`               |
 | Drive only     | `EMIT_BIT` with `capture=0`           | `DRIVE_BIT_ON_SCL` (no expect)    |
 | Drive + sample | `EMIT_BIT` full form                  | `DRIVE_BIT_ON_SCL` with `expect`  |
 | Per-quarter    | `EMIT_QUARTER`                        | `WAIT_ON ... ` then `EMIT_QUARTER`|
@@ -563,10 +571,14 @@ The orthogonality fits a four-quadrant table:
 Two SDK-level lints follow from this and are documented here
 (enforced by the host compiler, not the engine):
 
-1. In target role, reject `EMIT_QUARTER` whose `drive_scl[2]`
-   bit is 1. The target never PP-drives SCL; the engine
-   ignores the bit but the SDK refuses to emit it so the
-   bytecode disassembly stays honest.
+1. In target role, reject `EMIT_QUARTER` whose `scl_symbol` is
+   `recessive` **and** the active `BUS_MODE` is a PP class
+   (`i3c-PP`, `hdr-ddr`) --- that would request PP-drive-1 of
+   SCL, which a target must never do. `scl_symbol = dominant`
+   (SCL pulled low: stretching, fuzzing) and `scl_symbol = hiz`
+   (SCL released, no drive) are always legal in target role.
+   The engine ignores any forbidden combination as a defense
+   in depth.
 2. In target role, warn (not reject) on `EMIT_BIT` used for
    normal byte handling --- it free-runs off the engine
    divider and will drift relative to the controller's SCL.
@@ -582,7 +594,7 @@ quarter-bit cycles, with a fixed canonical shape:
 ```
 Quarter:           Q0      Q1      Q2      Q3
 SCL:               low     low     high    high
-SDA:               <held at the specified bit_value throughout>
+SDA:               <held at the specified tx_symbol throughout>
 Sample point:                       ^        (target reads SDA mid-high)
 ```
 
@@ -593,8 +605,9 @@ Concretely:
   bit (Q0, Q1) and high for the second half (Q2, Q3); the
   "high" half is OD-release or PP-driven-high depending on the
   current `BUS_MODE` register.
-- SDA holds the specified `bit_value` across all 4 quarters,
-  driven per the `drive_sda` field.
+- SDA holds the specified bit value across all 4 quarters,
+  driven per the `tx_symbol` field (decoded against the active
+  `BUS_MODE`).
 - The receiving side samples SDA at the SCL rising edge (Q1→Q2);
   Mole's own capture, when enabled, samples in Q2 to align with
   that point.
@@ -621,13 +634,15 @@ compiles to a single 16-bit instruction:
 
 ```
 [15:12] opcode      = EMIT_BIT
-[11:9]  drive_sda   = (drive_high=1, bit_value=sda-value, drive_enable=1)
-[8:5]   expect+mask = (expect=sda-value, mask=1, ...)
-[4]     capture_en  = 0
-[3:0]   reserved    (~3 bits free for future expect/mask growth)
+[11:10] tx_symbol   = dominant (if sda-value=0) or recessive (if sda-value=1)
+[9:3]   reserved    (7 bits free for future expect/mask growth or raw_override)
+[2]     expect      = sda-value (compared after BUS_MODE symbol-decode)
+[1]     mask        = 1
+[0]     capture_en  = 0
 ```
 
-SCL is absent. The engine consults `BUS_MODE` and drives
+SCL is absent. The engine consults `BUS_MODE` to decide what
+`dominant`/`recessive` map to electrically, then drives
 `low / low / OD-release-or-PP-high / OD-release-or-PP-high`
 appropriately. Disassembly of a write frame reads as literal SDA
 data, not as clock-and-data.
@@ -720,12 +735,21 @@ feeds the quarter-bit timer for subsequent `EMIT_BIT`s.
 For convenience, `SET_BUS_MODE` accepts a named symbol that the
 encoder maps to the right `mode[2:0]` combination:
 
-| Symbol    | mode[1:0] | mode[2] | SCL high-half  | Used for                                 |
-|-----------|-----------|---------|----------------|------------------------------------------|
-| `i2c`     | 00        | 0       | OD release     | I2C transactions                         |
-| `i3c-OD`  | 01        | 0       | OD release     | I3C Start / address / ACK slot / CCC hdr |
-| `i3c-PP`  | 10        | 1       | PP active high | I3C SDR data + T-bit                     |
-| `hdr-ddr` | 11        | 1       | PP active high | I3C HDR-DDR data words (16b + parity)    |
+| Symbol    | mode[1:0] | mode[2] | SCL high-half  | `dominant` | `recessive` | Used for                                 |
+|-----------|-----------|---------|----------------|------------|-------------|------------------------------------------|
+| `i2c`     | 00        | 0       | OD release     | OD-low     | OD-release  | I2C transactions                         |
+| `i3c-OD`  | 01        | 0       | OD release     | OD-low     | OD-release  | I3C Start / address / ACK slot / CCC hdr |
+| `i3c-PP`  | 10        | 1       | PP active high | PP-drive-0 | PP-drive-1  | I3C SDR data + T-bit                     |
+| `hdr-ddr` | 11        | 1       | PP active high | PP-drive-0 | PP-drive-1  | I3C HDR-DDR data words (16b + parity)    |
+
+The two right-most columns are the **symbol-to-electrical
+decode** for every per-bit / per-quarter `tx_symbol` field in
+the bitstream (`hiz` is always driver-disabled regardless of
+`BUS_MODE`; the reserved fourth `tx_symbol` encoding is held
+for a future `raw_override` escape, see v0.5). In OD modes
+`recessive` and `hiz` are electrically indistinguishable (line
+floats high via the external pull-up); in PP modes `recessive`
+is an *active* logic 1 while `hiz` is genuine driver-off.
 
 `hdr-ddr` uses the same push-pull SCL driver class as `i3c-PP`
 but reads its quarter-bit timing word from a separate
@@ -757,13 +781,13 @@ huge disassembly-readability win.
 **Target-role usage.** `BUS_MODE` still selects the active
 timing-divider register (so `STRETCH_SCL` durations and any
 `SAMPLE_BIT_ON_SCL` timeout are interpreted in the correct
-quarter-bit unit) and still gates SDA's OD-vs-PP class via the
-SDK's `drive_sda` choices, but `mode[2]` (SCL high-half drive
-class) is **ignored** in target role: the target never drives
-SCL high. The legal target modes are `i2c` and `i3c-OD`; the
-SDK rejects `i3c-PP` and `hdr-ddr` in target context because
-their `mode[2]=1` would request SCL push-pull, which a target
-cannot do. Receiving HDR-DDR data as a target is still
+quarter-bit unit) and still picks the SDA electrical class via
+the symbol-decode table above, but `mode[2]` (SCL high-half
+drive class) is **ignored** in target role: the target never
+drives SCL high. The legal target modes are `i2c` and `i3c-OD`;
+the SDK rejects `i3c-PP` and `hdr-ddr` in target context
+because their `mode[2]=1` would request SCL push-pull, which a
+target cannot do. Receiving HDR-DDR data as a target is still
 possible: it is built from `SAMPLE_BIT_ON_SCL` /
 `DRIVE_BIT_ON_SCL` sequences clocked by the external SCL, with
 the `i3c-OD` bus mode active for divider-unit purposes.
@@ -772,104 +796,134 @@ the `i3c-OD` bus mode active for divider-unit purposes.
 
 Symmetry check: could `BUS_MODE` also dictate SDA drive style and
 shrink `EMIT_BIT` to a single bit (the SDA value)? No --- and the
-asymmetry is structural enough to write down:
+asymmetry is structural enough to write down.
 
-SDA drive style changes **inside** a wire byte:
+`BUS_MODE` owns the **mapping** (slow state: which electrical
+class do `dominant` / `recessive` decode to). The bitstream
+carries the **value** (fast data: is this particular bit a
+dominant, recessive, or hiz?). Lumping the value into the
+mapping turns every bit-level driver flip into a `SET_BUS_MODE`
+churn, defeating the point of having a per-bit field at all.
 
-- I3C address byte: 8 bits SDA-OD controller-driven, then 1 ACK
-  bit SDA-OD released so the target can drive --- driver flips
-  *inside* the byte.
-- I2C write data: 8 bits SDA-OD controller, then 1 ACK bit
-  SDA-OD released for target.
-- I2C read data: 8 bits SDA-OD target, then 1 ACK/NAK bit SDA-OD
-  controller.
+The asymmetry holds because the symbol value flips on a much
+finer cadence than the symbol mapping:
+
+- I3C address byte: 8 bits SDA controller-driven, then 1 ACK
+  bit SDA released so the target can drive --- the value flips
+  every bit, the mapping (`i3c-OD`) holds for the whole byte.
+- I2C write data: same story; OD mapping for 9 bits, value
+  flips per bit.
+- I2C read data: 8 bits SDA target, then 1 ACK/NAK bit SDA
+  controller --- again mapping is constant, value per bit.
 - I3C SDR data: 8 bits SDA-PP controller, then 1 T-bit SDA-PP
-  controller --- uniform driver, but the 9th's *value* is
-  parity, not data.
+  controller --- mapping (`i3c-PP`) constant, value (`dominant`
+  for 0, `recessive` for 1, optionally `hiz` for tri-state
+  fuzz) per bit.
 
-SDA drive style changes every 8 or 9 bits, sometimes mid-byte. A
-bus-mode register tracking this would have to become a per-byte
-state machine --- exactly the "protocol-aware shortcut" the
-ROADMAP explicitly rejects. SCL's drive style, by contrast,
-changes a handful of times per transaction, all at frame-phase
-boundaries.
+Bus-mode boundaries (where the mapping itself flips) happen a
+handful of times per transaction, all at frame-phase
+boundaries. The per-bit `tx_symbol` is fast data; the
+`BUS_MODE` register is slow state.
 
-The asymmetry: **SCL drive style is slow state; SDA drive style
-is fast data.** Slow state lives in `BUS_MODE`. Fast data lives
-in the bitstream.
+The asymmetry: **the symbol mapping is slow state; the symbol
+value is fast data.** Slow state lives in `BUS_MODE`. Fast
+data lives in the bitstream.
 
-### Drive field --- OD / PP / I2C as bitstream data
+### TX symbol --- bus-agnostic per-bit drive
 
-The `drive` field is a **3-bit per-line** encoding that selects
-open-drain, push-pull, or total Hi-Z for that line during its
-emit window. It appears in two places:
+Every per-bit / per-quarter drive field in the ISA is a 2-bit
+**`tx_symbol`** that names the *intent* of the drive rather
+than its electrical realization:
 
-- **`EMIT_BIT` carries one `drive_sda` field (3 bits).** SCL is
-  engine-generated from `BUS_MODE`; not in the bitstream.
-- **`EMIT_QUARTER` carries both `drive_sda` and `drive_scl` (6
-  bits total).** Per-quarter override of SCL is the whole point
-  of `EMIT_QUARTER` --- glitch injection, early/late SCL release,
+```
+tx_symbol[1:0]:
+  00 = dominant    actively pull the bus toward its dominant state
+  01 = recessive   release / drive toward the bus's recessive state
+  10 = hiz         driver disabled (true Hi-Z, no active drive)
+  11 = reserved    held for v0.5 raw_override escape hatch
+```
+
+The `BUS_MODE` register (see "Bus mode register" above) carries
+the symbol-to-electrical mapping. The engine has **zero
+knowledge** of which protocol applies; it just looks up the
+current `BUS_MODE` and asserts the corresponding pad-driver
+state. This is what makes the engine literally bus-agnostic:
+
+- **I2C / I3C-OD:** `dominant` → NMOS on (pull low),
+  `recessive` → NMOS off (release; external pull-up wins),
+  `hiz` → same electrical state as `recessive` (NMOS off).
+- **I3C-PP / HDR-DDR:** `dominant` → PP drive 0,
+  `recessive` → PP drive 1, `hiz` → driver disabled (no
+  active drive, distinct from `recessive`).
+- **Future:** SMBus / PMBus / LIN / 1-Wire all decode the same
+  three symbols against a different pad-driver class --- adding
+  them is a `BUS_MODE` table entry and an SDK macro layer, with
+  zero ISA churn. CAN reaches ISA-readiness today (dominant /
+  recessive map naturally onto CAN's bus levels); a differential
+  pad layer remains a separate hardware item.
+
+`tx_symbol` appears in three opcodes:
+
+- **`EMIT_BIT`** carries one `tx_symbol` (SDA only; SCL is
+  engine-generated from `BUS_MODE`).
+- **`EMIT_QUARTER`** carries **two** `tx_symbol`s
+  (`sda_symbol` + `scl_symbol`), enabling full per-quarter
+  override of SCL for glitches, early/late releases, and
   non-canonical bit shapes.
+- **`DRIVE_BIT_ON_SCL`** carries one `tx_symbol` (target-side
+  SDA drive while external controller clocks SCL).
 
-The per-line encoding:
+The Scheme SDK chooses `tx_symbol` per bit; protocol-specific
+namespaces wrap it with native phrasing (`(i2c/bit 0)`,
+`(i3c-pp/bit 1)`, etc.) but compile down to the same symbolic
+field. Worked SDK example:
 
-```
-drive[2] = drive_high      0 = Hi-Z when bit_value=1 (open-drain)
-                           1 = actively drive high   (push-pull)
-drive[1] = bit_value       0 = low, 1 = high
-drive[0] = drive_enable    0 = total Hi-Z, ignore bit_value
-                           1 = drive per bit_value
-```
-
-Four useful combinations (apply to SDA in `EMIT_BIT`; apply to
-either SDA or SCL in `EMIT_QUARTER`):
-
-| `drive_high` | `bit_value` | `drive_enable` | Effect                       | Used for                         |
-|--------------|-------------|----------------|------------------------------|----------------------------------|
-| 0            | 0           | 1              | pull low (NMOS on)           | I2C/I3C "0"                      |
-| 0            | 1           | 1              | release (Hi-Z, pull-up wins) | I2C/I3C OD "1"                   |
-| 1            | 0           | 1              | drive low (push-pull)        | I3C PP "0"                       |
-| 1            | 1           | 1              | drive high (push-pull)       | I3C PP "1"                       |
-| -            | -           | 0              | total Hi-Z                   | reads, target idle, bus hand-off |
-
-The engine has **no knowledge** of which mode applies where. The
-Scheme SDK encodes the OD-vs-PP choice for **SDA** in the
-bitstream itself by setting `drive_sda.drive_high` per bit; the
-SCL OD-vs-PP choice for the same phase is set once by the
-preceding `SET_BUS_MODE` (see "Bus mode register" above), since
-SCL drive style is per-phase, not per-bit:
-
-- `i2c/*` namespaces: `SET_BUS_MODE i2c`; SDA `drive_high = 0`.
+- `i2c/*` namespaces: `SET_BUS_MODE i2c`; `tx_symbol =
+  dominant` for "0", `recessive` for "1", `hiz` for read /
+  release.
 - `i3c/sdr/start`, `i3c/sdr/addr-byte`, `i3c/sdr/ack-slot`,
-  `ccc/header-broadcast`: `SET_BUS_MODE i3c-OD`; SDA
-  `drive_high = 0`.
-- `i3c/sdr/write-data`, `i3c/sdr/parity-t-bit`, post-ACK payload:
-  `SET_BUS_MODE i3c-PP`; SDA `drive_high = 1`.
-- The OD ⇄ PP transition is a `SET_BUS_MODE` (one instruction)
-  followed by `EMIT_BIT`s with the matching SDA `drive_high`.
+  `ccc/header-broadcast`: `SET_BUS_MODE i3c-OD`; same symbolic
+  encoding as I2C (only the SCL high-half class differs --- it
+  is still OD release).
+- `i3c/sdr/write-data`, `i3c/sdr/parity-t-bit`, post-ACK
+  payload: `SET_BUS_MODE i3c-PP`; `tx_symbol = dominant` for
+  PP "0", `recessive` for PP "1".
+- The OD ⇄ PP transition is a single `SET_BUS_MODE`. The
+  per-bit `tx_symbol` field does not change shape across the
+  transition --- only its electrical decode does. The SDK does
+  not have to rewrite the bit stream when the mapping flips.
 
-This is the same architectural premise that keeps `Start` and `Stop`
-out of the engine: the SDK is the spec, the engine is dumb wire.
+This is the same architectural premise that keeps `Start` and
+`Stop` out of the engine: the SDK is the spec, the engine is
+dumb wire.
 
 `LOAD_TIMING reg word` (already in the ISA) carries the
-frequency-per-mode choice: separate divider words for `pp-freq`,
-`od-freq`, `i2c-freq`. The SDK loads the right ones once at
-program start; `SET_BUS_MODE`'s `mode[1:0]` picks which divider
-is active.
+frequency-per-mode choice: separate divider words for
+`pp-freq`, `od-freq`, `i2c-freq`, `hdr-ddr-freq`. The SDK
+loads the right ones once at program start; `SET_BUS_MODE`'s
+`mode[1:0]` picks which divider is active.
 
-**Pad-level reality (iCE40 UP5K v0):** the SB_IO primitives are
-configured push-pull-capable from the start, with external pull-ups
-present so OD "1" still works. "PP high" then competes against the
-pull-up benignly (push-pull always wins). For v2 / PHY card, the
-PHY can additionally vary slew rate and VIO per phase --- that's a
+**Pad-level reality (iCE40 UP5K v0):** the SB_IO primitives
+are configured push-pull-capable from the start, with external
+pull-ups present so OD `recessive` still floats high. PP
+`recessive` then competes against the pull-up benignly
+(push-pull always wins). For v2 / PHY card, the PHY can
+additionally vary slew rate and VIO per phase --- that's a
 knob, not an architectural change.
 
-**Compliance bonus:** because the OD ⇄ PP seam is just where the
-SDK chose to flip `drive_high`, compliance tests can deliberately
-mis-time the seam (e.g., flip a bit early or late around the ACK
-slot) to fuzz controller / target implementations. Glitches inherit
-the same `drive` field via `EMIT_QUARTER`, so PP-high glitches onto
-what should be an OD release are first-class.
+**Compliance bonus:** because the OD ⇄ PP seam is just where
+the SDK chose to flip `BUS_MODE`, compliance tests can
+deliberately mis-time the seam (e.g., flip a `SET_BUS_MODE`
+early or late around the ACK slot) to fuzz controller / target
+implementations. Glitches inherit the same `tx_symbol` field
+via `EMIT_QUARTER`, so PP-`recessive` glitches onto what
+should be an OD-`recessive` release are first-class --- and
+they read out in disassembly as the *same* symbol, just under
+a different active `BUS_MODE`. The reserved `tx_symbol = 11`
+encoding is held for a future v0.5 `raw_override` that bypasses
+the `BUS_MODE` mapping entirely, for true electrical-fuzz
+testing where the SDK wants to force an off-table pad-driver
+combination without changing the surrounding `BUS_MODE`.
 
 ### Why no byte-level emit (rejected: `EMIT_BYTE`)
 
@@ -1002,6 +1056,14 @@ Opcodes (held in the four free opcode-field slots --- see
   no drive, no expect. Defer until loop-based capture shows
   measurable timing jitter.
 - `CALL / RET` --- defer; inline SDK macros at compile time.
+- `raw_override` --- the reserved `tx_symbol = 11` encoding on
+  `EMIT_BIT` / `EMIT_QUARTER` / `DRIVE_BIT_ON_SCL` bypasses
+  the `BUS_MODE` symbol-decode and asserts a direct pad-driver
+  combination supplied via a side-channel register. Use case:
+  electrical-layer fuzz that wants PP-drive against an OD-only
+  `BUS_MODE`, or NMOS-low under `i3c-PP`, without flipping the
+  surrounding `BUS_MODE`. Defer until a real compliance case
+  needs it; until then the encoding is reserved.
 
 The opcode field has **four free slots**, so two or three of
 the above can land in v0.5 without an ISA-width bump.
@@ -1039,15 +1101,16 @@ the syntax down here keeps tooling honest.
 
 - One instruction per line; `;;` introduces a line comment.
 - Opcode mnemonics in upper case, operands in lower case.
-- Named symbols for drive fields (`od_low`, `od_release`,
-  `pp_high`, `hiz`), bus modes (`i2c`, `i3c-OD`, `i3c-PP`,
-  `hdr-ddr`), and `BRANCH_ON` condition codes (`ALWAYS`,
-  `MISMATCH`, ...) --- never raw bit values.
-- `EMIT_BIT` / `EMIT_QUARTER` / `SAMPLE_BIT_ON_SCL` /
-  `DRIVE_BIT_ON_SCL` operands written
-  `sda=<drive> expect=<0|1|X> mask=<0|1> capture=<0|1>`, with
-  the defaults `expect=X` (don't-care), `mask=0`, `capture=0`
-  omitted when unset.
+- Named symbols for `tx_symbol` fields (`dominant`,
+  `recessive`, `hiz`; short forms `dom`, `rec` accepted), bus
+  modes (`i2c`, `i3c-OD`, `i3c-PP`, `hdr-ddr`), and
+  `BRANCH_ON` / `WAIT_ON` condition codes (`ALWAYS`,
+  `MISMATCH`, `START_SEEN`, ...) --- never raw bit values.
+- `EMIT_BIT` / `SAMPLE_BIT_ON_SCL` / `DRIVE_BIT_ON_SCL`
+  operands written `tx=<symbol> expect=<0|1|X> mask=<0|1>
+  capture=<0|1>`. `EMIT_QUARTER` carries both axes:
+  `sda=<symbol> scl=<symbol> ...`. Defaults `expect=X`
+  (don't-care), `mask=0`, `capture=0` are omitted when unset.
 - Branch targets are labels (`name:`); the assembler resolves
   them to absolute 12-bit addresses (`JMP`) or signed 8-bit
   PC-relative offsets (`BRANCH_ON`) per opcode.
@@ -1062,42 +1125,42 @@ on the wire = `(0x50 << 1) | 0 = 0xA0`, MSB first, R/W = 0):
         SET_BUS_MODE  i2c                    ; SCL+SDA both OD-release on high half
 
         ;; -- Start condition: SDA falling while SCL high --
-        EMIT_QUARTER  sda=od_release scl=od_release    ; Q0: idle bus
-        EMIT_QUARTER  sda=od_low     scl=od_release    ; Q1: SDA pulled low (Start edge)
-        EMIT_QUARTER  sda=od_low     scl=od_low        ; Q2: SCL goes low
+        EMIT_QUARTER  sda=recessive scl=recessive    ; Q0: idle bus
+        EMIT_QUARTER  sda=dominant  scl=recessive    ; Q1: SDA pulled low (Start edge)
+        EMIT_QUARTER  sda=dominant  scl=dominant     ; Q2: SCL goes low
 
         ;; -- Address byte 0xA0 = 1010_0000 (MSB first) + R/W=0 --
-        EMIT_BIT      sda=od_release         ; bit 7 = 1
-        EMIT_BIT      sda=od_low             ; bit 6 = 0
-        EMIT_BIT      sda=od_release         ; bit 5 = 1
-        EMIT_BIT      sda=od_low             ; bit 4 = 0
-        EMIT_BIT      sda=od_low             ; bit 3 = 0
-        EMIT_BIT      sda=od_low             ; bit 2 = 0
-        EMIT_BIT      sda=od_low             ; bit 1 = 0
-        EMIT_BIT      sda=od_low             ; bit 0 = R/W = 0 (write)
+        EMIT_BIT      tx=recessive          ; bit 7 = 1
+        EMIT_BIT      tx=dominant           ; bit 6 = 0
+        EMIT_BIT      tx=recessive          ; bit 5 = 1
+        EMIT_BIT      tx=dominant           ; bit 4 = 0
+        EMIT_BIT      tx=dominant           ; bit 3 = 0
+        EMIT_BIT      tx=dominant           ; bit 2 = 0
+        EMIT_BIT      tx=dominant           ; bit 1 = 0
+        EMIT_BIT      tx=dominant           ; bit 0 = R/W = 0 (write)
 
         ;; -- ACK slot: release SDA, expect target to pull low --
-        EMIT_BIT      sda=hiz expect=0 mask=1 capture=1
-        BRANCH_ON     MISMATCH, nak          ; PC-relative, ±128 insn
+        EMIT_BIT      tx=hiz expect=0 mask=1 capture=1
+        BRANCH_ON     MISMATCH, nak         ; PC-relative, ±128 insn
 
         ;; -- Data byte 0xAB = 1010_1011 --
-        EMIT_BIT      sda=od_release         ; bit 7 = 1
-        EMIT_BIT      sda=od_low             ; bit 6 = 0
-        EMIT_BIT      sda=od_release         ; bit 5 = 1
-        EMIT_BIT      sda=od_low             ; bit 4 = 0
-        EMIT_BIT      sda=od_release         ; bit 3 = 1
-        EMIT_BIT      sda=od_low             ; bit 2 = 0
-        EMIT_BIT      sda=od_release         ; bit 1 = 1
-        EMIT_BIT      sda=od_release         ; bit 0 = 1
+        EMIT_BIT      tx=recessive          ; bit 7 = 1
+        EMIT_BIT      tx=dominant           ; bit 6 = 0
+        EMIT_BIT      tx=recessive          ; bit 5 = 1
+        EMIT_BIT      tx=dominant           ; bit 4 = 0
+        EMIT_BIT      tx=recessive          ; bit 3 = 1
+        EMIT_BIT      tx=dominant           ; bit 2 = 0
+        EMIT_BIT      tx=recessive          ; bit 1 = 1
+        EMIT_BIT      tx=recessive          ; bit 0 = 1
 
         ;; -- ACK slot --
-        EMIT_BIT      sda=hiz expect=0 mask=1 capture=1
+        EMIT_BIT      tx=hiz expect=0 mask=1 capture=1
         BRANCH_ON     MISMATCH, nak
 
         ;; -- Stop condition: SDA rising while SCL high --
-        EMIT_QUARTER  sda=od_low     scl=od_low        ; Q0: both low
-        EMIT_QUARTER  sda=od_low     scl=od_release    ; Q1: SCL goes high
-        EMIT_QUARTER  sda=od_release scl=od_release    ; Q2: SDA goes high (Stop edge)
+        EMIT_QUARTER  sda=dominant  scl=dominant     ; Q0: both low
+        EMIT_QUARTER  sda=dominant  scl=recessive    ; Q1: SCL goes high
+        EMIT_QUARTER  sda=recessive scl=recessive    ; Q2: SDA goes high (Stop edge)
 
         MARK          label=ok
         HALT          status=0
