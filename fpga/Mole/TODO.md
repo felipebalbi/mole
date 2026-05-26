@@ -35,6 +35,7 @@ stable contract" before changing either.
 - [x] **Step 3 --- UART.** Imported `UartConfig`, `BaudGenerator`, `RxSync`, `Tx/RxShiftReg`, `Tx/RxFsm`, `UartTx`, `UartRx` from sibling Uart project.
 - [x] **Step 4 --- UART sims.** Imported 8 sub-block sims; added top-level `UartSim` loopback.
 - [x] **Step 5 --- `SpramController`.** One-tile SPRAM wrapper with read-priority arbitration; `SB_SPRAM256KA` BlackBox + `Mem` sim path.
+- [x] **Step 6 --- `SpramControllerSim`.** 7 black-box cases against the `Mem` substitute: write/read coverage, read-priority arbitration (both writers), wrap-around, latency, same-address r/w.
 
 ---
 
@@ -321,7 +322,7 @@ UART loader and the result-ring producer).
 
 **Sim:** Step 6.
 
-### 🔲 Step 6 --- `SpramControllerSim`
+### ✅ Step 6 --- `SpramControllerSim`
 
 **Goal:** smoke-test address mapping, single-port arbitration,
 and result-ring wrap-around.
@@ -329,6 +330,63 @@ and result-ring wrap-around.
 **Files:** `src/sim/SpramControllerSim.scala`.
 
 **Makefile:** uncomment `sim-spram`.
+
+**What landed:**
+- `src/sim/SpramControllerSim.scala` --- SpinalSim object exposing
+  7 black-box cases against `SpramController(smallCfg,
+  useBlackBox = false)` (the sim path uses the `Mem` substitute;
+  the wrapper logic --- arbitration, address mux, ready
+  back-pressure --- is identical between the two paths).
+- `smallCfg`: `programWordCount = 64`, `resultRingByteCount = 64`
+  → `totalWords = 96`, `addrWidth = 7`. Small enough that
+  "write every cell, read every cell" runs in a few hundred
+  cycles; large enough to exercise wrap-around with a low pass
+  count.
+- **Cases:**
+  1. **`caseWriteReadAllCells`** --- loader-write the pattern
+     `addr ^ 0xA5A5` to every cell, read every cell, compare.
+     Catches address-mux bugs and any bit-bound issue in the
+     `Mem` substitute.
+  2. **`caseReadPriorityOverWrite`** --- contend `readCmd` +
+     `resultWrite`; assert read fires, write back-pressures,
+     read returns the pre-write seed; let the write fire on the
+     next cycle and verify it lands.
+  3. **`caseResultBeatsLoader`** --- contend `loaderWrite` +
+     `resultWrite`; assert `resultWrite` wins, loader
+     back-pressures, both writes eventually land.
+  4. **`caseResultRingWrap`** --- write to the ring address range
+     `[programWordCount .. programWordCount + resultWordCount)`
+     three full passes; verify each cell holds the value from
+     the last pass.
+  5. **`caseReadLatency`** --- fire one read; assert
+     `readResp.valid` is high on the next cycle (and low on the
+     cycle after that), and the payload matches the seeded
+     value. Documents the one-cycle synchronous-read contract.
+  6. **`caseSameAddrReadWrite`** --- contend `readCmd` +
+     `resultWrite` on the same address; assert the read returns
+     the *pre-write* value, the write lands the next cycle, and
+     a second read returns the post-write value. The arbiter
+     prevents the dangerous same-cycle-r/w-to-same-cell case
+     from ever reaching the SPRAM primitive.
+  7. **`caseReadPriorityOverLoader`** --- symmetric to case 2 but
+     with `loaderWrite` as the contender (rubber-duck-added: case 2
+     alone only proved read priority against the *higher*
+     priority writer).
+- **Helpers:** `doRead`, `doLoaderWrite`, `doResultWrite`, `quiet`.
+  Each driver helper drops `valid` immediately after the
+  handshake fires so it cannot accidentally fire a second time.
+  `quiet` zeroes all sources at the top of every case for
+  guaranteed reset hygiene.
+- **Timing discipline (rubber-duck-caught):** the contention
+  cases (2, 6, 7) snapshot `readResp.valid` and payload **on the
+  cycle immediately after the read fires** (i.e. while the
+  arbitration assertions are running) and BEFORE waiting for
+  the back-pressured write to fire. `readResp` is a `Flow`
+  whose `valid` only pulses for one cycle; waiting for the
+  write before checking the response would always race past
+  the pulse.
+- **Makefile:** uncommented `sim-spram`; updated aggregate `sim`
+  target and `.PHONY` to include it.
 
 ---
 
