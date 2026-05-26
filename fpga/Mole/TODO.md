@@ -34,6 +34,7 @@ stable contract" before changing either.
 - [x] **Step 2 --- `MoleBus`.** 3-signal open-drain / push-pull bundle + wired-AND audit.
 - [x] **Step 3 --- UART.** Imported `UartConfig`, `BaudGenerator`, `RxSync`, `Tx/RxShiftReg`, `Tx/RxFsm`, `UartTx`, `UartRx` from sibling Uart project.
 - [x] **Step 4 --- UART sims.** Imported 8 sub-block sims; added top-level `UartSim` loopback.
+- [x] **Step 5 --- `SpramController`.** One-tile SPRAM wrapper with read-priority arbitration; `SB_SPRAM256KA` BlackBox + `Mem` sim path.
 
 ---
 
@@ -243,7 +244,7 @@ test back-to-back frames; test stop-bit-missing recovery.
   `sim-uart`. The aggregate `sim` now depends on all 12 Phase-0
   sims wired so far. `.PHONY` updated.
 
-### 🔲 Step 5 --- `SpramController`
+### ✅ Step 5 --- `SpramController`
 
 **Goal:** wrap the UP5K's 4× 16k×16 SPRAM tiles into a single
 program-memory + result-ring backing store with a Stream-shaped
@@ -260,6 +261,63 @@ UART loader and the result-ring producer).
   see a flat address space.
 - Single-port semantics --- arbitrate writes from UART loader vs
   result-ring producer, reads from engine fetch path.
+
+**What landed:**
+- `src/hw/SpramController.scala` --- `case class
+  SpramController(cfg: MoleConfig, useBlackBox: Boolean = true)`.
+  Three Stream-shaped IOs (`loaderWrite`, `resultWrite`,
+  `readCmd`) plus a one-cycle-latency `Flow`-shaped `readResp`.
+- **Two write ports (not one), named after producer identity.**
+  `loaderWrite` is the boot-time UART program loader,
+  `resultWrite` is the engine result-ring producer. Keeping them
+  distinct preserves the producer in code review and sim
+  waveforms; arbitration logic combines them under the hood.
+- **`readResp` is a `Flow`, not a `Stream`.** The `SB_SPRAM256KA`
+  primitive returns data one cycle after the address is presented
+  and offers no way to back-pressure once the read is in flight.
+  Modelling the response as a `Flow` matches that semantics
+  precisely; consumers buffer downstream if they cannot accept a
+  read result every cycle.
+- **Read-priority arbitration.** `readCmd.ready := True` (engine
+  fetch is critical path); `resultWrite.ready := !readCmd.valid`;
+  `loaderWrite.ready := !readCmd.valid && !resultWrite.valid`.
+  Read-vs-write to the same address in the same cycle is
+  *structurally* impossible: the write loses arbitration and is
+  offered the bus next cycle. The "what happens on simultaneous
+  same-cycle r/w to one address" question therefore never reaches
+  the primitive.
+- **One tile, not four (Phase 0 simplification).** The plan
+  sketched a 1-to-4-tile address translator; Phase 0 ships
+  one-tile-only with a `require(totalWords <= 16384)`. With the
+  v0 defaults (4096 program + 4096 result words = 8192) we use
+  half of one tile; users can push the result ring to ~24 KiB
+  before tripping the require. Multi-tile arbitration lands as a
+  Step 8+ follow-up when the engine actually needs more memory.
+- **`SB_SPRAM256KA` BlackBox** declared in the same file. Port
+  list cross-checked against icestorm's `cells_sim.v` reference
+  model. `mapClockDomain(clock = io.CLOCK)` threads the implicit
+  clock onto the primitive's `CLOCK` pin. `noIoPrefix()` strips
+  the `io_` prefix from generated Verilog ports so the
+  instantiation matches the primitive's real port names.
+  **POWEROFF is active LOW** and is tied HIGH for the tile to be
+  operational --- the single most common iCE40 SPRAM bring-up
+  gotcha is documented inline.
+- **Sim path** (`useBlackBox = false`) backs the wrapper with a
+  plain `Mem(Bits(16 bits), 1 << addrWidth)` using
+  `mem.readSync(addr, enable = doRead)` and `mem.write(addr,
+  wrData)`. The address-mux + ready-back-pressure logic lives
+  outside the `if (useBlackBox)` branch and is therefore
+  exercised end-to-end by the sim despite the primitive being
+  substituted.
+- **`useBlackBox` is a constructor parameter, not auto-detected.**
+  The plan's risk register flagged
+  `GenerationFlags.simulation.isEnabled` as unverified in
+  Spinal 1.14.1. Falling back to an explicit boolean keeps the
+  build deterministic --- sims pass `false`, the (future) Verilog
+  generator at Step 15 will pass `true`.
+- **`readResp.valid := RegNext(doRead) init (False)`** lags
+  `readCmd.fire` by exactly one cycle, matching both the BlackBox
+  and `Mem` read latencies.
 
 **Sim:** Step 6.
 
