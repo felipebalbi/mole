@@ -94,5 +94,31 @@ object MoleConfigSim extends App {
     f"reset divider ${cfg.quarterPeriodCyclesReset}%d → quarter ${resetQuarter}%.0f Hz → bit ${resetBit}%.0f Hz"
   )
 
+  // UART / DDS audit. Mole's host-link UART runs the RX BaudGenerator
+  // at baudRate × oversample (16× is the imported sibling default,
+  // textbook for UART RX). The 24-bit DDS accumulator overflows once
+  // `baudRate * oversample >= clkFreqHz`; UartConfig already guards
+  // that. Restate it here so a future MoleConfig default bump can't
+  // silently violate the constraint — we'll see this assertion fire
+  // before any UART is even instantiated.
+  val uartOversample = 16
+  val uartOsHz = cfg.uartBaud.toLong * uartOversample
+  val fabricHz = cfg.fabricFreqHz.toBigDecimal.toLong
+  assert(
+    uartOsHz < fabricHz,
+    s"UART DDS guard: uartBaud (${cfg.uartBaud}) × oversample ($uartOversample) " +
+      s"= $uartOsHz Hz must be < fabricFreqHz ($fabricHz Hz)"
+  )
+  val phaseInc =
+    BaudGenerator.phaseIncFor(fabricHz.toInt, uartOsHz.toInt)
+  val realisedOsHz =
+    (BigInt(phaseInc) * fabricHz) >> 24
+  val realisedBaud = realisedOsHz / uartOversample
+  println(
+    f"UART: baud=${cfg.uartBaud}%d, oversample=$uartOversample%d, " +
+      f"osHz=$uartOsHz%d, phaseInc=$phaseInc%d (0x${phaseInc.toHexString}%s), " +
+      f"realised osHz=$realisedOsHz, realised baud=$realisedBaud"
+  )
+
   println("MoleConfig defaults OK")
 }

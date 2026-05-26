@@ -55,17 +55,19 @@ project.
   `quarterPeriodCyclesReset = 12` (1 MHz bit rate at default
   divider), `programWordCount = 4096` (12-bit JMP addr cap),
   `resultRingByteCount = 8192`, `captureMaxBits = 65536`,
-  `uartBaud = 921 600`. Each field has a `require(...)` guard;
+  `uartBaud = 2_000_000`. Each field has a `require(...)` guard;
   `programWordCount` is capped at 4096 per the ISA's 12-bit JMP
   operand (ROADMAP §"Encoding width"). One helper:
   `quarterPeriodCyclesFor(quarterHz: HertzNumber): Int`.
-- **`uartBaud` choice:** the TODO hint says "3 Mbaud comfortable on
-  FT2232H" but at the v0 default of 48 MHz fabric × 16× RX
-  oversample, a 3 MBaud DDS would need `phaseInc = 2^24` --- right
-  at the 24-bit field's overflow. 921 600 keeps a 3.3× DDS margin
-  (rubber-duck-caught blocking issue). Raising to 3 MBaud needs
-  either an 8× oversample option in `UartConfig` or fabric > 60 MHz;
-  both are out of Phase-0 scope.
+- **`uartBaud` choice:** iCEBreaker's FT2232H supports up to
+  12 Mbaud, so the host side has plenty of headroom. 2 Mbaud is
+  the highest baud that still fits the textbook 16× RX oversample
+  on a 48 MHz fabric: `baudRate × oversample = 32 MHz < 48 MHz`,
+  and `phaseInc = round(2_000_000 × 16 × 2^24 / 48_000_000) ≈
+  11_184_811 (0xAAA_AAB)`, comfortably inside the 24-bit DDS
+  accumulator with ppm-level baud accuracy. Pushing higher (e.g.
+  3 Mbaud) would either overflow the DDS at 16× or force dropping
+  oversample to 8× — neither is justified for v0.
 - **Divergence from hint:** the hint said *Sim: none (pure data
   record). Makefile: no new target.* Reconsidered ---
   `MoleConfig` is the source of truth for every sub-block's timing,
@@ -218,8 +220,10 @@ test back-to-back frames; test stop-bit-missing recovery.
 - **Three configs exercised:**
   1. `12 MHz / 115 200 baud` — sibling project default; sanity.
   2. `48 MHz / 115 200 baud` — Mole "early dev".
-  3. `48 MHz / 921 600 baud` — Mole production default per
-     `MoleConfig.uartBaud`.
+  3. `48 MHz / 2 Mbaud` — Mole production default per
+     `MoleConfig.uartBaud`. iCEBreaker's FT2232H supports up to
+     12 Mbaud; 2 Mbaud × 16× oversample = 32 MHz tick rate, well
+     under the 24-bit DDS overflow threshold at 48 MHz fabric.
   All three satisfy the rubber-duck-added `baudRate * oversample
   < clkFreqHz` `require` on `UartConfig`.
 - **Coverage per config:** single-byte round-trip across a

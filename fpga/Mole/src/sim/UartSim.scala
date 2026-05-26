@@ -85,11 +85,12 @@ case class UartLoopbackDut(cfg: UartConfig) extends Component {
   *   2. **48 MHz / 115 200 baud** — Mole "early dev" config; same
   *      baud, fast fabric. Catches BaudGenerator phase increment
   *      sizing regressions introduced by the higher clock.
-  *   3. **48 MHz / 921 600 baud** — Mole production default per
-  *      `MoleConfig.uartBaud`. Stresses the DDS at its highest
-  *      legal Mole config (kept below the rubber-duck-caught
-  *      overflow boundary by [[UartConfig]]'s
-  *      `baudRate * oversample < clkFreqHz` guard).
+  *   3. **48 MHz / 2 Mbaud** — Mole production default per
+  *      `MoleConfig.uartBaud`. 2 Mbaud × 16× oversample = 32 MHz
+  *      tick rate, which fits comfortably in the 24-bit DDS at
+  *      48 MHz fabric (`phaseInc ≈ 11_184_811 = 0xAAA_AAB`, well
+  *      below the 2^24 ceiling). iCEBreaker's FT2232H supports up
+  *      to 12 Mbaud, so 2 Mbaud has plenty of host-side headroom.
   *
   * Coverage at each config:
   *   - Single-byte round trip across a representative pattern set
@@ -275,7 +276,7 @@ object UartSim {
     val configs = Seq(
       "12MHz_115200" -> UartConfig(clkFreqHz = 12000000, baudRate = 115200),
       "48MHz_115200" -> UartConfig(clkFreqHz = 48000000, baudRate = 115200),
-      "48MHz_921600" -> UartConfig(clkFreqHz = 48000000, baudRate = 921600)
+      "48MHz_2000000" -> UartConfig(clkFreqHz = 48000000, baudRate = 2000000)
     )
     configs.foreach { case (label, cfg) => runOne(label, cfg) }
     println("UartSim OK")

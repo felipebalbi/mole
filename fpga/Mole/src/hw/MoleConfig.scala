@@ -57,12 +57,17 @@ import spinal.core._
   *
   * @param uartBaud
   *   Default UART baud rate for both directions of the host-link UART.
-  *   921 600 baud is a standard FT2232H rate and keeps a ~3.3× margin
-  *   in the RX-side DDS at 48 MHz fabric (RX runs the BaudGenerator at
-  *   `baudRate * oversample = 14.7 MHz`; safely below `clkFreqHz / 3`).
-  *   Higher baud (the ROADMAP-aspirational 3 Mbaud) requires either
-  *   reducing the RX oversample to 8× or running the fabric > 60 MHz —
-  *   both are out of scope for Phase 0.
+  *   iCEBreaker's USB-UART bridge is an FT2232H, which comfortably
+  *   supports up to 12 Mbaud. The Mole production default is
+  *   **2 Mbaud** — the highest rate that still keeps the textbook 16×
+  *   RX oversample at 48 MHz fabric. At 2 Mbaud × 16× oversample the
+  *   24-bit DDS phase increment is
+  *   `round(2_000_000 * 16 * 2^24 / 48_000_000) = 11_184_811`
+  *   (`0xAAA_AAB`), fitting cleanly in the 24-bit accumulator with
+  *   ppm-level baud accuracy. Pushing higher (e.g. 3 Mbaud) would
+  *   either overflow the DDS at 16× or force dropping oversample to
+  *   8× — neither is justified for v0. 2 Mbaud easily streams
+  *   ring-buffer drain traffic without throttling the engine.
   */
 case class MoleConfig(
     fabricFreqHz: HertzNumber = 48 MHz, // .MHz method from spinal.core._; postfix form is documented sugar
@@ -70,7 +75,7 @@ case class MoleConfig(
     programWordCount: Int = 4096,
     resultRingByteCount: Int = 8192,
     captureMaxBits: Int = 65536,
-    uartBaud: Int = 921600
+    uartBaud: Int = 2_000_000
 ) {
 
   require(
