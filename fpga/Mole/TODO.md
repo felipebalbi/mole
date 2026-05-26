@@ -32,6 +32,7 @@ stable contract" before changing either.
       src/{hw,sim}/).
 - [x] **Step 1 --- `MoleConfig`.** Compile-time config record + spec-floor sim.
 - [x] **Step 2 --- `MoleBus`.** 3-signal open-drain / push-pull bundle + wired-AND audit.
+- [x] **Step 3 --- UART.** Imported `UartConfig`, `BaudGenerator`, `RxSync`, `Tx/RxShiftReg`, `Tx/RxFsm`, `UartTx`, `UartRx` from sibling Uart project.
 
 ---
 
@@ -126,24 +127,60 @@ high (I3C PP) instead of just releasing it (I2C / I3C OD).
 - **Makefile:** `sim-opendrain` target uncommented; aggregate
   `sim:` depends on it; `.PHONY` updated.
 
-### 🔲 Step 3 --- UART (`UartIo`, `BaudGenerator`, `UartRx`, `UartTx`)
+### ✅ Step 3 --- UART (`UartConfig`, `BaudGenerator`, `RxSync`, shift regs, FSMs, `UartTx`, `UartRx`)
 
-**Goal:** in-tree UART RX/TX, no cross-project dep. 8N1 only;
-runtime-tunable baud via a divider counter.
+**Goal:** in-tree UART RX/TX, no cross-project dep. 8N1 by
+default; runtime-tunable baud via a divider counter.
 
-**Files:** `src/hw/UartIo.scala`, `src/hw/BaudGenerator.scala`,
-`src/hw/UartRx.scala`, `src/hw/UartTx.scala`.
+**What landed:**
 
-**Design notes:**
-- Single-rate (start, 8 data, stop). No parity. No flow control;
-  back-pressure handled at the engine layer via the result ring.
-- `BaudGenerator` divides `fabricFreqHz` to the baud-x16 clock
-  used by the RX state machine for mid-bit sampling.
-- TX is a straightforward shifter; RX is a 16x oversampling FSM.
-
-**Sim:** Step 4.
-
-**Makefile:** no new target yet (sim lands in Step 4).
+- **Files (all in `src/hw/`):** `UartConfig.scala`,
+  `BaudGenerator.scala`, `RxSync.scala`, `TxShiftReg.scala`,
+  `RxShiftReg.scala`, `TxFsm.scala`, `RxFsm.scala`,
+  `UartTx.scala`, `UartRx.scala`.
+- **Source:** copied verbatim from
+  `felipebalbi/icebreaker-spinalhdl-examples@98c06a8c` `Uart/src/hw/`
+  with `package uart` → `package mole` on every file and a one-line
+  credit header comment naming the upstream sha. The credit header
+  is parsed by no tool — it just tells the next reader where to look
+  for the upstream when re-syncing.
+- **Skipped from upstream:** `UartController.scala` (Apb3 register-
+  file wrapper Mole does not need), `UartEchoDemo.scala` /
+  `UartTxDemo.scala` (top-level demos with iCEbreaker pin maps),
+  `Revision.scala` (Mole's own `Revision.scala` lands with Step 8
+  using the engine's REVISION word, different field layout).
+- **`UartConfig` modifications:**
+  - Stripped `txFifoDepth` / `rxFifoDepth` fields and their
+    `require`s. Confirmed by grep that they were referenced only by
+    `UartController.scala` and `UartControllerSim.scala`, neither
+    of which is imported.
+  - Flipped `useCts` / `useRts` defaults from `true` to `false`.
+    Mole's host-link runs over an FT2232H with no flow-control pins
+    wired through; bare `UartTx(UartConfig())` should therefore
+    expose neither port.
+  - Added `require(baudRate.toLong * oversample < clkFreqHz, …)`.
+    Without this guard, the 24-bit DDS phase increment computed by
+    the RX-side `BaudGenerator` overflows silently when `baudRate
+    * oversample >= clkFreqHz` (rubber-duck-caught Phase-0
+    blocker). The `.toLong` widening prevents 32-bit `Int *`
+    wrap-around at evaluation time.
+- **`UartTx` / `UartRx` modifications:** dropped the
+  `UartTxVerilog` / `UartRxVerilog` companion objects. They
+  generated bare-core Verilog for sibling-repo iCEbreaker bring-up;
+  Mole's top-level Verilog entry point lands with Step 15.
+- **Divergence from hint:**
+  - The TODO listed `src/hw/UartIo.scala` as one of the files.
+    Upstream has no such file — `UartTx` and `UartRx` declare
+    `io = new Bundle { … }` directly. The copy follows upstream;
+    no `UartIo.scala` lands.
+  - The TODO says "no parity" but the upstream `UartConfig`
+    already gates parity at elaboration via `cfg.parity` (default
+    `ParityType.None` elides all parity hardware). Mole keeps
+    parity available as a future-work knob without paying any
+    hardware cost when it's off.
+- **Sim:** none in Step 3 itself — the 8 per-block sims and the
+  top-level loopback land with Step 4.
+- **Makefile:** no new target.
 
 ### 🔲 Step 4 --- `UartSim`
 
