@@ -2,22 +2,19 @@ package mole
 
 /** Open-drain / push-pull bus resolution audit for [[MoleBus]].
   *
-  * Pure-Scala main, not a SpinalSim DUT. The bundle has no
-  * stateful hardware to exercise — what we want to verify at the
-  * `sim-opendrain` Makefile target is the *electrical resolution
-  * function* the wired-AND of multiple [[MoleBus]] participants
-  * implements at the pad level. Future engine sims (Step 9+) that
-  * model a controller + one or more targets on the same bus will
-  * import and reuse [[OpenDrainBusSim.wiredAnd]] to drive the
-  * sampled `read` value of every participant from each cycle's
-  * `(driveLow, driveHigh)` tuples.
+  * Pure-Scala main, not a SpinalSim DUT. The bundle has no stateful hardware to
+  * exercise — what we want to verify at the `sim-opendrain` Makefile target is
+  * the *electrical resolution function* the wired-AND of multiple [[MoleBus]]
+  * participants implements at the pad level. Future engine sims (Step 9+) that
+  * model a controller + one or more targets on the same bus will import and
+  * reuse [[OpenDrainBusSim.wiredAnd]] to drive the sampled `read` value of
+  * every participant from each cycle's `(driveLow, driveHigh)` tuples.
   *
-  * The resolution function is the only "bus model" code in the
-  * tree. Keeping it pure-Scala lets unit tests exercise every
-  * legal and illegal combination in milliseconds without a
-  * simulator backend. The function lives here (alongside the
-  * audit) rather than in `src/hw/` because it never elaborates to
-  * RTL — it only runs at sim time. Symmetric with `MoleConfigSim`.
+  * The resolution function is the only "bus model" code in the tree. Keeping it
+  * pure-Scala lets unit tests exercise every legal and illegal combination in
+  * milliseconds without a simulator backend. The function lives here (alongside
+  * the audit) rather than in `src/hw/` because it never elaborates to RTL — it
+  * only runs at sim time. Symmetric with `MoleConfigSim`.
   *
   * Run: `sbt "runMain mole.OpenDrainBusSim"`
   */
@@ -26,28 +23,26 @@ object OpenDrainBusSim extends App {
   /** Per-participant drive state for one bus wire.
     *
     * Sampled from a `MoleBusLine` in simulation:
-    *   `Drive(dut.io.bus.sda.driveLow.toBoolean,
-    *          dut.io.bus.sda.driveHigh.toBoolean)`.
+    * `Drive(dut.io.bus.sda.driveLow.toBoolean,
+    * dut.io.bus.sda.driveHigh.toBoolean)`.
     */
   final case class Drive(low: Boolean, high: Boolean)
 
-  /** Result of resolving N participants on a wired-AND segment with
-    * an external pull-up.
+  /** Result of resolving N participants on a wired-AND segment with an external
+    * pull-up.
     *
-    *   - `Some(false)` → at least one participant pulls low (NMOS
-    *     wins over PMOS and pull-up; classic wired-AND).
-    *   - `Some(true)`  → no one drives low, and either someone PP-
-    *     drives high or the pull-up wins.
-    *   - `None`        → contention: at least one participant
-    *     drives both low *and* high simultaneously, which is
-    *     illegal at the bundle level and means the symbol decoder
-    *     produced an invalid `(driveLow, driveHigh)` pair.
+    *   - `Some(false)` → at least one participant pulls low (NMOS wins over
+    *     PMOS and pull-up; classic wired-AND).
+    *   - `Some(true)` → no one drives low, and either someone PP- drives high
+    *     or the pull-up wins.
+    *   - `None` → contention: at least one participant drives both low *and*
+    *     high simultaneously, which is illegal at the bundle level and means
+    *     the symbol decoder produced an invalid `(driveLow, driveHigh)` pair.
     *
-    * Contention from *different* participants (one driving low,
-    * another driving high) is **not** a `None` — that case
-    * resolves to low (NMOS dominates physically). Callers that
-    * care about that softer "two of you are arguing" case should
-    * inspect the participant list directly.
+    * Contention from *different* participants (one driving low, another driving
+    * high) is **not** a `None` — that case resolves to low (NMOS dominates
+    * physically). Callers that care about that softer "two of you are arguing"
+    * case should inspect the participant list directly.
     */
   def wiredAnd(parts: Seq[Drive]): Option[Boolean] = {
     if (parts.exists(p => p.low && p.high)) {
@@ -144,14 +139,17 @@ object OpenDrainBusSim extends App {
   // --- Print a readable summary ------------------------------------
 
   val cases = Seq(
-    ("released",                 Seq(Drive(false, false))),
-    ("one low",                  Seq(Drive(true,  false))),
-    ("one high",                 Seq(Drive(false, true))),
-    ("two released",             Seq.fill(2)(Drive(false, false))),
-    ("one of three low",         Seq(Drive(false, false), Drive(true,  false), Drive(false, false))),
-    ("low vs high split",        Seq(Drive(true,  false), Drive(false, true))),
-    ("self-contention",          Seq(Drive(true,  true))),
-    ("contention amid releases", Seq(Drive(false, false), Drive(true,  true)))
+    ("released", Seq(Drive(false, false))),
+    ("one low", Seq(Drive(true, false))),
+    ("one high", Seq(Drive(false, true))),
+    ("two released", Seq.fill(2)(Drive(false, false))),
+    (
+      "one of three low",
+      Seq(Drive(false, false), Drive(true, false), Drive(false, false))
+    ),
+    ("low vs high split", Seq(Drive(true, false), Drive(false, true))),
+    ("self-contention", Seq(Drive(true, true))),
+    ("contention amid releases", Seq(Drive(false, false), Drive(true, true)))
   )
   cases.foreach { case (label, parts) =>
     val r = wiredAnd(parts).fold("contention")(b => if (b) "high" else "low ")

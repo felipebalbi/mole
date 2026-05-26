@@ -4,22 +4,20 @@ import spinal.core._
 
 /** Spec-floor audit for [[MoleConfig]] defaults.
   *
-  * Pure-Scala main, not a SpinalSim DUT. The data record has no
-  * hardware state to exercise; what we want to *verify* at the
-  * `sim-config` Makefile target is that the default config can
-  * actually represent the bus frequencies Mole's v0 controller-role
-  * use cases require — I²C standard / fast / fast-plus, I³C OD-low
-  * and OD-mid. The I³C PP-high target (12.5 MHz SCL = 50 MHz
-  * quarter rate) is *flagged* with a `println` rather than asserted
-  * out — it requires either fabric > 50 MHz or a fractional divider,
-  * both out of Phase-0 scope (ROADMAP §"Phased plan" gates I³C PP on
-  * a later phase).
+  * Pure-Scala main, not a SpinalSim DUT. The data record has no hardware state
+  * to exercise; what we want to *verify* at the `sim-config` Makefile target is
+  * that the default config can actually represent the bus frequencies Mole's v0
+  * controller-role use cases require — I²C standard / fast / fast-plus, I³C
+  * OD-low and OD-mid. The I³C PP-high target (12.5 MHz SCL = 50 MHz quarter
+  * rate) is *flagged* with a `println` rather than asserted out — it requires
+  * either fabric > 50 MHz or a fractional divider, both out of Phase-0 scope
+  * (ROADMAP §"Phased plan" gates I³C PP on a later phase).
   *
-  * `runMain` is the entry point because the sibling project uses the
-  * same convention; `sbt -batch runMain mole.MoleConfigSim` is wired
-  * into `make sim-config`. The default executable behaviour is
-  * "assert and exit 0 on success; throw and exit non-zero on
-  * failure", which is exactly what CI eventually wants.
+  * `runMain` is the entry point because the sibling project uses the same
+  * convention; `sbt -batch runMain mole.MoleConfigSim` is wired into
+  * `make sim-config`. The default executable behaviour is "assert and exit 0 on
+  * success; throw and exit non-zero on failure", which is exactly what CI
+  * eventually wants.
   *
   * Run: `sbt "runMain mole.MoleConfigSim"`
   */
@@ -36,11 +34,12 @@ object MoleConfigSim extends App {
   println(s"uartBaud                 = ${cfg.uartBaud}")
 
   /** Wire bit-rate -> quarter rate (4 quarters per bit). */
-  def quarterRate(bitHz: HertzNumber): HertzNumber = (bitHz.toBigDecimal * 4).toLong Hz
+  def quarterRate(bitHz: HertzNumber): HertzNumber =
+    (bitHz.toBigDecimal * 4).toLong Hz
 
-  /** Assert: `cfg` can produce a quarter-rate divider for `bitHz` that
-    * fits in `MoleConfig.quarterPeriodCyclesReset`'s plausible range
-    * (>= 1, integer). Returns the divider for the `println` log line.
+  /** Assert: `cfg` can produce a quarter-rate divider for `bitHz` that fits in
+    * `MoleConfig.quarterPeriodCyclesReset`'s plausible range (>= 1, integer).
+    * Returns the divider for the `println` log line.
     */
   def auditBus(label: String, bitHz: HertzNumber): Int = {
     val qHz = quarterRate(bitHz)
@@ -59,18 +58,18 @@ object MoleConfigSim extends App {
 
   // Required: every Phase-0 I²C / I³C-OD frequency must produce a
   // sane divider (>= 1, integer).
-  auditBus("I2C standard 100 kHz",  100 kHz)
-  auditBus("I2C fast 400 kHz",      400 kHz)
-  auditBus("I2C fast-plus 1 MHz",   1 MHz)
-  auditBus("I3C OD 2 MHz",          2 MHz)
-  auditBus("I3C OD 4 MHz",          4 MHz)
+  auditBus("I2C standard 100 kHz", 100 kHz)
+  auditBus("I2C fast 400 kHz", 400 kHz)
+  auditBus("I2C fast-plus 1 MHz", 1 MHz)
+  auditBus("I3C OD 2 MHz", 2 MHz)
+  auditBus("I3C OD 4 MHz", 4 MHz)
 
   // Flagged: I³C PP-high (12.5 MHz SCL) requires fabric > 50 MHz or
   // a fractional divider. Phase 0 ships without it. Emit a warning
   // line but do not assert out — the design is allowed to miss
   // this target until Phase 1+.
   val ppHighBit = 12500000 Hz
-  val ppHighQ   = quarterRate(ppHighBit)
+  val ppHighQ = quarterRate(ppHighBit)
   val ppHighDiv = cfg.quarterPeriodCyclesFor(ppHighQ)
   if (ppHighDiv < 1) {
     println(

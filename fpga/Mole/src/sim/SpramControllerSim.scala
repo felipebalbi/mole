@@ -6,41 +6,37 @@ import spinal.lib._
 
 /** Black-box-style sim for [[SpramController]].
   *
-  * Drives the controller with `useBlackBox = false` so we exercise
-  * the wrapper logic (address mux, arbitration, ready
-  * back-pressure, one-cycle read latency) against the SpinalHDL
-  * `Mem` substitute --- no external Verilog model of
-  * `SB_SPRAM256KA` required. The wrapper logic under test is
-  * identical between the two paths; the only thing the sim does
-  * not cover is the BlackBox port wiring itself, which is verified
-  * by HW bring-up (Phase 3).
+  * Drives the controller with `useBlackBox = false` so we exercise the wrapper
+  * logic (address mux, arbitration, ready back-pressure, one-cycle read
+  * latency) against the SpinalHDL `Mem` substitute --- no external Verilog
+  * model of `SB_SPRAM256KA` required. The wrapper logic under test is identical
+  * between the two paths; the only thing the sim does not cover is the BlackBox
+  * port wiring itself, which is verified by HW bring-up (Phase 3).
   *
-  * Cases
-  * -----
-  * 1. **Write-then-read every cell.** Loader-write a recognizable
-  *    pattern (`addr ^ 0xA5A5`) across the full address space,
-  *    then read every cell and verify the readback.
-  * 2. **Read priority over write.** Inject simultaneous
-  *    `readCmd.valid` and `resultWrite.valid`; the read fires that
-  *    cycle, the write back-pressures and lands the cycle after.
-  * 3. **Loader vs result-write arbitration.** Two concurrent
-  *    writes: `resultWrite` (higher priority) wins,
-  *    `loaderWrite` back-pressures and lands next.
-  * 4. **Result-ring wrap-around.** Drive a software-managed
-  *    pointer past the result-ring size and verify the cells wrap
-  *    cleanly without address-translation glitches.
-  * 5. **One-cycle read latency.** Verify exactly one cycle of
-  *    `readResp.valid` after each `readCmd.fire`, no more, no
-  *    fewer.
-  * 6. **Read-vs-write to the same address.** With the read-priority
-  *    arbiter the read wins on cycle N and the write fires on
-  *    cycle N+1; the read therefore returns the *pre-write* value
-  *    and the second read (issued after the write completes)
-  *    returns the *post-write* value. Documents the contract.
-  * 7. **Read priority over loader write.** Symmetric to case 2 but
-  *    with `loaderWrite` as the contending writer. The arbiter is
-  *    supposed to preempt either writer; case 2 alone only proves
-  *    that for the higher-priority writer.
+  * Cases -----
+  *   1. **Write-then-read every cell.** Loader-write a recognizable pattern
+  *      (`addr ^ 0xA5A5`) across the full address space, then read every cell
+  *      and verify the readback.
+  *   2. **Read priority over write.** Inject simultaneous `readCmd.valid` and
+  *      `resultWrite.valid`; the read fires that cycle, the write
+  *      back-pressures and lands the cycle after.
+  *   3. **Loader vs result-write arbitration.** Two concurrent writes:
+  *      `resultWrite` (higher priority) wins, `loaderWrite` back-pressures and
+  *      lands next.
+  *   4. **Result-ring wrap-around.** Drive a software-managed pointer past the
+  *      result-ring size and verify the cells wrap cleanly without
+  *      address-translation glitches.
+  *   5. **One-cycle read latency.** Verify exactly one cycle of
+  *      `readResp.valid` after each `readCmd.fire`, no more, no fewer.
+  *   6. **Read-vs-write to the same address.** With the read-priority arbiter
+  *      the read wins on cycle N and the write fires on cycle N+1; the read
+  *      therefore returns the *pre-write* value and the second read (issued
+  *      after the write completes) returns the *post-write* value. Documents
+  *      the contract.
+  *   7. **Read priority over loader write.** Symmetric to case 2 but with
+  *      `loaderWrite` as the contending writer. The arbiter is supposed to
+  *      preempt either writer; case 2 alone only proves that for the
+  *      higher-priority writer.
   *
   * Run: `sbt "runMain mole.SpramControllerSim"`
   */
@@ -52,10 +48,10 @@ object SpramControllerSim {
 
   /** Issue one read command and wait for the response to land.
     *
-    * Read happens combinationally (`readCmd.ready := True`) so the
-    * cmd handshake fires immediately. The response is registered
-    * one cycle later; we wait for `readResp.valid` to observe it
-    * and snapshot the payload while the flag is still high.
+    * Read happens combinationally (`readCmd.ready := True`) so the cmd
+    * handshake fires immediately. The response is registered one cycle later;
+    * we wait for `readResp.valid` to observe it and snapshot the payload while
+    * the flag is still high.
     */
   private def doRead(dut: SpramController, addr: Long): BigInt = {
     dut.io.readCmd.valid #= true
@@ -104,9 +100,9 @@ object SpramControllerSim {
     dut.io.readCmd.payload #= 0
   }
 
-  /** Result of a [[captureReadResp]] watcher: payload captured the
-    * cycle `readResp.valid` first pulsed high, plus the watcher
-    * thread itself so callers can `.join()` it.
+  /** Result of a [[captureReadResp]] watcher: payload captured the cycle
+    * `readResp.valid` first pulsed high, plus the watcher thread itself so
+    * callers can `.join()` it.
     */
   private class FlowCapture {
     var payload: Option[BigInt] = None
@@ -115,20 +111,18 @@ object SpramControllerSim {
 
   /** Fork a watcher that snapshots the next `readResp.valid` pulse.
     *
-    * The contention cases (2, 6, 7) need to observe a one-cycle
-    * `Flow.valid` pulse at the same moment they check back-pressure
-    * state. Sampling that registered Flow with a bare
-    * `waitSampling()` + `.toBoolean` from the main thread is
-    * fragile: SpinalSim's delta ordering between input writes (the
-    * mandatory `#= false` to release the bus) and register-output
-    * observation can hide the pulse. A forked watcher loop sees
-    * every cycle and never races with input-driver writes.
+    * The contention cases (2, 6, 7) need to observe a one-cycle `Flow.valid`
+    * pulse at the same moment they check back-pressure state. Sampling that
+    * registered Flow with a bare `waitSampling()` + `.toBoolean` from the main
+    * thread is fragile: SpinalSim's delta ordering between input writes (the
+    * mandatory `#= false` to release the bus) and register-output observation
+    * can hide the pulse. A forked watcher loop sees every cycle and never races
+    * with input-driver writes.
     *
-    * Call once *before* staging the contention inputs. The watcher
-    * exits the first cycle it sees the pulse, capturing the payload
-    * into `cap.payload`. Callers should `cap.thread.join()` (or
-    * `waitSamplingWhere(cap.payload.isDefined)`) once it is safe to
-    * block.
+    * Call once *before* staging the contention inputs. The watcher exits the
+    * first cycle it sees the pulse, capturing the payload into `cap.payload`.
+    * Callers should `cap.thread.join()` (or
+    * `waitSamplingWhere(cap.payload.isDefined)`) once it is safe to block.
     */
   private def captureReadResp(dut: SpramController): FlowCapture = {
     val cap = new FlowCapture
@@ -198,11 +192,10 @@ object SpramControllerSim {
 
   /** Case 2: read priority over a contending result-write.
     *
-    * Seed the cell first so the priority test has a concrete
-    * pre-write value to read back. Then drive `readCmd.valid` and
-    * `resultWrite.valid` to the *same* cycle (different addresses
-    * to keep this case independent of case 6); confirm that the
-    * read fires this cycle and the write fires the next.
+    * Seed the cell first so the priority test has a concrete pre-write value to
+    * read back. Then drive `readCmd.valid` and `resultWrite.valid` to the
+    * *same* cycle (different addresses to keep this case independent of case
+    * 6); confirm that the read fires this cycle and the write fires the next.
     */
   def caseReadPriorityOverWrite(): Unit = {
     compileDut().doSim("read-priority-over-write") { dut =>
@@ -322,10 +315,9 @@ object SpramControllerSim {
   /** Case 4: result-ring wrap-around.
     *
     * The ring lives at addresses
-    * `[programWordCount .. programWordCount + resultWordCount)`.
-    * The producer is expected to mod the write address by
-    * `resultWordCount`. Drive it past the boundary, verify the
-    * wraparound writes land in the right cells.
+    * `[programWordCount .. programWordCount + resultWordCount)`. The producer
+    * is expected to mod the write address by `resultWordCount`. Drive it past
+    * the boundary, verify the wraparound writes land in the right cells.
     */
   def caseResultRingWrap(): Unit = {
     compileDut().doSim("result-ring-wrap") { dut =>
@@ -362,10 +354,9 @@ object SpramControllerSim {
 
   /** Case 5: read latency is exactly one cycle.
     *
-    * Drive `readCmd.valid` for a single cycle and sample
-    * `readResp.valid` on each cycle, asserting that it is high on
-    * the cycle immediately following the fire and low on every
-    * other cycle.
+    * Drive `readCmd.valid` for a single cycle and sample `readResp.valid` on
+    * each cycle, asserting that it is high on the cycle immediately following
+    * the fire and low on every other cycle.
     */
   def caseReadLatency(): Unit = {
     compileDut().doSim("read-latency") { dut =>
@@ -414,10 +405,10 @@ object SpramControllerSim {
 
   /** Case 6: simultaneous read + write to the same address.
     *
-    * The arbiter prevents this from ever reaching the primitive:
-    * the read fires this cycle (returning the pre-write value)
-    * and the write fires the cycle after. The second read (issued
-    * after the write completes) returns the post-write value.
+    * The arbiter prevents this from ever reaching the primitive: the read fires
+    * this cycle (returning the pre-write value) and the write fires the cycle
+    * after. The second read (issued after the write completes) returns the
+    * post-write value.
     */
   def caseSameAddrReadWrite(): Unit = {
     compileDut().doSim("same-addr-read-write") { dut =>
@@ -483,10 +474,9 @@ object SpramControllerSim {
 
   /** Case 7: read priority over a contending loader write.
     *
-    * Symmetric to case 2 but with `loaderWrite` instead of
-    * `resultWrite`. The read-priority arbiter is supposed to
-    * preempt either writer; case 2 only proved that for the
-    * higher-priority writer.
+    * Symmetric to case 2 but with `loaderWrite` instead of `resultWrite`. The
+    * read-priority arbiter is supposed to preempt either writer; case 2 only
+    * proved that for the higher-priority writer.
     */
   def caseReadPriorityOverLoader(): Unit = {
     compileDut().doSim("read-priority-over-loader") { dut =>

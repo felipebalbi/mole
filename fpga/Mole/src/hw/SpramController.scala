@@ -5,9 +5,9 @@ import spinal.lib._
 
 /** Write command into the [[SpramController]].
   *
-  * Bundled into a Stream so each producer (UART loader, engine
-  * result-ring write port) can offer one write per cycle and be
-  * back-pressured by the controller's arbitration when it loses.
+  * Bundled into a Stream so each producer (UART loader, engine result-ring
+  * write port) can offer one write per cycle and be back-pressured by the
+  * controller's arbitration when it loses.
   */
 case class SpramWriteCmd(addrWidth: Int) extends Bundle {
   val addr = UInt(addrWidth bits)
@@ -15,56 +15,48 @@ case class SpramWriteCmd(addrWidth: Int) extends Bundle {
 }
 
 /** Single-port SPRAM controller wrapping (one to four) iCE40 UP5K
-  * `SB_SPRAM256KA` tiles into one logical, word-addressed,
-  * stream-shaped store.
+  * `SB_SPRAM256KA` tiles into one logical, word-addressed, stream-shaped store.
   *
   * Memory model the engine sees:
-  *   - one read port (`readCmd` → `readResp`), word-grained, with
-  *     fixed one-cycle synchronous read latency. Matches
-  *     `SB_SPRAM256KA` semantics: address registered on cycle N,
-  *     data valid on cycle N+1.
-  *   - two write ports (`loaderWrite`, `resultWrite`), both
-  *     word-grained, both back-pressured by the arbiter.
-  *   - one flat address space: program words at low addresses,
-  *     result-ring words above (the *split* is enforced by the
-  *     engine and the host SDK — `SpramController` itself is
-  *     unaware).
+  *   - one read port (`readCmd` → `readResp`), word-grained, with fixed
+  *     one-cycle synchronous read latency. Matches `SB_SPRAM256KA` semantics:
+  *     address registered on cycle N, data valid on cycle N+1.
+  *   - two write ports (`loaderWrite`, `resultWrite`), both word-grained, both
+  *     back-pressured by the arbiter.
+  *   - one flat address space: program words at low addresses, result-ring
+  *     words above (the *split* is enforced by the engine and the host SDK —
+  *     `SpramController` itself is unaware).
   *
-  * Why two named write ports rather than one shared `write` port:
-  * the engine result-ring producer and the UART loader have
-  * different lifetimes (loader is only active at boot, before the
-  * engine is started; result-ring is active during every run), and
-  * different priorities. Keeping them as distinct ports preserves
-  * producer identity in code review, sim waveforms, and
-  * back-pressure analysis. Read-time the engine never overlaps
-  * with loader-time, so the arbiter never *actually* picks between
-  * `loaderWrite` and `resultWrite` in production — that case only
-  * shows up in the sim's stress test.
+  * Why two named write ports rather than one shared `write` port: the engine
+  * result-ring producer and the UART loader have different lifetimes (loader is
+  * only active at boot, before the engine is started; result-ring is active
+  * during every run), and different priorities. Keeping them as distinct ports
+  * preserves producer identity in code review, sim waveforms, and back-pressure
+  * analysis. Read-time the engine never overlaps with loader-time, so the
+  * arbiter never *actually* picks between `loaderWrite` and `resultWrite` in
+  * production — that case only shows up in the sim's stress test.
   *
-  * Arbitration:
-  *   priority 1: `readCmd`     — engine fetch path; critical.
-  *   priority 2: `resultWrite` — engine result-ring producer.
-  *   priority 3: `loaderWrite` — boot-time UART loader.
+  * Arbitration: priority 1: `readCmd` — engine fetch path; critical. priority
+  * 2: `resultWrite` — engine result-ring producer. priority 3: `loaderWrite` —
+  * boot-time UART loader.
   *
   * Read wins over both writes; if both writes want the same cycle,
-  * `resultWrite` wins. The losing write back-pressures via Stream
-  * `ready` and retries next cycle. Read-vs-write to the *same*
-  * address in the same cycle is structurally impossible under this
-  * arbiter: read wins, write loses arbitration, write is offered
-  * the bus next cycle. The `SB_SPRAM256KA` "what happens on
-  * simultaneous read+write to the same address" question therefore
+  * `resultWrite` wins. The losing write back-pressures via Stream `ready` and
+  * retries next cycle. Read-vs-write to the *same* address in the same cycle is
+  * structurally impossible under this arbiter: read wins, write loses
+  * arbitration, write is offered the bus next cycle. The `SB_SPRAM256KA` "what
+  * happens on simultaneous read+write to the same address" question therefore
   * never arises in Mole.
   *
   * @param cfg
-  *   Mole configuration record; consulted for `programWordCount`
-  *   and `resultRingByteCount` to size the logical address space.
+  *   Mole configuration record; consulted for `programWordCount` and
+  *   `resultRingByteCount` to size the logical address space.
   * @param useBlackBox
-  *   When `true` (default; the synthesis path), instantiate an
-  *   `SB_SPRAM256KA` primitive. When `false` (the sim path), back
-  *   the memory with a plain Spinal `Mem` whose semantics match
-  *   the primitive's bit-for-bit at the address-mapping wrapper
-  *   level. Sim tests pass `false` so they can run without an
-  *   external Verilog model of the iCE40 primitive.
+  *   When `true` (default; the synthesis path), instantiate an `SB_SPRAM256KA`
+  *   primitive. When `false` (the sim path), back the memory with a plain
+  *   Spinal `Mem` whose semantics match the primitive's bit-for-bit at the
+  *   address-mapping wrapper level. Sim tests pass `false` so they can run
+  *   without an external Verilog model of the iCE40 primitive.
   */
 case class SpramController(cfg: MoleConfig, useBlackBox: Boolean = true)
     extends Component {
@@ -76,7 +68,10 @@ case class SpramController(cfg: MoleConfig, useBlackBox: Boolean = true)
   val resultWordCount: Int = (cfg.resultRingByteCount + 1) / 2
   val totalWords: Int = cfg.programWordCount + resultWordCount
 
-  require(totalWords >= 1, s"SPRAM total word count must be >= 1, got $totalWords")
+  require(
+    totalWords >= 1,
+    s"SPRAM total word count must be >= 1, got $totalWords"
+  )
   // Phase 0 simplifies to a single 16k-word tile. The UP5K has
   // four; the multi-tile arbiter lands in a Step 8+ follow-up
   // when the engine actually needs more memory. With the v0
@@ -92,25 +87,24 @@ case class SpramController(cfg: MoleConfig, useBlackBox: Boolean = true)
 
   val io = new Bundle {
 
-    /** Boot-time loader-write port. Active only while the engine is
-      * stopped; the SDK programs the engine's instruction store
-      * through this port before issuing `START`.
+    /** Boot-time loader-write port. Active only while the engine is stopped;
+      * the SDK programs the engine's instruction store through this port before
+      * issuing `START`.
       */
     val loaderWrite = slave Stream SpramWriteCmd(addrWidth)
 
-    /** Run-time result-ring write port. The engine fans bytes into
-      * the ring here at up to one 16-bit word per fabric cycle.
+    /** Run-time result-ring write port. The engine fans bytes into the ring
+      * here at up to one 16-bit word per fabric cycle.
       */
     val resultWrite = slave Stream SpramWriteCmd(addrWidth)
 
     /** Engine fetch read command. */
     val readCmd = slave Stream (UInt(addrWidth bits))
 
-    /** Engine fetch response. `Flow`, not `Stream` — the SPRAM
-      * primitive returns data one cycle after the address is
-      * presented and there is no way to stall the read once it is
-      * issued. `Flow.valid` is true exactly one cycle after the
-      * cycle on which the corresponding `readCmd.fire`d.
+    /** Engine fetch response. `Flow`, not `Stream` — the SPRAM primitive
+      * returns data one cycle after the address is presented and there is no
+      * way to stall the read once it is issued. `Flow.valid` is true exactly
+      * one cycle after the cycle on which the corresponding `readCmd.fire`d.
       */
     val readResp = master Flow (Bits(16 bits))
   }
@@ -178,21 +172,21 @@ case class SpramController(cfg: MoleConfig, useBlackBox: Boolean = true)
   io.readResp.valid := RegNext(doRead) init (False)
 }
 
-/** `SB_SPRAM256KA` primitive — iCE40 UP5K single-port 16k×16-bit
-  * SPRAM tile. Each UP5K has four of these.
+/** `SB_SPRAM256KA` primitive — iCE40 UP5K single-port 16k×16-bit SPRAM tile.
+  * Each UP5K has four of these.
   *
-  * Port list cross-checked against the icestorm `cells_sim.v`
-  * reference model. The `mapClockDomain(clock = io.CLOCK)` call
-  * threads the implicit clock onto the primitive's clock pin so the
-  * tile shares the same clock domain as the surrounding logic.
+  * Port list cross-checked against the icestorm `cells_sim.v` reference model.
+  * The `mapClockDomain(clock = io.CLOCK)` call threads the implicit clock onto
+  * the primitive's clock pin so the tile shares the same clock domain as the
+  * surrounding logic.
   *
   * Pin polarity (the gotchas):
-  *   - `WREN`       active high.
-  *   - `MASKWREN`   bit-per-nibble mask, active high per nibble.
+  *   - `WREN` active high.
+  *   - `MASKWREN` bit-per-nibble mask, active high per nibble.
   *   - `CHIPSELECT` active high; tie HIGH for v0.
-  *   - `STANDBY`    active high; tie LOW (we always-on).
-  *   - `SLEEP`      active high; tie LOW (we always-on).
-  *   - `POWEROFF`   **active LOW** — tie HIGH for the tile to work.
+  *   - `STANDBY` active high; tie LOW (we always-on).
+  *   - `SLEEP` active high; tie LOW (we always-on).
+  *   - `POWEROFF` **active LOW** — tie HIGH for the tile to work.
   */
 class SB_SPRAM256KA extends BlackBox {
   val io = new Bundle {

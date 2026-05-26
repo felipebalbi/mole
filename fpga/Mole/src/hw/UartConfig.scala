@@ -55,17 +55,17 @@ object ParityType extends SpinalEnum {
   *   start of each frame on it being high (active-high "the far end can
   *   receive"). If `false` (Mole default), the `cts` port is omitted entirely
   *   and frames start as soon as a byte is offered. Mole flips the upstream
-  *   default to `false` because the host-link UART runs over an FT2232H with
-  *   no flow-control pins wired through.
+  *   default to `false` because the host-link UART runs over an FT2232H with no
+  *   flow-control pins wired through.
   * @param useRts
   *   RX-side flow control. If `true`, expose an `rts` *output* pin that we
   *   drive high while we can accept more data and low when we cannot
   *   (active-high "I can receive"). The far end's TX should gate on this. If
   *   `false` (Mole default), the `rts` port is omitted entirely and the
-  *   receiver simply asserts `overrun` if a byte arrives while downstream
-  *   isn't ready. Note the asymmetry with `useCts`: CTS gates *our* TX frame
-  *   starts, RTS announces *our* RX readiness to the other side. Mole flips
-  *   the upstream default to `false` for the same reason as `useCts`.
+  *   receiver simply asserts `overrun` if a byte arrives while downstream isn't
+  *   ready. Note the asymmetry with `useCts`: CTS gates *our* TX frame starts,
+  *   RTS announces *our* RX readiness to the other side. Mole flips the
+  *   upstream default to `false` for the same reason as `useCts`.
   *
   * NOTE FROM MOLE: the upstream `UartConfig` also carried `txFifoDepth` and
   * `rxFifoDepth` fields used exclusively by `UartController` (the Apb3 wrapper
