@@ -104,6 +104,46 @@ object SpramControllerSim {
     dut.io.readCmd.payload #= 0
   }
 
+  /** Result of a [[captureReadResp]] watcher: payload captured the
+    * cycle `readResp.valid` first pulsed high, plus the watcher
+    * thread itself so callers can `.join()` it.
+    */
+  private class FlowCapture {
+    var payload: Option[BigInt] = None
+    var thread: SimThread = null
+  }
+
+  /** Fork a watcher that snapshots the next `readResp.valid` pulse.
+    *
+    * The contention cases (2, 6, 7) need to observe a one-cycle
+    * `Flow.valid` pulse at the same moment they check back-pressure
+    * state. Sampling that registered Flow with a bare
+    * `waitSampling()` + `.toBoolean` from the main thread is
+    * fragile: SpinalSim's delta ordering between input writes (the
+    * mandatory `#= false` to release the bus) and register-output
+    * observation can hide the pulse. A forked watcher loop sees
+    * every cycle and never races with input-driver writes.
+    *
+    * Call once *before* staging the contention inputs. The watcher
+    * exits the first cycle it sees the pulse, capturing the payload
+    * into `cap.payload`. Callers should `cap.thread.join()` (or
+    * `waitSamplingWhere(cap.payload.isDefined)`) once it is safe to
+    * block.
+    */
+  private def captureReadResp(dut: SpramController): FlowCapture = {
+    val cap = new FlowCapture
+    cap.thread = fork {
+      while (cap.payload.isEmpty) {
+        if (dut.io.readResp.valid.toBoolean) {
+          cap.payload = Some(dut.io.readResp.payload.toBigInt)
+        } else {
+          dut.clockDomain.waitSampling()
+        }
+      }
+    }
+    cap
+  }
+
   // Common DUT factory --- small config so tests run fast.
   // 64 program words + 64 result bytes = 64 + 32 = 96 words → 7-bit
   // address space. Large enough to exercise wrap-around with low
@@ -179,6 +219,12 @@ object SpramControllerSim {
       doLoaderWrite(dut, writeAddr, 0x0000)
       dut.clockDomain.waitSampling(2)
 
+      // Fork the response watcher BEFORE staging the contention.
+      // It samples readResp.valid every cycle and exits the first
+      // cycle it sees the pulse, so it cannot miss the one-cycle
+      // Flow.valid that fires on the cycle after readCmd fires.
+      val resp = captureReadResp(dut)
+
       // Stage both sources simultaneously.
       dut.io.readCmd.valid #= true
       dut.io.readCmd.payload #= readAddr
@@ -200,17 +246,10 @@ object SpramControllerSim {
       // Drop the read; the write fires now.
       dut.io.readCmd.valid #= false
 
-      // The read's response (the pre-write seed) arrives one cycle
-      // after the read fired -- i.e. on the same cycle the
-      // arbitration assertions above are running. Snapshot it
-      // immediately, BEFORE waiting for the write to fire: the
-      // Flow.valid pulse only lasts one cycle and will be long
-      // past by then.
-      assert(
-        dut.io.readResp.valid.toBoolean,
-        "readResp.valid must be high on the cycle after readCmd fired"
-      )
-      val seedReadback = dut.io.readResp.payload.toBigInt
+      // Wait for the watcher to catch the readResp.valid pulse,
+      // then verify the captured payload is the pre-write seed.
+      resp.thread.join()
+      val seedReadback = resp.payload.get
       assert(
         seedReadback == BigInt(seed),
         s"read during contention must return the pre-write seed: got 0x${seedReadback.toString(16)}"
@@ -393,6 +432,10 @@ object SpramControllerSim {
       doLoaderWrite(dut, addr, pre)
       dut.clockDomain.waitSampling(2)
 
+      // Fork the response watcher BEFORE staging the contention so
+      // it can't miss the one-cycle Flow.valid pulse.
+      val resp = captureReadResp(dut)
+
       // Stage read + result write to the same address, same cycle.
       dut.io.readCmd.valid #= true
       dut.io.readCmd.payload #= addr
@@ -411,16 +454,13 @@ object SpramControllerSim {
         "resultWrite.ready must be low while a same-address read is contending"
       )
 
-      // Drop read. The read's response (pre-write value) is valid
-      // THIS cycle (one cycle after the read fired). Snapshot it
-      // here -- the Flow.valid pulse will be long past once we
-      // wait for the write to fire on the next cycle.
+      // Drop read; let the write fire next cycle.
       dut.io.readCmd.valid #= false
-      assert(
-        dut.io.readResp.valid.toBoolean,
-        "readResp.valid must be high on the cycle after readCmd fired"
-      )
-      val preReadback = dut.io.readResp.payload.toBigInt
+
+      // Watcher caught the readResp.valid pulse and snapshot the
+      // payload. The captured value must be the pre-write seed.
+      resp.thread.join()
+      val preReadback = resp.payload.get
       assert(
         preReadback == BigInt(pre),
         s"same-cycle r/w: read must see pre-write value, got 0x${preReadback.toString(16)}"
@@ -463,6 +503,9 @@ object SpramControllerSim {
       doLoaderWrite(dut, writeAddr, 0x0000)
       dut.clockDomain.waitSampling(2)
 
+      // Fork the response watcher BEFORE staging the contention.
+      val resp = captureReadResp(dut)
+
       dut.io.readCmd.valid #= true
       dut.io.readCmd.payload #= readAddr
       dut.io.loaderWrite.valid #= true
@@ -480,11 +523,10 @@ object SpramControllerSim {
       )
 
       dut.io.readCmd.valid #= false
-      assert(
-        dut.io.readResp.valid.toBoolean,
-        "readResp.valid must be high on the cycle after readCmd fired"
-      )
-      val seedReadback = dut.io.readResp.payload.toBigInt
+
+      // Watcher caught the readResp.valid pulse.
+      resp.thread.join()
+      val seedReadback = resp.payload.get
       assert(
         seedReadback == BigInt(seed),
         s"read during loader contention must return pre-write seed: got 0x${seedReadback.toString(16)}"
