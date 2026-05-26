@@ -31,6 +31,7 @@ stable contract" before changing either.
       icebreaker.pcf, README.md, AGENTS.md, TODO.md, project/,
       src/{hw,sim}/).
 - [x] **Step 1 --- `MoleConfig`.** Compile-time config record + spec-floor sim.
+- [x] **Step 2 --- `MoleBus`.** 3-signal open-drain / push-pull bundle + wired-AND audit.
 
 ---
 
@@ -77,7 +78,7 @@ project.
 - **Makefile:** `sim-config` target added; `sim` aggregate now
   depends on it; `.PHONY` updated.
 
-### 🔲 Step 2 --- `OpenDrainBus`
+### ✅ Step 2 --- `MoleBus`
 
 **Goal:** the `IMasterSlave` bundle every block that touches the
 bus exposes. Mirrors `I2cIo` in the I2c example project but with
@@ -85,51 +86,45 @@ push-pull-capable pads so the per-bit `tx_symbol` field can
 decode (against the active `BUS_MODE`) into an actively driven
 high (I3C PP) instead of just releasing it (I2C / I3C OD).
 
-**Files:** `src/hw/OpenDrainBus.scala`.
+**What landed:**
 
-**Suggested IO:**
-```scala
-case class MoleBusLine() extends Bundle {
-  val driveLow  = Bool()  // pull NMOS low
-  val driveHigh = Bool()  // active high (PP); ignored in OD mode
-  val read      = Bool()  // sampled wire value
-}
-
-case class MoleBus() extends Bundle with IMasterSlave {
-  val scl = MoleBusLine()
-  val sda = MoleBusLine()
-  override def asMaster(): Unit = {
-    out(scl.driveLow, scl.driveHigh, sda.driveLow, sda.driveHigh)
-    in(scl.read, sda.read)
-  }
-}
-```
-
-**Design notes:**
-- This is *not* a stock `ReadableOpenDrain` --- that primitive has
-  only `(write, read)` and can't express PP-drive-high. Mole
-  needs the third state explicitly. Document the divergence from
-  the I2c example project here when this lands.
-- Decoder lives elsewhere (engine / pad wrapper); this bundle is
-  just plumbing.
-- Pad wrapper (`MolePad.scala` later, or inline in `MoleTop`)
-  maps to SB_IO in push-pull mode with output-enable controlled
-  by `(driveLow | driveHigh)`. Bus contention (`driveLow &
-  driveHigh`) is illegal and should be asserted out in sim.
-- The "release all" helper writes `False` to all four `drive*`
-  fields --- both NMOS off, no active high → pull-up wins.
-- One bundle is reused everywhere; do **not** copy the drive
-  fields inline into other components.
-
-**Sim:** Step 2 lands `OpenDrainBusSim`, the wired-AND helper for
-sims with multiple participants on a bus. Wired-AND becomes
-"low wins; if no one is low, highest active-high driver wins; if
-no one drives, pull-up wins" --- so the helper has to model three
-participants: NMOS pull-downs, PP pull-ups, and the external
-pull-up resistor. A bus contention case (one peer drives low,
-another drives high) should assert.
-
-**Makefile:** uncomment `sim-opendrain`.
+- **Files:** `src/hw/MoleBus.scala`, `src/sim/OpenDrainBusSim.scala`.
+- **Bundle shape:** `MoleBusLine` is itself an `IMasterSlave`
+  exposing `driveLow`, `driveHigh` (outputs in master view) and
+  `read` (input in master view). `MoleBus` aggregates two lines
+  (`scl`, `sda`) and `master(scl); master(sda)`s them — same
+  pattern as `I2cIo` in the sibling project. The recursion through
+  nested `IMasterSlave` lets `controller.io.bus <> target.io.bus`
+  connect all six leaf signals correctly in one line.
+- **No `releaseAll()` helper.** The repo-level AGENTS explicitly
+  rejects helpers from the sibling `I2cIo` like `releaseAll`
+  because Mole's bus-shaped FSMs always *set* each driver on
+  every transition (last-assignment-wins clobber risk
+  otherwise). Wide-fanout "release" comes through the symbol
+  decoder selecting `tx_symbol = hiz`, which decodes to
+  `(driveLow=0, driveHigh=0)`.
+- **Divergence from hint:** the TODO hint listed the file as
+  `src/hw/OpenDrainBus.scala`, but the bundle is `MoleBus` and
+  `AGENTS.md` §"Open-drain primitive" calls it `MoleBus` as well.
+  Picked `MoleBus.scala` (matches bundle name); the sim file
+  stays `OpenDrainBusSim.scala` because that's what the Makefile
+  target is named and what the AGENTS describes the resolution
+  function as testing.
+- **Sim:** plain Scala `App`, not a SpinalSim DUT. The bundle
+  has no state to exercise; what we want to verify is the *bus
+  resolution function* future engine sims will use to wired-AND
+  N participants on the same line. Exposes
+  `OpenDrainBusSim.wiredAnd(parts: Seq[Drive]): Option[Boolean]`
+  and `resolveBus(...)` — pure functions sampled at sim time
+  from each participant's `driveLow` / `driveHigh` values.
+  Asserts every legal and illegal combination: released,
+  one-low, one-high, many-released, partial-low, low-vs-high
+  split (low wins — NMOS dominates), and self-contention
+  (`driveLow=True && driveHigh=True` on a single participant,
+  which the symbol decoder is never allowed to produce —
+  reported as `None`).
+- **Makefile:** `sim-opendrain` target uncommented; aggregate
+  `sim:` depends on it; `.PHONY` updated.
 
 ### 🔲 Step 3 --- UART (`UartIo`, `BaudGenerator`, `UartRx`, `UartTx`)
 
