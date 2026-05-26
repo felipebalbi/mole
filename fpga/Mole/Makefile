@@ -69,14 +69,23 @@ $(BIN): $(ASC)
 
 # Aggregate sim target. Per-block sim targets land as the project
 # grows (see TODO.md). Keep this list and .PHONY in sync.
-sim: ## Run all simulations
-	@echo "no sims wired yet -- add sim-<block> targets per TODO.md"
+sim: sim-config sim-opendrain sim-baud-gen sim-rx-sync \
+     sim-tx-shiftreg sim-rx-shiftreg sim-tx-fsm sim-rx-fsm \
+     sim-uart-tx sim-uart-rx sim-uart sim-spram ## Run all simulations
 
 # Per-block sim / gen targets land here once their hint blocks in
 # TODO.md flip from 🔲 to ✅. The naming contract is fixed:
 #
 #   sim-config           src/sim/MoleConfigSim.scala         (Step  1)
 #   sim-opendrain        src/sim/OpenDrainBusSim.scala       (Step  2)
+#   sim-baud-gen         src/sim/BaudGeneratorSim.scala      (Step  4)
+#   sim-rx-sync          src/sim/RxSyncSim.scala             (Step  4)
+#   sim-tx-shiftreg      src/sim/TxShiftRegSim.scala         (Step  4)
+#   sim-rx-shiftreg      src/sim/RxShiftRegSim.scala         (Step  4)
+#   sim-tx-fsm           src/sim/TxFsmSim.scala              (Step  4)
+#   sim-rx-fsm           src/sim/RxFsmSim.scala              (Step  4)
+#   sim-uart-tx          src/sim/UartTxSim.scala             (Step  4)
+#   sim-uart-rx          src/sim/UartRxSim.scala             (Step  4)
 #   sim-uart             src/sim/UartSim.scala               (Step  4)
 #   sim-spram            src/sim/SpramControllerSim.scala    (Step  6)
 #   sim-isa              src/sim/InstructionSim.scala        (Step  7)
@@ -88,17 +97,41 @@ sim: ## Run all simulations
 # `make help` and code review can verify each step lands what it
 # promised. Each will be uncommented as its step ships.
 
-# sim-config: ## Run MoleConfig spec-floor audit (lands with Step 1)
-# 	$(SBT) -batch "runMain $(PACKAGE).MoleConfigSim"
+sim-config: ## Run MoleConfig spec-floor audit (Step 1)
+	$(SBT) -batch "runMain $(PACKAGE).MoleConfigSim"
 
-# sim-opendrain: ## Run OpenDrainBus wired-AND sim (lands with Step 2)
-# 	$(SBT) -batch "runMain $(PACKAGE).OpenDrainBusSim"
+sim-opendrain: ## Run OpenDrainBus wired-AND audit (Step 2)
+	$(SBT) -batch "runMain $(PACKAGE).OpenDrainBusSim"
 
-# sim-uart: ## Run UART RX/TX sim (lands with Step 4)
-# 	$(SBT) -batch "runMain $(PACKAGE).UartSim"
+sim-baud-gen: ## Run BaudGenerator DDS audit (Step 4)
+	$(SBT) -batch "runMain $(PACKAGE).BaudGeneratorSim"
 
-# sim-spram: ## Run SPRAM controller sim (lands with Step 6)
-# 	$(SBT) -batch "runMain $(PACKAGE).SpramControllerSim"
+sim-rx-sync: ## Run RxSync metastability audit (Step 4)
+	$(SBT) -batch "runMain $(PACKAGE).RxSyncSim"
+
+sim-tx-shiftreg: ## Run TxShiftReg sim (Step 4)
+	$(SBT) -batch "runMain $(PACKAGE).TxShiftRegSim"
+
+sim-rx-shiftreg: ## Run RxShiftReg sim (Step 4)
+	$(SBT) -batch "runMain $(PACKAGE).RxShiftRegSim"
+
+sim-tx-fsm: ## Run TxFsm sim (Step 4)
+	$(SBT) -batch "runMain $(PACKAGE).TxFsmSim"
+
+sim-rx-fsm: ## Run RxFsm sim (Step 4)
+	$(SBT) -batch "runMain $(PACKAGE).RxFsmSim"
+
+sim-uart-tx: ## Run UartTx black-box sim (Step 4)
+	$(SBT) -batch "runMain $(PACKAGE).UartTxSim"
+
+sim-uart-rx: ## Run UartRx black-box sim (Step 4)
+	$(SBT) -batch "runMain $(PACKAGE).UartRxSim"
+
+sim-uart: ## Run UART TX -> RX loopback (Step 4)
+	$(SBT) -batch "runMain $(PACKAGE).UartSim"
+
+sim-spram: ## Run SPRAM controller sim (Step 6)
+	$(SBT) -batch "runMain $(PACKAGE).SpramControllerSim"
 
 # sim-isa: ## Round-trip the 11-opcode encoder/decoder (lands with Step 7)
 # 	$(SBT) -batch "runMain $(PACKAGE).InstructionSim"
@@ -142,4 +175,7 @@ help: ## Show this help (every target with a ## description)
 		/^[a-zA-Z0-9_.-]+:.*## / { printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2 }' \
 		$(MAKEFILE_LIST)
 
-.PHONY: all sim waves flash clean distclean help
+.PHONY: all sim sim-config sim-opendrain sim-baud-gen sim-rx-sync \
+        sim-tx-shiftreg sim-rx-shiftreg sim-tx-fsm sim-rx-fsm \
+        sim-uart-tx sim-uart-rx sim-uart sim-spram \
+        waves flash clean distclean help

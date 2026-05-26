@@ -30,45 +30,61 @@ stable contract" before changing either.
 - [x] Project scaffold (Makefile, build.sbt, .scalafmt.conf,
       icebreaker.pcf, README.md, AGENTS.md, TODO.md, project/,
       src/{hw,sim}/).
+- [x] **Step 1 --- `MoleConfig`.** Compile-time config record + spec-floor sim.
+- [x] **Step 2 --- `MoleBus`.** 3-signal open-drain / push-pull bundle + wired-AND audit.
+- [x] **Step 3 --- UART.** Imported `UartConfig`, `BaudGenerator`, `RxSync`, `Tx/RxShiftReg`, `Tx/RxFsm`, `UartTx`, `UartRx` from sibling Uart project.
+- [x] **Step 4 --- UART sims.** Imported 8 sub-block sims; added top-level `UartSim` loopback.
+- [x] **Step 5 --- `SpramController`.** One-tile SPRAM wrapper with read-priority arbitration; `SB_SPRAM256KA` BlackBox + `Mem` sim path.
+- [x] **Step 6 --- `SpramControllerSim`.** 7 black-box cases against the `Mem` substitute: write/read coverage, read-priority arbitration (both writers), wrap-around, latency, same-address r/w.
 
 ---
 
 ## 🔲 Phase 0 --- Foundations
 
-### 🔲 Step 1 --- `MoleConfig`
+### ✅ Step 1 --- `MoleConfig`
 
 **Goal:** a single, by-value compile-time record that every
 sub-block keys off, so widths and counter constants are derived
 once at elaboration. Mirrors `I2cConfig` from the I2c example
 project.
 
-**Files:** `src/hw/MoleConfig.scala`.
+**What landed:**
 
-**Suggested fields:**
-- `fabricFreqHz: HertzNumber` --- target post-PLL clock. v0 = 48
-  MHz (UP5K-friendly), tunable up to ~60 MHz with timing margin.
-- `quarterPeriodCyclesReset: Int` --- power-on default for the
-  quarter-bit divider (overridable at runtime via `LOAD_TIMING`).
-- `programWordCount: Int` --- SPRAM-backed program memory depth
-  in 16-bit words.
-- `resultRingByteCount: Int` --- result ring depth in bytes.
-- `captureMaxBits: Int` --- per-program cap on capturable bits
-  (back-pressure boundary).
-- `uartBaud: Int` --- default UART baud (3 Mbaud comfortable on
-  FT2232H; 115 200 for early dev).
+- **Files:** `src/hw/MoleConfig.scala`, `src/sim/MoleConfigSim.scala`.
+- **`MoleConfig` defaults:** `fabricFreqHz = 48 MHz`,
+  `quarterPeriodCyclesReset = 12` (1 MHz bit rate at default
+  divider), `programWordCount = 4096` (12-bit JMP addr cap),
+  `resultRingByteCount = 8192`, `captureMaxBits = 65536`,
+  `uartBaud = 2_000_000`. Each field has a `require(...)` guard;
+  `programWordCount` is capped at 4096 per the ISA's 12-bit JMP
+  operand (ROADMAP §"Encoding width"). One helper:
+  `quarterPeriodCyclesFor(quarterHz: HertzNumber): Int`.
+- **`uartBaud` choice:** iCEBreaker's FT2232H supports up to
+  12 Mbaud, so the host side has plenty of headroom. 2 Mbaud is
+  the highest baud that still fits the textbook 16× RX oversample
+  on a 48 MHz fabric: `baudRate × oversample = 32 MHz < 48 MHz`,
+  and `phaseInc = round(2_000_000 × 16 × 2^24 / 48_000_000) ≈
+  11_184_811 (0xAAA_AAB)`, comfortably inside the 24-bit DDS
+  accumulator with ppm-level baud accuracy. Pushing higher (e.g.
+  3 Mbaud) would either overflow the DDS at 16× or force dropping
+  oversample to 8× — neither is justified for v0.
+- **Divergence from hint:** the hint said *Sim: none (pure data
+  record). Makefile: no new target.* Reconsidered ---
+  `MoleConfig` is the source of truth for every sub-block's timing,
+  so a regression in its derived helpers would silently warp every
+  bus speed. Added `MoleConfigSim` as a plain Scala `App` (no
+  `SimConfig.compile`) that asserts the default config can produce
+  a valid integer divider for every Phase-0 bus rate
+  (I²C 100 k / 400 k / 1 M, I³C OD 2 M / 4 M) and `println`-warns
+  about I³C PP-high (12.5 MHz SCL → 50 MHz quarter rate) being
+  out of reach at 48 MHz fabric. Runs in milliseconds; gated by
+  `make sim-config`.
+- **Sim:** `src/sim/MoleConfigSim.scala`. Plain Scala main, not a
+  SpinalSim DUT. Asserts spec-floor coverage at default config.
+- **Makefile:** `sim-config` target added; `sim` aggregate now
+  depends on it; `.PHONY` updated.
 
-**Design notes:**
-- All `quarterPeriodCycles` derivations live here, exactly like
-  `I2cConfig` did for I²C. Sub-blocks consume the derived field;
-  they do not re-derive from `fabricFreqHz`.
-- `fabricFreqHz` is plumbed as a Spinal `HertzNumber` so the
-  type system catches MHz-vs-Hz mismatches at elaboration.
-
-**Sim:** none (pure data record).
-
-**Makefile:** no new target.
-
-### 🔲 Step 2 --- `OpenDrainBus`
+### ✅ Step 2 --- `MoleBus`
 
 **Goal:** the `IMasterSlave` bundle every block that touches the
 bus exposes. Mirrors `I2cIo` in the I2c example project but with
@@ -76,81 +92,164 @@ push-pull-capable pads so the per-bit `tx_symbol` field can
 decode (against the active `BUS_MODE`) into an actively driven
 high (I3C PP) instead of just releasing it (I2C / I3C OD).
 
-**Files:** `src/hw/OpenDrainBus.scala`.
+**What landed:**
 
-**Suggested IO:**
-```scala
-case class MoleBusLine() extends Bundle {
-  val driveLow  = Bool()  // pull NMOS low
-  val driveHigh = Bool()  // active high (PP); ignored in OD mode
-  val read      = Bool()  // sampled wire value
-}
+- **Files:** `src/hw/MoleBus.scala`, `src/sim/OpenDrainBusSim.scala`.
+- **Bundle shape:** `MoleBusLine` is itself an `IMasterSlave`
+  exposing `driveLow`, `driveHigh` (outputs in master view) and
+  `read` (input in master view). `MoleBus` aggregates two lines
+  (`scl`, `sda`) and `master(scl); master(sda)`s them — same
+  pattern as `I2cIo` in the sibling project. The recursion through
+  nested `IMasterSlave` lets `controller.io.bus <> target.io.bus`
+  connect all six leaf signals correctly in one line.
+- **No `releaseAll()` helper.** The repo-level AGENTS explicitly
+  rejects helpers from the sibling `I2cIo` like `releaseAll`
+  because Mole's bus-shaped FSMs always *set* each driver on
+  every transition (last-assignment-wins clobber risk
+  otherwise). Wide-fanout "release" comes through the symbol
+  decoder selecting `tx_symbol = hiz`, which decodes to
+  `(driveLow=0, driveHigh=0)`.
+- **Divergence from hint:** the TODO hint listed the file as
+  `src/hw/OpenDrainBus.scala`, but the bundle is `MoleBus` and
+  `AGENTS.md` §"Open-drain primitive" calls it `MoleBus` as well.
+  Picked `MoleBus.scala` (matches bundle name); the sim file
+  stays `OpenDrainBusSim.scala` because that's what the Makefile
+  target is named and what the AGENTS describes the resolution
+  function as testing.
+- **Sim:** plain Scala `App`, not a SpinalSim DUT. The bundle
+  has no state to exercise; what we want to verify is the *bus
+  resolution function* future engine sims will use to wired-AND
+  N participants on the same line. Exposes
+  `OpenDrainBusSim.wiredAnd(parts: Seq[Drive]): Option[Boolean]`
+  and `resolveBus(...)` — pure functions sampled at sim time
+  from each participant's `driveLow` / `driveHigh` values.
+  Asserts every legal and illegal combination: released,
+  one-low, one-high, many-released, partial-low, low-vs-high
+  split (low wins — NMOS dominates), and self-contention
+  (`driveLow=True && driveHigh=True` on a single participant,
+  which the symbol decoder is never allowed to produce —
+  reported as `None`).
+- **Makefile:** `sim-opendrain` target uncommented; aggregate
+  `sim:` depends on it; `.PHONY` updated.
 
-case class MoleBus() extends Bundle with IMasterSlave {
-  val scl = MoleBusLine()
-  val sda = MoleBusLine()
-  override def asMaster(): Unit = {
-    out(scl.driveLow, scl.driveHigh, sda.driveLow, sda.driveHigh)
-    in(scl.read, sda.read)
-  }
-}
-```
+### ✅ Step 3 --- UART (`UartConfig`, `BaudGenerator`, `RxSync`, shift regs, FSMs, `UartTx`, `UartRx`)
 
-**Design notes:**
-- This is *not* a stock `ReadableOpenDrain` --- that primitive has
-  only `(write, read)` and can't express PP-drive-high. Mole
-  needs the third state explicitly. Document the divergence from
-  the I2c example project here when this lands.
-- Decoder lives elsewhere (engine / pad wrapper); this bundle is
-  just plumbing.
-- Pad wrapper (`MolePad.scala` later, or inline in `MoleTop`)
-  maps to SB_IO in push-pull mode with output-enable controlled
-  by `(driveLow | driveHigh)`. Bus contention (`driveLow &
-  driveHigh`) is illegal and should be asserted out in sim.
-- The "release all" helper writes `False` to all four `drive*`
-  fields --- both NMOS off, no active high → pull-up wins.
-- One bundle is reused everywhere; do **not** copy the drive
-  fields inline into other components.
+**Goal:** in-tree UART RX/TX, no cross-project dep. 8N1 by
+default; runtime-tunable baud via a divider counter.
 
-**Sim:** Step 2 lands `OpenDrainBusSim`, the wired-AND helper for
-sims with multiple participants on a bus. Wired-AND becomes
-"low wins; if no one is low, highest active-high driver wins; if
-no one drives, pull-up wins" --- so the helper has to model three
-participants: NMOS pull-downs, PP pull-ups, and the external
-pull-up resistor. A bus contention case (one peer drives low,
-another drives high) should assert.
+**What landed:**
 
-**Makefile:** uncomment `sim-opendrain`.
+- **Files (all in `src/hw/`):** `UartConfig.scala`,
+  `BaudGenerator.scala`, `RxSync.scala`, `TxShiftReg.scala`,
+  `RxShiftReg.scala`, `TxFsm.scala`, `RxFsm.scala`,
+  `UartTx.scala`, `UartRx.scala`.
+- **Source:** copied verbatim from
+  `felipebalbi/icebreaker-spinalhdl-examples@98c06a8c` `Uart/src/hw/`
+  with `package uart` → `package mole` on every file and a one-line
+  credit header comment naming the upstream sha. The credit header
+  is parsed by no tool — it just tells the next reader where to look
+  for the upstream when re-syncing.
+- **Skipped from upstream:** `UartController.scala` (Apb3 register-
+  file wrapper Mole does not need), `UartEchoDemo.scala` /
+  `UartTxDemo.scala` (top-level demos with iCEbreaker pin maps),
+  `Revision.scala` (Mole's own `Revision.scala` lands with Step 8
+  using the engine's REVISION word, different field layout).
+- **`UartConfig` modifications:**
+  - Stripped `txFifoDepth` / `rxFifoDepth` fields and their
+    `require`s. Confirmed by grep that they were referenced only by
+    `UartController.scala` and `UartControllerSim.scala`, neither
+    of which is imported.
+  - Flipped `useCts` / `useRts` defaults from `true` to `false`.
+    Mole's host-link runs over an FT2232H with no flow-control pins
+    wired through; bare `UartTx(UartConfig())` should therefore
+    expose neither port.
+  - Added `require(baudRate.toLong * oversample < clkFreqHz, …)`.
+    Without this guard, the 24-bit DDS phase increment computed by
+    the RX-side `BaudGenerator` overflows silently when `baudRate
+    * oversample >= clkFreqHz` (rubber-duck-caught Phase-0
+    blocker). The `.toLong` widening prevents 32-bit `Int *`
+    wrap-around at evaluation time.
+- **`UartTx` / `UartRx` modifications:** dropped the
+  `UartTxVerilog` / `UartRxVerilog` companion objects. They
+  generated bare-core Verilog for sibling-repo iCEbreaker bring-up;
+  Mole's top-level Verilog entry point lands with Step 15.
+- **Divergence from hint:**
+  - The TODO listed `src/hw/UartIo.scala` as one of the files.
+    Upstream has no such file — `UartTx` and `UartRx` declare
+    `io = new Bundle { … }` directly. The copy follows upstream;
+    no `UartIo.scala` lands.
+  - The TODO says "no parity" but the upstream `UartConfig`
+    already gates parity at elaboration via `cfg.parity` (default
+    `ParityType.None` elides all parity hardware). Mole keeps
+    parity available as a future-work knob without paying any
+    hardware cost when it's off.
+- **Sim:** none in Step 3 itself — the 8 per-block sims and the
+  top-level loopback land with Step 4.
+- **Makefile:** no new target.
 
-### 🔲 Step 3 --- UART (`UartIo`, `BaudGenerator`, `UartRx`, `UartTx`)
-
-**Goal:** in-tree UART RX/TX, no cross-project dep. 8N1 only;
-runtime-tunable baud via a divider counter.
-
-**Files:** `src/hw/UartIo.scala`, `src/hw/BaudGenerator.scala`,
-`src/hw/UartRx.scala`, `src/hw/UartTx.scala`.
-
-**Design notes:**
-- Single-rate (start, 8 data, stop). No parity. No flow control;
-  back-pressure handled at the engine layer via the result ring.
-- `BaudGenerator` divides `fabricFreqHz` to the baud-x16 clock
-  used by the RX state machine for mid-bit sampling.
-- TX is a straightforward shifter; RX is a 16x oversampling FSM.
-
-**Sim:** Step 4.
-
-**Makefile:** no new target yet (sim lands in Step 4).
-
-### 🔲 Step 4 --- `UartSim`
+### ✅ Step 4 --- UART sims
 
 **Goal:** loopback `UartTx` → `UartRx` at several baud rates;
 test back-to-back frames; test stop-bit-missing recovery.
 
-**Files:** `src/sim/UartSim.scala`.
+**What landed:**
 
-**Makefile:** uncomment `sim-uart`.
+- **Files (all in `src/sim/`):** `BaudGeneratorSim.scala`,
+  `RxSyncSim.scala`, `TxShiftRegSim.scala`, `RxShiftRegSim.scala`,
+  `TxFsmSim.scala`, `RxFsmSim.scala`, `UartTxSim.scala`,
+  `UartRxSim.scala` — all imported verbatim from
+  `felipebalbi/icebreaker-spinalhdl-examples@98c06a8c`
+  `Uart/src/sim/` with `package uart → package mole` and a credit
+  header naming the upstream sha. The 8 imported sims already
+  cover DDS phase accuracy, RxSync metastability, shift-register
+  direction, FSM frame-format edge cases, parity / framing /
+  overrun, and CTS / RTS flow control end-to-end.
+  - `UartSim.scala` is new — the top-level TX → RX loopback test
+    Mole owns directly. Wires `UartTx` to `UartRx` inside a
+    `UartLoopbackDut` so the harness only deals with Stream
+    handshakes (no mid-bit wire decoding required, unlike
+    `UartTxSim` and `UartRxSim`).
+- **`UartLoopbackDut`:** lives in `src/sim/` because it only ever
+  builds under `SimConfig.compile(...)` — keeping it out of
+  `src/hw/` is what stops `make` picking it up when generating
+  `MoleTop.v`. Three sim-side ports beyond the obvious
+  `data` / `rx` Streams: `wireOverride` + `wireOverrideEnable`
+  inject a glitch on the wire mid-idle (the real `tx.io.tx` is
+  multiplexed against the override on `enable`), and `wireRead`
+  surfaces the live wire value for waveform inspection.
+- **Three configs exercised:**
+  1. `12 MHz / 115 200 baud` — sibling project default; sanity.
+  2. `48 MHz / 115 200 baud` — Mole "early dev".
+  3. `48 MHz / 2 Mbaud` — Mole production default per
+     `MoleConfig.uartBaud`. iCEBreaker's FT2232H supports up to
+     12 Mbaud; 2 Mbaud × 16× oversample = 32 MHz tick rate, well
+     under the 24-bit DDS overflow threshold at 48 MHz fabric.
+  All three satisfy the rubber-duck-added `baudRate * oversample
+  < clkFreqHz` `require` on `UartConfig`.
+- **Coverage per config:** single-byte round-trip across a
+  representative pattern set (`0x00`, `0xFF`, `0xAA`, `0x55`,
+  `0xAD`, `0x80`, `0x01`); back-to-back burst with `valid` held
+  high across the whole sequence (catches FSMs that require
+  `valid` to deassert between frames); single-cycle wire glitch
+  injection mid-idle followed by a clean frame (verifies RX's
+  oversample windowing debounces sub-bit pulses).
+- **Divergence from earlier plan:** the original loopback target
+  list included 3 MBaud and 12 MBaud stress cases. They're
+  removed — at the v0 default of 48 MHz fabric × 16× oversample
+  they would push DDS phaseInc to / past the 24-bit field limit
+  and would refuse to elaborate under the new `UartConfig`
+  guard. They land as a follow-up once an 8× oversample option
+  is added to `UartConfig`.
+- **Sim runner docstrings fixed:** the upstream copies all had
+  `Run: sbt "runMain uart.<name>"`. Swept all 8 to
+  `runMain mole.<name>` to match Mole's package.
+- **Makefile:** added per-sim targets `sim-baud-gen`,
+  `sim-rx-sync`, `sim-tx-shiftreg`, `sim-rx-shiftreg`,
+  `sim-tx-fsm`, `sim-rx-fsm`, `sim-uart-tx`, `sim-uart-rx`,
+  `sim-uart`. The aggregate `sim` now depends on all 12 Phase-0
+  sims wired so far. `.PHONY` updated.
 
-### 🔲 Step 5 --- `SpramController`
+### ✅ Step 5 --- `SpramController`
 
 **Goal:** wrap the UP5K's 4× 16k×16 SPRAM tiles into a single
 program-memory + result-ring backing store with a Stream-shaped
@@ -168,9 +267,66 @@ UART loader and the result-ring producer).
 - Single-port semantics --- arbitrate writes from UART loader vs
   result-ring producer, reads from engine fetch path.
 
+**What landed:**
+- `src/hw/SpramController.scala` --- `case class
+  SpramController(cfg: MoleConfig, useBlackBox: Boolean = true)`.
+  Three Stream-shaped IOs (`loaderWrite`, `resultWrite`,
+  `readCmd`) plus a one-cycle-latency `Flow`-shaped `readResp`.
+- **Two write ports (not one), named after producer identity.**
+  `loaderWrite` is the boot-time UART program loader,
+  `resultWrite` is the engine result-ring producer. Keeping them
+  distinct preserves the producer in code review and sim
+  waveforms; arbitration logic combines them under the hood.
+- **`readResp` is a `Flow`, not a `Stream`.** The `SB_SPRAM256KA`
+  primitive returns data one cycle after the address is presented
+  and offers no way to back-pressure once the read is in flight.
+  Modelling the response as a `Flow` matches that semantics
+  precisely; consumers buffer downstream if they cannot accept a
+  read result every cycle.
+- **Read-priority arbitration.** `readCmd.ready := True` (engine
+  fetch is critical path); `resultWrite.ready := !readCmd.valid`;
+  `loaderWrite.ready := !readCmd.valid && !resultWrite.valid`.
+  Read-vs-write to the same address in the same cycle is
+  *structurally* impossible: the write loses arbitration and is
+  offered the bus next cycle. The "what happens on simultaneous
+  same-cycle r/w to one address" question therefore never reaches
+  the primitive.
+- **One tile, not four (Phase 0 simplification).** The plan
+  sketched a 1-to-4-tile address translator; Phase 0 ships
+  one-tile-only with a `require(totalWords <= 16384)`. With the
+  v0 defaults (4096 program + 4096 result words = 8192) we use
+  half of one tile; users can push the result ring to ~24 KiB
+  before tripping the require. Multi-tile arbitration lands as a
+  Step 8+ follow-up when the engine actually needs more memory.
+- **`SB_SPRAM256KA` BlackBox** declared in the same file. Port
+  list cross-checked against icestorm's `cells_sim.v` reference
+  model. `mapClockDomain(clock = io.CLOCK)` threads the implicit
+  clock onto the primitive's `CLOCK` pin. `noIoPrefix()` strips
+  the `io_` prefix from generated Verilog ports so the
+  instantiation matches the primitive's real port names.
+  **POWEROFF is active LOW** and is tied HIGH for the tile to be
+  operational --- the single most common iCE40 SPRAM bring-up
+  gotcha is documented inline.
+- **Sim path** (`useBlackBox = false`) backs the wrapper with a
+  plain `Mem(Bits(16 bits), 1 << addrWidth)` using
+  `mem.readSync(addr, enable = doRead)` and `mem.write(addr,
+  wrData)`. The address-mux + ready-back-pressure logic lives
+  outside the `if (useBlackBox)` branch and is therefore
+  exercised end-to-end by the sim despite the primitive being
+  substituted.
+- **`useBlackBox` is a constructor parameter, not auto-detected.**
+  The plan's risk register flagged
+  `GenerationFlags.simulation.isEnabled` as unverified in
+  Spinal 1.14.1. Falling back to an explicit boolean keeps the
+  build deterministic --- sims pass `false`, the (future) Verilog
+  generator at Step 15 will pass `true`.
+- **`readResp.valid := RegNext(doRead) init (False)`** lags
+  `readCmd.fire` by exactly one cycle, matching both the BlackBox
+  and `Mem` read latencies.
+
 **Sim:** Step 6.
 
-### 🔲 Step 6 --- `SpramControllerSim`
+### ✅ Step 6 --- `SpramControllerSim`
 
 **Goal:** smoke-test address mapping, single-port arbitration,
 and result-ring wrap-around.
@@ -178,6 +334,63 @@ and result-ring wrap-around.
 **Files:** `src/sim/SpramControllerSim.scala`.
 
 **Makefile:** uncomment `sim-spram`.
+
+**What landed:**
+- `src/sim/SpramControllerSim.scala` --- SpinalSim object exposing
+  7 black-box cases against `SpramController(smallCfg,
+  useBlackBox = false)` (the sim path uses the `Mem` substitute;
+  the wrapper logic --- arbitration, address mux, ready
+  back-pressure --- is identical between the two paths).
+- `smallCfg`: `programWordCount = 64`, `resultRingByteCount = 64`
+  → `totalWords = 96`, `addrWidth = 7`. Small enough that
+  "write every cell, read every cell" runs in a few hundred
+  cycles; large enough to exercise wrap-around with a low pass
+  count.
+- **Cases:**
+  1. **`caseWriteReadAllCells`** --- loader-write the pattern
+     `addr ^ 0xA5A5` to every cell, read every cell, compare.
+     Catches address-mux bugs and any bit-bound issue in the
+     `Mem` substitute.
+  2. **`caseReadPriorityOverWrite`** --- contend `readCmd` +
+     `resultWrite`; assert read fires, write back-pressures,
+     read returns the pre-write seed; let the write fire on the
+     next cycle and verify it lands.
+  3. **`caseResultBeatsLoader`** --- contend `loaderWrite` +
+     `resultWrite`; assert `resultWrite` wins, loader
+     back-pressures, both writes eventually land.
+  4. **`caseResultRingWrap`** --- write to the ring address range
+     `[programWordCount .. programWordCount + resultWordCount)`
+     three full passes; verify each cell holds the value from
+     the last pass.
+  5. **`caseReadLatency`** --- fire one read; assert
+     `readResp.valid` is high on the next cycle (and low on the
+     cycle after that), and the payload matches the seeded
+     value. Documents the one-cycle synchronous-read contract.
+  6. **`caseSameAddrReadWrite`** --- contend `readCmd` +
+     `resultWrite` on the same address; assert the read returns
+     the *pre-write* value, the write lands the next cycle, and
+     a second read returns the post-write value. The arbiter
+     prevents the dangerous same-cycle-r/w-to-same-cell case
+     from ever reaching the SPRAM primitive.
+  7. **`caseReadPriorityOverLoader`** --- symmetric to case 2 but
+     with `loaderWrite` as the contender (rubber-duck-added: case 2
+     alone only proved read priority against the *higher*
+     priority writer).
+- **Helpers:** `doRead`, `doLoaderWrite`, `doResultWrite`, `quiet`.
+  Each driver helper drops `valid` immediately after the
+  handshake fires so it cannot accidentally fire a second time.
+  `quiet` zeroes all sources at the top of every case for
+  guaranteed reset hygiene.
+- **Timing discipline (rubber-duck-caught):** the contention
+  cases (2, 6, 7) snapshot `readResp.valid` and payload **on the
+  cycle immediately after the read fires** (i.e. while the
+  arbitration assertions are running) and BEFORE waiting for
+  the back-pressured write to fire. `readResp` is a `Flow`
+  whose `valid` only pulses for one cycle; waiting for the
+  write before checking the response would always race past
+  the pulse.
+- **Makefile:** uncommented `sim-spram`; updated aggregate `sim`
+  target and `.PHONY` to include it.
 
 ---
 
