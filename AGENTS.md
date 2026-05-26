@@ -94,7 +94,10 @@ workspace. Do not merge them.
 4. **No new linting, build, or test infrastructure without being
    asked.** The roadmap will introduce CI in a deliberate phase
    (see ROADMAP §Phased plan). Until then, don't add `.github/
-   workflows/`, pre-commit hooks, `deny.toml`, etc.
+   workflows/`, pre-commit hooks, `deny.toml`, etc. This includes
+   commit-message tooling --- Conventional Commits (§6) is a
+   *convention*, not enforcement; don't add `commitlint`, husky
+   hooks, or a "commit message check" GitHub Action unless asked.
 5. **Don't bypass the namespace contract in the Scheme SDK.**
    Anything inside `i2c/`, `i3c/`, `ccc/`, `hdr-ddr/` *must* emit a
    spec-correct bitstream. Off-spec behavior belongs under `raw/`
@@ -274,19 +277,122 @@ workspace. Do not merge them.
 
 ## 6. Commit conventions
 
-- Short imperative subject line, ~50 char target, 72 max.
-- Body wrapped at ~72 columns, separated from the subject by a
-  blank line. Explain the *why*.
-- Scope prefix encouraged once we have multiple crates / FPGA
-  projects: `engine: ...`, `sdk: ...`, `encoder: ...`,
-  `roadmap: ...`.
-- AI-assisted commits **must** carry:
+Mole follows
+[Conventional Commits 1.0.0](https://www.conventionalcommits.org/en/v1.0.0/).
+Commit messages take the form `<type>(<scope>): <subject>`
+(scope optional) with an optional body and footers.
+
+### Allowed types
+
+The eleven standard types from conventionalcommits.org. The
+first five are expected to be common in Mole; the rest are
+rarer but welcome when they fit.
+
+- `feat` --- a new feature (new opcode, new SDK primitive,
+  new sub-block).
+- `fix` --- a bug fix.
+- `test` --- adding or fixing a test / sim. Use this when
+  only test code changes, not the DUT.
+- `ci` --- changes to `.github/workflows/*` or other CI
+  plumbing.
+- `docs` --- documentation only (`README.md`, `AGENTS.md`,
+  `ROADMAP.md`, rustdoc, in-source headers).
+- `refactor` --- code change that neither fixes a bug nor
+  adds a feature.
+- `perf` --- code change that improves performance.
+- `style` --- whitespace / formatting only, no semantic
+  change. (`scalafmt` / `cargo fmt` runs land under
+  `style`.)
+- `build` --- changes to `build.sbt`, `Makefile`,
+  `Cargo.toml` metadata, dependency versions.
+- `chore` --- routine maintenance that doesn't fit elsewhere
+  (gitignore updates, file moves with no content change).
+- `revert` --- revert of a prior commit. Per the spec, the
+  subject is `revert: <original subject>` and the body must
+  reference the reverted commit hash.
+
+### Current scopes
+
+Scope is optional per the spec; use one when it applies.
+Extend this list as new sub-trees land --- don't pre-declare
+scopes for sub-trees that don't exist yet.
+
+- `engine` --- SpinalHDL bit-cycle engine and its sims
+  (`fpga/Mole/`).
+- `sdk` --- Scheme SDK (Layer 1).
+- `encoder` --- host-side Rust bytecode encoder.
+- `cli` --- host CLI (when it lands).
+- `roadmap` --- changes to `ROADMAP.md`.
+- `agents` --- changes to this file (`AGENTS.md`).
+- `readme` --- changes to top-level `README.md`.
+
+Future scopes: `firmware` (Pico no_std workspace), `ffi`,
+per-board FPGA project scopes (e.g. `engine-rojo` once Mole
+Rojo gets its own FPGA sub-tree).
+
+### Subject, body, footers
+
+- Subject line ≤ 72 chars including the `<type>(<scope>):`
+  prefix. No separate soft target --- 72 is fine.
+- Subject in imperative mood ("add", "fix", "split"), no
+  trailing period.
+- Body wrapped at ~72 cols, separated from the subject by a
+  blank line. Explain the *why*, not the *what*. The diff
+  already shows the what.
+- One logical change per commit. If you find yourself
+  writing "and also" in the body, split the commit.
+- Footers go at the end after a blank line and follow the
+  spec (`Token: value` lines, hyphens for spaces in the
+  token; the one exception is `BREAKING CHANGE:` which uses
+  a space).
+
+### Breaking changes
+
+A commit that breaks a wire-format, ABI, or public-API
+contract MUST mark itself as breaking, in BOTH of the
+following ways:
+
+1. Append `!` after the type or `type(scope)`:
+   `feat(engine)!: relocate flag triple to [2:0]`.
+2. Include a `BREAKING CHANGE:` footer describing the break
+   and (where relevant) the new format version:
+   ```
+   BREAKING CHANGE: bytecode format bumped from v0 to v1.
+   The BRANCH_ON / WAIT_ON cond-code field moves from
+   bits [10:7] to bits [11:8] to align with the encoding
+   in §3.10. Hosts emitting v0 bytecode against a v1
+   engine (or vice versa) will mis-decode every opcode.
+   ```
+
+Per §3.17, the bytecode wire format is a stable contract
+once Phase 0 ships its first tagged encoder release. Wire-
+format breaks after that point MUST be accompanied by a
+bumped format version in `ROADMAP.md` and a `BREAKING
+CHANGE:` footer; never sneak a break through as a bare
+`feat:`.
+
+### AI-assisted commits
+
+- AI-assisted commits **must** carry the Copilot trailer:
   ```
   Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
   ```
-- No `Signed-off-by:` from an agent (see §3.8).
-- One logical change per commit. If you find yourself writing "and
-  also" in the body, split the commit.
+- No `Signed-off-by:` from an agent (see §3.8) --- the DCO
+  is a human certification.
+
+### Examples
+
+```text
+feat(engine): add SET_BUS_MODE opcode encoding
+fix(engine): satisfy DDS guard in UART sims
+test(engine): forked-watcher for SpramControllerSim race
+ci: install Verilator from apt; drop oss-cad-suite
+docs(roadmap): clarify quarter-bit timing budget
+feat(engine)!: relocate flag triple to [2:0]
+```
+
+The `!` form's body must also contain a `BREAKING CHANGE:`
+footer (see "Breaking changes" above).
 
 ---
 

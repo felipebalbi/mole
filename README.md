@@ -75,6 +75,19 @@ for what lands when.
    format is a stability contract; changes to it require a
    roadmap update in the same PR.
 
+## Commit conventions
+
+Mole follows
+[Conventional Commits 1.0.0](https://www.conventionalcommits.org/en/v1.0.0/).
+Commits take the form `<type>(<scope>): <subject>` (scope
+optional). See [`AGENTS.md`](./AGENTS.md) §6 for the allowed
+types, current scopes, breaking-change rules, and worked
+examples.
+
+Two Mole-specific addenda: AI-assisted commits must carry the
+Copilot `Co-authored-by:` trailer, and `Signed-off-by:` trailers
+are reserved for humans (the DCO is a human certification).
+
 ## License
 
 TBD. No license file is present yet; treat the contents as
