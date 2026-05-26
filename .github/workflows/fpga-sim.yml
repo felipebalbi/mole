@@ -1,0 +1,134 @@
+# FPGA simulation CI for the Mole project.
+#
+# Runs every Mole sub-block simulation on push and on every PR
+# targeting `main`. The intent is to catch the class of bugs that
+# only show up when the toolchain (sbt + Verilator + SpinalHDL) is
+# actually invoked --- type errors, scalafmt drift, RTL/sim races,
+# and CRLF creep --- without the user having to remember to spin
+# the simulator up on a second machine.
+#
+# What this workflow does NOT do:
+#   - run `make` / `make all` --- synth and P&R depend on the
+#     `MoleTopVerilog` entrypoint, which lands at Step 15. Add a
+#     separate job once that exists.
+#   - run hardware bring-up (obviously).
+#   - publish artifacts. On failure, the assertion message from
+#     the failing sim is the diagnostic; revisit if the sim count
+#     grows past a comfortable wall of text.
+
+name: fpga-sim
+
+on:
+  push:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  sim:
+    name: SpinalHDL sims (sbt + Verilator + oss-cad-suite)
+    runs-on: ubuntu-latest
+
+    env:
+      # Pin the YosysHQ oss-cad-suite release. Bumping this is a
+      # deliberate, reviewable change --- never use `latest`.
+      OSS_CAD_SUITE_TAG: 2026-05-26
+      OSS_CAD_SUITE_ASSET: oss-cad-suite-linux-x64-20260526.tgz
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      # AGENTS.md §3.1 / §4: every text file in this repo is LF
+      # only. CRLF in source produces whole-file diffs that drown
+      # out real changes, and CRLF in shell scripts / makefiles
+      # silently breaks them. Fail loudly if any creep in.
+      - name: CRLF guard
+        run: |
+          set -eu
+          # Restrict to text-file extensions to avoid noise from
+          # any future binary artefact a contributor commits by
+          # accident. List is intentionally narrow --- expand as
+          # new source-file kinds appear in the repo.
+          offenders=$(find fpga/Mole .github -type f \
+            \( -name '*.scala' -o -name '*.sbt' -o -name '*.yml' \
+            -o -name '*.yaml' -o -name '*.md' -o -name '*.conf' \
+            -o -name '*.pcf' -o -name '*.properties' \
+            -o -name 'Makefile' \) -print0 \
+            | xargs -0 grep -lP '\r' || true)
+          if [ -n "$offenders" ]; then
+            echo "::error::CRLF line endings found --- run dos2unix on the listed files:"
+            echo "$offenders"
+            exit 1
+          fi
+
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          # Built-in sbt cache: ~/.sbt, ~/.ivy2/cache, ~/.cache/coursier
+          # keyed on **/*.sbt and **/project/build.properties. Warm
+          # runs drop the sbt bootstrap from ~3 min to ~30 s.
+          cache: sbt
+
+      - name: Install sbt
+        uses: sbt/setup-sbt@v1
+
+      # The YosysHQ oss-cad-suite tarball is ~1 GB but covers
+      # Verilator + yosys + nextpnr-{ice40,ecp5} + icestorm with
+      # matched versions. Caching it keeps the workflow under
+      # 5 min on warm runs.
+      - name: Cache oss-cad-suite
+        id: cache-oss-cad-suite
+        uses: actions/cache@v4
+        with:
+          path: ~/oss-cad-suite
+          key: ${{ env.OSS_CAD_SUITE_TAG }}-${{ env.OSS_CAD_SUITE_ASSET }}
+
+      - name: Install oss-cad-suite
+        if: steps.cache-oss-cad-suite.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          cd "$HOME"
+          url="https://github.com/YosysHQ/oss-cad-suite-build/releases/download/${OSS_CAD_SUITE_TAG}/${OSS_CAD_SUITE_ASSET}"
+          echo "Downloading $url"
+          curl -fsSL -o oss-cad-suite.tgz "$url"
+          tar -xzf oss-cad-suite.tgz
+          rm oss-cad-suite.tgz
+
+      - name: Add oss-cad-suite to PATH
+        run: echo "$HOME/oss-cad-suite/bin" >> "$GITHUB_PATH"
+
+      - name: Verify toolchain
+        working-directory: fpga/Mole
+        run: |
+          set -eu
+          java -version
+          sbt --version
+          verilator --version
+          yosys -V
+          nextpnr-ice40 --version 2>&1 || true
+          icepack --help 2>&1 || true
+
+      # scalafmt drift is cheap to catch and worthless to debug
+      # later when a refactor diff is buried in formatting noise.
+      - name: Check formatting (scalafmt)
+        working-directory: fpga/Mole
+        run: sbt -batch scalafmtCheckAll
+
+      # Catches Scala type errors before any sim is even compiled
+      # to C++ by Verilator --- much faster failure signal.
+      - name: Compile Scala
+        working-directory: fpga/Mole
+        run: sbt -batch compile
+
+      # The main event: every Phase-0 sub-block sim, end to end.
+      # `make sim` aggregates all 12 current targets.
+      - name: Run all simulations
+        working-directory: fpga/Mole
+        run: make sim
