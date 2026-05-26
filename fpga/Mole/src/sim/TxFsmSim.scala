@@ -397,8 +397,11 @@ object TxFsmSim {
     val patterns5 = Seq(0x00, 0x1f, 0x15, 0x0a, 0x10, 0x01, 0x0d)
     val backToBackBytes5 = Seq(0x12, 0x14, 0x16, 0x18)
 
-    // Use a small clk/baud ratio for fast sim — ticksPerBit = 10.
-    val clk = 1000000
+    // Small clk/baud ratio for fast sim -- ticksPerBit = 20.
+    // Mole: bumped clk from 1_000_000 to 2_000_000 so the
+    // configurations satisfy Mole's added require
+    // `baudRate * oversample < clkFreqHz` in UartConfig.
+    val clk = 2000000
     val baud = 100000
 
     // Sweep matrix the user asked for. Listed roughly easiest-first so

@@ -30,9 +30,12 @@ object BaudGeneratorSim {
   def main(args: Array[String]): Unit = {
 
     // Small ratio keeps the sim fast while exercising the DDS math.
+    // Mole: bumped clk from 1_000_000 to 2_000_000 (ticksPerBit
+    // 10 -> 20) so the configuration satisfies Mole's added
+    // require `baudRate * oversample < clkFreqHz` in UartConfig.
     val cfg = UartConfig(
-      clkFreqHz = 1000000,
-      baudRate = 100000 // => ticksPerBit = 10
+      clkFreqHz = 2000000,
+      baudRate = 100000 // => ticksPerBit = 20
     )
     val ticksPerBit = cfg.ticksPerBit
     val numTicks = 200 // enough samples to average out jitter

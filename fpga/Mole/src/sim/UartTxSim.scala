@@ -497,8 +497,11 @@ object UartTxSim {
     val patterns8 = Seq(0x00, 0xff, 0xaa, 0x55, 0xad)
     val backToBackBytes8 = Seq(0x12, 0x34, 0x56, 0x78)
 
-    // Use a small clk/baud ratio for fast sim — ticksPerBit = 10.
-    val clk = 1000000
+    // Small clk/baud ratio for fast sim -- ticksPerBit = 20.
+    // Mole: bumped clk from 1_000_000 to 2_000_000 so the
+    // configurations satisfy Mole's added require
+    // `baudRate * oversample < clkFreqHz` in UartConfig.
+    val clk = 2000000
     val baud = 100000
 
     // (7) Config-matrix smoke. The FSM and shift register have already
