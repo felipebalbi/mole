@@ -376,24 +376,33 @@ object SpramControllerSim {
         "readResp.valid must be low while idle"
       )
 
+      // Fork the response watcher BEFORE staging the read.  Even
+      // without a contending writer, sampling the registered
+      // `readResp.valid` pulse from the main thread the cycle
+      // after `readCmd.valid #= false` races with SpinalSim's
+      // delta ordering --- the same race that bit cases 2/6/7.
+      // The watcher loop sees every cycle and never races with
+      // input-driver writes.  See `captureReadResp`'s docstring.
+      val resp = captureReadResp(dut)
+
       // Fire one read.
       dut.io.readCmd.valid #= true
       dut.io.readCmd.payload #= addr
       dut.clockDomain.waitSampling()
       dut.io.readCmd.valid #= false
 
-      // Next cycle: readResp.valid high, payload correct.
-      assert(
-        dut.io.readResp.valid.toBoolean,
-        "readResp.valid must be high one cycle after readCmd.fire"
-      )
-      val got = dut.io.readResp.payload.toBigInt
+      // Wait for the watcher to catch the readResp.valid pulse,
+      // then verify the captured payload.
+      resp.thread.join()
+      val got = resp.payload.get
       assert(
         got == BigInt(0xa5b6),
         s"readResp.payload mismatch: 0x${got.toString(16)}"
       )
 
-      // Cycle after that: readResp.valid back low.
+      // Two full cycles after the fire `readCmd.valid` has been
+      // low long enough that `RegNext(doRead)` is settled False
+      // --- no race here, a bare sample is fine.
       dut.clockDomain.waitSampling()
       assert(
         !dut.io.readResp.valid.toBoolean,
