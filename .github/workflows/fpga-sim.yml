@@ -28,14 +28,8 @@ permissions:
 
 jobs:
   sim:
-    name: SpinalHDL sims (sbt + Verilator + oss-cad-suite)
+    name: SpinalHDL sims (sbt + Verilator)
     runs-on: ubuntu-latest
-
-    env:
-      # Pin the YosysHQ oss-cad-suite release. Bumping this is a
-      # deliberate, reviewable change --- never use `latest`.
-      OSS_CAD_SUITE_TAG: 2026-05-26
-      OSS_CAD_SUITE_ASSET: oss-cad-suite-linux-x64-20260526.tgz
 
     steps:
       - name: Checkout
@@ -79,30 +73,33 @@ jobs:
       - name: Install sbt
         uses: sbt/setup-sbt@v1
 
-      # The YosysHQ oss-cad-suite tarball is ~1 GB but covers
-      # Verilator + yosys + nextpnr-{ice40,ecp5} + icestorm with
-      # matched versions. Caching it keeps the workflow under
-      # 5 min on warm runs.
-      - name: Cache oss-cad-suite
-        id: cache-oss-cad-suite
-        uses: actions/cache@v4
-        with:
-          path: ~/oss-cad-suite
-          key: ${{ env.OSS_CAD_SUITE_TAG }}-${{ env.OSS_CAD_SUITE_ASSET }}
-
-      - name: Install oss-cad-suite
-        if: steps.cache-oss-cad-suite.outputs.cache-hit != 'true'
+      # Verilator is installed from Ubuntu apt rather than from
+      # YosysHQ oss-cad-suite. Why:
+      #
+      #   - oss-cad-suite 2026-05-26 ships Verilator 5.049-devel
+      #     (rev v5.048-132-ga2d4b90b5), which dropped the `WData`
+      #     type in upstream PR #7642 (merged 2026-05-22) in favour
+      #     of `VlWide` / `VlWide4AB`.
+      #   - SpinalHDL 1.14.1's generated `__spinalWrapper.cpp` still
+      #     emits `WData` references, so its C++ model fails to
+      #     compile against any Verilator at or above that cutoff.
+      #     Tracked upstream as SpinalHDL issue #1919.
+      #   - Ubuntu 24.04 noble ships Verilator 5.020 (apt), which
+      #     predates the cutoff and is well-tested with SpinalHDL
+      #     1.14.1.
+      #
+      # `make sim` only needs Verilator + g++ + JDK + sbt --- it
+      # does not need yosys / nextpnr / icestorm. When Step 15
+      # lands `MoleTopVerilog` and we add a `make all` synth job,
+      # bring oss-cad-suite back as a separate job so the
+      # sim-toolchain and synth-toolchain decisions stay
+      # independent. Revisit this apt pin once SpinalHDL #1919 is
+      # fixed and the project bumps SpinalHDL.
+      - name: Install Verilator
         run: |
-          set -euo pipefail
-          cd "$HOME"
-          url="https://github.com/YosysHQ/oss-cad-suite-build/releases/download/${OSS_CAD_SUITE_TAG}/${OSS_CAD_SUITE_ASSET}"
-          echo "Downloading $url"
-          curl -fsSL -o oss-cad-suite.tgz "$url"
-          tar -xzf oss-cad-suite.tgz
-          rm oss-cad-suite.tgz
-
-      - name: Add oss-cad-suite to PATH
-        run: echo "$HOME/oss-cad-suite/bin" >> "$GITHUB_PATH"
+          set -eu
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends verilator
 
       - name: Verify toolchain
         working-directory: fpga/Mole
@@ -111,9 +108,7 @@ jobs:
           java -version
           sbt --version
           verilator --version
-          yosys -V
-          nextpnr-ice40 --version 2>&1 || true
-          icepack --help 2>&1 || true
+          g++ --version
 
       # scalafmt drift is cheap to catch and worthless to debug
       # later when a refactor diff is buried in formatting noise.
