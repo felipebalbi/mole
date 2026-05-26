@@ -2,6 +2,7 @@ package mole
 
 import spinal.core._
 import spinal.core.sim._
+import spinal.sim.SimThread
 import spinal.lib._
 
 /** Black-box-style sim for [[SpramController]].
