@@ -69,8 +69,7 @@ $(BIN): $(ASC)
 
 # Aggregate sim target. Per-block sim targets land as the project
 # grows (see TODO.md). Keep this list and .PHONY in sync.
-sim: ## Run all simulations
-	@echo "no sims wired yet -- add sim-<block> targets per TODO.md"
+sim: sim-config ## Run all simulations
 
 # Per-block sim / gen targets land here once their hint blocks in
 # TODO.md flip from 🔲 to ✅. The naming contract is fixed:
@@ -88,8 +87,8 @@ sim: ## Run all simulations
 # `make help` and code review can verify each step lands what it
 # promised. Each will be uncommented as its step ships.
 
-# sim-config: ## Run MoleConfig spec-floor audit (lands with Step 1)
-# 	$(SBT) -batch "runMain $(PACKAGE).MoleConfigSim"
+sim-config: ## Run MoleConfig spec-floor audit (Step 1)
+	$(SBT) -batch "runMain $(PACKAGE).MoleConfigSim"
 
 # sim-opendrain: ## Run OpenDrainBus wired-AND sim (lands with Step 2)
 # 	$(SBT) -batch "runMain $(PACKAGE).OpenDrainBusSim"
@@ -142,4 +141,4 @@ help: ## Show this help (every target with a ## description)
 		/^[a-zA-Z0-9_.-]+:.*## / { printf "  \033[36m%-16s\033[0m %s\n", $$1, $$2 }' \
 		$(MAKEFILE_LIST)
 
-.PHONY: all sim waves flash clean distclean help
+.PHONY: all sim sim-config waves flash clean distclean help

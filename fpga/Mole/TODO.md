@@ -30,43 +30,52 @@ stable contract" before changing either.
 - [x] Project scaffold (Makefile, build.sbt, .scalafmt.conf,
       icebreaker.pcf, README.md, AGENTS.md, TODO.md, project/,
       src/{hw,sim}/).
+- [x] **Step 1 --- `MoleConfig`.** Compile-time config record + spec-floor sim.
 
 ---
 
 ## 🔲 Phase 0 --- Foundations
 
-### 🔲 Step 1 --- `MoleConfig`
+### ✅ Step 1 --- `MoleConfig`
 
 **Goal:** a single, by-value compile-time record that every
 sub-block keys off, so widths and counter constants are derived
 once at elaboration. Mirrors `I2cConfig` from the I2c example
 project.
 
-**Files:** `src/hw/MoleConfig.scala`.
+**What landed:**
 
-**Suggested fields:**
-- `fabricFreqHz: HertzNumber` --- target post-PLL clock. v0 = 48
-  MHz (UP5K-friendly), tunable up to ~60 MHz with timing margin.
-- `quarterPeriodCyclesReset: Int` --- power-on default for the
-  quarter-bit divider (overridable at runtime via `LOAD_TIMING`).
-- `programWordCount: Int` --- SPRAM-backed program memory depth
-  in 16-bit words.
-- `resultRingByteCount: Int` --- result ring depth in bytes.
-- `captureMaxBits: Int` --- per-program cap on capturable bits
-  (back-pressure boundary).
-- `uartBaud: Int` --- default UART baud (3 Mbaud comfortable on
-  FT2232H; 115 200 for early dev).
-
-**Design notes:**
-- All `quarterPeriodCycles` derivations live here, exactly like
-  `I2cConfig` did for I²C. Sub-blocks consume the derived field;
-  they do not re-derive from `fabricFreqHz`.
-- `fabricFreqHz` is plumbed as a Spinal `HertzNumber` so the
-  type system catches MHz-vs-Hz mismatches at elaboration.
-
-**Sim:** none (pure data record).
-
-**Makefile:** no new target.
+- **Files:** `src/hw/MoleConfig.scala`, `src/sim/MoleConfigSim.scala`.
+- **`MoleConfig` defaults:** `fabricFreqHz = 48 MHz`,
+  `quarterPeriodCyclesReset = 12` (1 MHz bit rate at default
+  divider), `programWordCount = 4096` (12-bit JMP addr cap),
+  `resultRingByteCount = 8192`, `captureMaxBits = 65536`,
+  `uartBaud = 921 600`. Each field has a `require(...)` guard;
+  `programWordCount` is capped at 4096 per the ISA's 12-bit JMP
+  operand (ROADMAP §"Encoding width"). One helper:
+  `quarterPeriodCyclesFor(quarterHz: HertzNumber): Int`.
+- **`uartBaud` choice:** the TODO hint says "3 Mbaud comfortable on
+  FT2232H" but at the v0 default of 48 MHz fabric × 16× RX
+  oversample, a 3 MBaud DDS would need `phaseInc = 2^24` --- right
+  at the 24-bit field's overflow. 921 600 keeps a 3.3× DDS margin
+  (rubber-duck-caught blocking issue). Raising to 3 MBaud needs
+  either an 8× oversample option in `UartConfig` or fabric > 60 MHz;
+  both are out of Phase-0 scope.
+- **Divergence from hint:** the hint said *Sim: none (pure data
+  record). Makefile: no new target.* Reconsidered ---
+  `MoleConfig` is the source of truth for every sub-block's timing,
+  so a regression in its derived helpers would silently warp every
+  bus speed. Added `MoleConfigSim` as a plain Scala `App` (no
+  `SimConfig.compile`) that asserts the default config can produce
+  a valid integer divider for every Phase-0 bus rate
+  (I²C 100 k / 400 k / 1 M, I³C OD 2 M / 4 M) and `println`-warns
+  about I³C PP-high (12.5 MHz SCL → 50 MHz quarter rate) being
+  out of reach at 48 MHz fabric. Runs in milliseconds; gated by
+  `make sim-config`.
+- **Sim:** `src/sim/MoleConfigSim.scala`. Plain Scala main, not a
+  SpinalSim DUT. Asserts spec-floor coverage at default config.
+- **Makefile:** `sim-config` target added; `sim` aggregate now
+  depends on it; `.PHONY` updated.
 
 ### 🔲 Step 2 --- `OpenDrainBus`
 
