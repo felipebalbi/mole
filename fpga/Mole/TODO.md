@@ -39,7 +39,7 @@ stable contract" before changing either.
 
 ---
 
-## 🔲 Phase 0 --- Foundations
+## ✅ Phase 0 --- Foundations
 
 ### ✅ Step 1 --- `MoleConfig`
 
