@@ -33,6 +33,7 @@ stable contract" before changing either.
 - [x] **Step 1 --- `MoleConfig`.** Compile-time config record + spec-floor sim.
 - [x] **Step 2 --- `MoleBus`.** 3-signal open-drain / push-pull bundle + wired-AND audit.
 - [x] **Step 3 --- UART.** Imported `UartConfig`, `BaudGenerator`, `RxSync`, `Tx/RxShiftReg`, `Tx/RxFsm`, `UartTx`, `UartRx` from sibling Uart project.
+- [x] **Step 4 --- UART sims.** Imported 8 sub-block sims; added top-level `UartSim` loopback.
 
 ---
 
@@ -182,14 +183,65 @@ default; runtime-tunable baud via a divider counter.
   top-level loopback land with Step 4.
 - **Makefile:** no new target.
 
-### 🔲 Step 4 --- `UartSim`
+### ✅ Step 4 --- UART sims
 
 **Goal:** loopback `UartTx` → `UartRx` at several baud rates;
 test back-to-back frames; test stop-bit-missing recovery.
 
-**Files:** `src/sim/UartSim.scala`.
+**What landed:**
 
-**Makefile:** uncomment `sim-uart`.
+- **Files (all in `src/sim/`):** `BaudGeneratorSim.scala`,
+  `RxSyncSim.scala`, `TxShiftRegSim.scala`, `RxShiftRegSim.scala`,
+  `TxFsmSim.scala`, `RxFsmSim.scala`, `UartTxSim.scala`,
+  `UartRxSim.scala` — all imported verbatim from
+  `felipebalbi/icebreaker-spinalhdl-examples@98c06a8c`
+  `Uart/src/sim/` with `package uart → package mole` and a credit
+  header naming the upstream sha. The 8 imported sims already
+  cover DDS phase accuracy, RxSync metastability, shift-register
+  direction, FSM frame-format edge cases, parity / framing /
+  overrun, and CTS / RTS flow control end-to-end.
+  - `UartSim.scala` is new — the top-level TX → RX loopback test
+    Mole owns directly. Wires `UartTx` to `UartRx` inside a
+    `UartLoopbackDut` so the harness only deals with Stream
+    handshakes (no mid-bit wire decoding required, unlike
+    `UartTxSim` and `UartRxSim`).
+- **`UartLoopbackDut`:** lives in `src/sim/` because it only ever
+  builds under `SimConfig.compile(...)` — keeping it out of
+  `src/hw/` is what stops `make` picking it up when generating
+  `MoleTop.v`. Three sim-side ports beyond the obvious
+  `data` / `rx` Streams: `wireOverride` + `wireOverrideEnable`
+  inject a glitch on the wire mid-idle (the real `tx.io.tx` is
+  multiplexed against the override on `enable`), and `wireRead`
+  surfaces the live wire value for waveform inspection.
+- **Three configs exercised:**
+  1. `12 MHz / 115 200 baud` — sibling project default; sanity.
+  2. `48 MHz / 115 200 baud` — Mole "early dev".
+  3. `48 MHz / 921 600 baud` — Mole production default per
+     `MoleConfig.uartBaud`.
+  All three satisfy the rubber-duck-added `baudRate * oversample
+  < clkFreqHz` `require` on `UartConfig`.
+- **Coverage per config:** single-byte round-trip across a
+  representative pattern set (`0x00`, `0xFF`, `0xAA`, `0x55`,
+  `0xAD`, `0x80`, `0x01`); back-to-back burst with `valid` held
+  high across the whole sequence (catches FSMs that require
+  `valid` to deassert between frames); single-cycle wire glitch
+  injection mid-idle followed by a clean frame (verifies RX's
+  oversample windowing debounces sub-bit pulses).
+- **Divergence from earlier plan:** the original loopback target
+  list included 3 MBaud and 12 MBaud stress cases. They're
+  removed — at the v0 default of 48 MHz fabric × 16× oversample
+  they would push DDS phaseInc to / past the 24-bit field limit
+  and would refuse to elaborate under the new `UartConfig`
+  guard. They land as a follow-up once an 8× oversample option
+  is added to `UartConfig`.
+- **Sim runner docstrings fixed:** the upstream copies all had
+  `Run: sbt "runMain uart.<name>"`. Swept all 8 to
+  `runMain mole.<name>` to match Mole's package.
+- **Makefile:** added per-sim targets `sim-baud-gen`,
+  `sim-rx-sync`, `sim-tx-shiftreg`, `sim-rx-shiftreg`,
+  `sim-tx-fsm`, `sim-rx-fsm`, `sim-uart-tx`, `sim-uart-rx`,
+  `sim-uart`. The aggregate `sim` now depends on all 12 Phase-0
+  sims wired so far. `.PHONY` updated.
 
 ### 🔲 Step 5 --- `SpramController`
 
