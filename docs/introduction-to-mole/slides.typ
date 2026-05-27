@@ -1,39 +1,32 @@
-// Mole --- Introduction deck.
-//
-// Build with `typst compile slides.typ` from this directory, or
-// `make` (see the local Makefile). Output goes to `slides.pdf`,
-// which is gitignored.
-//
-// Polylux 0.4.x.  Aporetic Sans for body, Aporetic Serif for
-// headings, Aporetic Sans Mono for code.  Install the fonts in
-// the typical OS font path before building; see README.md.
-//
-// Shared helpers and the polylux import live in `lib.typ` so the
-// chapter files (`#include`d below, each evaluated in its own
-// scope) can also reach them via `#import "../lib.typ": *`.
+// slides.typ -- entry point for the Mole introduction deck.
 
 #import "lib.typ": *
 
 #set page(
   paper: "presentation-16-9",
-  margin: (x: 2cm, y: 1.5cm),
-  fill: rgb("#fdfdfb"),
+  margin: (x: 50pt, y: 40pt),
+  fill: bg-page,
 )
 
 #set text(
-  font: "Aporetic Sans",
-  size: 22pt,
-  fill: rgb("#1a1a1a"),
+  font: font-sans,
+  size: 18pt,
+  fill: ink,
 )
 
-#show heading: set text(font: "Aporetic Serif", weight: "semibold")
-#show heading.where(level: 1): set text(size: 38pt)
-#show heading.where(level: 2): set text(size: 30pt)
-#show heading.where(level: 3): set text(size: 24pt)
+// Global rules: inline raw is mono-only; block raw lands on a subtle
+// cream panel with explicit dark fill so it never vanishes when wrapped
+// in a styled context.  `code-slide` overrides this to render straight
+// onto a dark panel.  `code-panel` (in lib.typ) does the same inline.
+#show raw: set text(font: font-mono, size: 15pt, fill: ink)
+#show raw.where(block: true): it => block(
+  fill: bg-subtle,
+  inset: 12pt,
+  radius: 4pt,
+  width: 100%,
+  text(fill: ink, it),
+)
 
-#show raw: set text(font: "Aporetic Sans Mono", size: 18pt)
-
-// --- Deck order -------------------------------------------------
 #include "chapters/00-cover.typ"
 #include "chapters/01-problem.typ"
 #include "chapters/02-architecture.typ"

@@ -2,57 +2,68 @@
 
 // Result ring + post-processing.
 
-#section-slide("Results ring")
+#section-slide("08", "Results ring")
 
-#slide[
-  = What the engine writes
-  A bounded ring buffer in FPGA RAM. The host reads it back
-  over UART (Verde) or USB (Rojo) after `HALT`.
-
-  Record types:
-  - `REVISION` --- bytecode format version + engine git hash.
-    Written once, at program start.
-  - `CAPTURE` --- the bit (or quarter) observed at a `capture=1`
-    point, plus any sticky flags that fired since the last
-    record.
-  - `MARK` --- a host-provided 16-bit marker that the program
-    wrote via the `MARK` opcode. Useful as a "we got to
-    line 42" breadcrumb.
-  - `HALT` --- terminal record. Engine is idle.
+#content-slide(
+  "Four record types",
+  kicker-text: "What the engine writes",
+)[
+  #v(0.4em)
+  #align(center)[
+    #pill("REVISION") #h(0.6em)
+    #pill("CAPTURE") #h(0.6em)
+    #pill("MARK") #h(0.6em)
+    #pill("HALT")
+  ]
+  #v(0.8em)
+  #bullets(
+    [Bounded ring in FPGA RAM.],
+    [Host drains it over UART after `HALT`.],
+    [Wrap is detectable. History is honest.],
+  )
 ]
 
-#slide[
-  = Why a ring, not a stream?
-  Two reasons.
-
-  + *Back-pressure goes the wrong way.* The engine runs at
-    fabric clock; UART runs at 115200 bps. If we streamed
-    every quarter live, we'd lose data the moment something
-    interesting happened.
-  + *Storage is cheap, host RAM is infinite.* Run the
-    program; let the ring fill at fabric speed; drain it at
-    UART speed after `HALT`. If the ring wraps, you lost
-    the earlier history --- but you can see *that* it
-    wrapped from the record headers.
-
-  Verde's ring is sized for ~16K records. Rojo's SDRAM is
-  effectively unbounded.
+#content-slide(
+  "Why a ring, not a stream?",
+  kicker-text: "Back-pressure goes the wrong way",
+)[
+  #v(0.4em)
+  #two-col[
+    #align(center)[
+      #text(font: font-serif, size: 44pt, weight: "bold", fill: accent)[24 MHz]
+      #v(-0.3em)
+      #text(size: 12pt, fill: muted, tracking: 2pt)[#upper("Fabric")]
+    ]
+  ][
+    #align(center)[
+      #text(font: font-serif, size: 44pt, weight: "bold", fill: secondary)[1 Mbaud]
+      #v(-0.3em)
+      #text(size: 12pt, fill: muted, tracking: 2pt)[#upper("UART out")]
+    ]
+  ]
+  #v(0.8em)
+  #align(center)[
+    #text(font: font-serif, size: 18pt, style: "italic", fill: muted)[
+      Capture at fabric speed. Drain at human speed.
+    ]
+  ]
 ]
 
-#slide[
-  = Host-side decoding
-  The host already has the program. Each `CAPTURE` record
-  carries an *index* (program counter at the `CAPTURE`
-  opcode). The host walks the ring, matches indices to
-  source lines, and produces:
-
-  ```
-  line 14 (capture #0): ACK   observed=0  expected=0  OK
-  line 23 (capture #1): ACK   observed=0  expected=0  OK
-  line 32 (capture #2): ACK   observed=1  expected=0  MISMATCH
-  ```
-
-  Mismatches are highlighted. Sticky flags are decoded. The
-  output is what an engineer actually wants to see --- not
-  a hex dump.
+#content-slide(
+  "Decoded on the host",
+  kicker-text: "The host already has the program",
+)[
+  #code-panel(size: 14pt)[
+```
+line 14  capture #0  ACK   obs=0  exp=0   OK
+line 23  capture #1  ACK   obs=0  exp=0   OK
+line 32  capture #2  ACK   obs=1  exp=0   MISMATCH
+```
+  ]
+  #v(0.4em)
+  #align(center)[
+    #text(font: font-serif, size: 16pt, style: "italic", fill: muted)[
+      Mismatches highlighted. Flags decoded. Source lines linked.
+    ]
+  ]
 ]

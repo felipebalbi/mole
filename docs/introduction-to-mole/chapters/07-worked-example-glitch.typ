@@ -2,67 +2,50 @@
 
 // Worked example 2: glitch injection.
 
-#section-slide("Worked example: glitch injection")
+#section-slide("07", "Injecting a glitch")
 
-#slide[
-  = Goal
-  Take the same TMP108 write and inject a *single-quarter
-  glitch* on SDA, mid-byte. See if the target NACKs, hangs,
-  or shrugs it off and ACKs anyway.
-
-  This is the kind of test you cannot do with a logic
-  analyzer. You cannot do it reliably with an MCU bit-banger.
-  Mole does it byte-deterministically.
+#content-slide(
+  "The goal",
+  kicker-text: "Worked example",
+)[
+  #v(0.6em)
+  #align(center)[
+    #text(font: font-serif, size: 26pt, weight: "semibold", fill: ink)[
+      Force a single-quarter dip on SDA, mid-byte.
+    ]
+    #v(0.8em)
+    #text(font: font-serif, size: 18pt, style: "italic", fill: muted)[
+      Does the target NACK, hang, or shrug it off?
+    ]
+  ]
 ]
 
-#slide[
-  = The injection point
-  Same address byte as before --- but on bit 4 (the `1` in
-  `1001 0000`), force SDA *low* for a single quarter mid-bit
-  while SCL is high.
-
-  Spec-compliant target should NACK because SDA changed
-  during SCL high (which is the START/STOP signature, not
-  data).
-
-  ```
-  // Bit 4 of 0x48 << 1 -- normally tx=rec.
-  // Inject: drive quarter-by-quarter to violate setup/hold.
-  emit_quarter sda=rec scl=dom        // Q0: load new SDA, SCL low
-  emit_quarter sda=rec scl=hiz        // Q1: SCL rises
-  emit_quarter sda=dom scl=hiz        // Q2: GLITCH -- SDA drops
-  emit_quarter sda=rec scl=dom        // Q3: SCL falls
-  ```
+#code-slide(
+  "The injection",
+  kicker-text: "Bit 4 of 0x90 --- normally `tx=rec`",
+)[
+```
+// Drive quarter-by-quarter to violate setup/hold.
+emit_quarter sda=rec scl=dom    // Q0: load SDA, SCL low
+emit_quarter sda=rec scl=hiz    // Q1: SCL rises
+emit_quarter sda=dom scl=hiz    // Q2: GLITCH -- SDA drops
+emit_quarter sda=rec scl=dom    // Q3: SCL falls
+```
 ]
 
-#slide[
-  = Capturing the response
-  After the corrupted bit, the program continues as before
-  through to the ACK slot. The capture says it all:
-
-  ```
-  emit_bit tx=hiz expect=0 capture=1
-  ```
-
-  Three possible outcomes, all interesting:
-
-  + `capture = 0` --- target ACKed despite the glitch. *Bug*:
-    the target is not enforcing setup/hold.
-  + `capture = 1` --- target NACKed. *Spec-correct*.
-  + Engine reports a `START_FLAG` set unexpectedly --- some
-    targets interpret the glitch as a *new* START.
+#content-slide(
+  "Three possible outcomes",
+  kicker-text: "All interesting",
+)[
+  #v(0.4em)
+  #numbered(
+    [#tag("ACK", color: accent)  #h(0.4em) Target didn't enforce setup/hold. *Bug.*],
+    [#tag("NACK", color: secondary) #h(0.4em) Target rejected it. *Spec-correct.*],
+    [#tag("START", color: muted) #h(0.4em) Read as a new START. *Brittle.*],
+  )
 ]
 
-#slide[
-  = Determinism is the point
-  Run the program a thousand times. Same seed (we used none).
-  Same bytecode. Same quarter-bit pattern on the wire.
-
-  If the target *sometimes* ACKs and *sometimes* NACKs, that's
-  not a Mole flakiness --- that's *the target* being flaky, and
-  you've just caught it.
-
-  Compare with a logic-analyzer + MCU bit-banger setup, where
-  every run is slightly different and you'll spend a week
-  arguing about whether the bug is in your test rig.
-]
+#quote-slide(
+  [Run it a thousand times. Same bytecode. Same pattern. If the target waffles, it's the target.],
+  by: [the whole point of compile-time injection],
+)

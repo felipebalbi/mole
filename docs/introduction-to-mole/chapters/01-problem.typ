@@ -2,47 +2,50 @@
 
 // The problem.
 
-#section-slide("The problem")
+#section-slide("01", "The problem")
 
-#slide[
-  = Compliance vs conformance
-
-  *Compliance* --- does this part obey the MIPI I3C / I2C spec?
-  Every edge, every timing window, every CCC reply, every
-  arbitration outcome. Pass/fail.
-
-  *Conformance* --- does this part obey the spec *in the way the
-  rest of the ecosystem expects*? The grey zone of "technically
-  legal but nobody does that".
-
-  Both matter. Both are missing from the toolbox of most teams
-  shipping I3C silicon today.
+#content-slide(
+  "Two questions, one bus",
+  kicker-text: "Compliance vs conformance",
+)[
+  #v(0.3em)
+  #two-col[
+    #tag("Compliance", color: accent)
+    #v(0.3em)
+    #text(size: 20pt, fill: ink-soft)[Does it obey the spec?]
+    #v(0.2em)
+    #text(size: 15pt, fill: muted, style: "italic")[Every edge. Every window.]
+  ][
+    #tag("Conformance", color: secondary)
+    #v(0.3em)
+    #text(size: 20pt, fill: ink-soft)[Does it play nicely?]
+    #v(0.2em)
+    #text(size: 15pt, fill: muted, style: "italic")[The grey zone nobody tests.]
+  ]
+  #v(1em)
+  #align(center)[
+    #text(font: font-serif, size: 22pt, style: "italic", fill: ink)[
+      Both matter. Both are missing.
+    ]
+  ]
 ]
 
-#slide[
-  = What the market offers
-
-  - *MCCI Model 2710 SuperMITT* --- the reference compliance rig.
-    Excellent. Sealed. Expensive. One per company, locked in the
-    lab of whoever bought it first.
-
-  - *Logic analyzer + decoder plug-in* --- great at observing.
-    Cannot *inject*. Cannot deliberately violate the spec to see
-    how the DUT behaves.
-
-  - *Roll-your-own MCU bit-banger* --- cheap. Cannot hit I3C
-    timing. Cannot inject quarter-bit glitches. Cannot replay a
-    bug deterministically a thousand times.
-
-  None of these scale to "every developer's desk".
+#content-slide("Your three options today")[
+  #bullets(
+    [*Sealed compliance rig* --- gold standard, gated price.],
+    [*Logic analyzer* --- observes, never injects.],
+    [*MCU bit-banger* --- too slow, too flaky.],
+  )
+  #v(0.6em)
+  #align(center)[
+    #text(font: font-serif, size: 18pt, style: "italic", fill: muted)[
+      None scale to every developer's desk.
+    ]
+  ]
 ]
 
-#slide[
-  = The Mole bet
-
-  A *bit-cycle engine* small enough to fit a USD\$5 iCE40 UP5K,
-  *flexible* enough to drive I3C SDR + HDR-DDR at up to 6 MHz, and
-  *deterministic* enough that a host can pre-compile every glitch,
-  every retry, every malformed CCC --- and replay them byte-identical,
-  run after run.
-]
+#stat-slide(
+  "$80",
+  "iCEBreaker",
+  caption: [One open-hardware board. \$5 of FPGA. That's the bet.],
+)

@@ -2,58 +2,70 @@
 
 // Architecture.
 
-#section-slide("Architecture")
+#section-slide("02", "Architecture")
 
-#slide[
-  = Two layers, one contract
-
-  *Layer 0 --- the bit-cycle engine.* Tiny FPGA core. Knows nothing
-  about I2C, I3C, CCCs, addresses, parity, or HDR. Executes a
-  16-bit fixed-width ISA over quarter-bit drive symbols on SDA
-  and SCL.
-
-  *Layer 1 --- the host compiler.* Rust today, Scheme eventually.
-  Knows every spec in painful detail. Compiles human-readable
-  `moleasm` (and later, S-expressions) down to the Layer-0
-  bytecode.
-
-  The wire format between them is a *stable contract* once
-  Phase-0 ships. Bytecode versions are not free.
+#content-slide(
+  "Two layers. One contract.",
+  kicker-text: "How it fits together",
+)[
+  #v(0.3em)
+  #two-col[
+    #tag("Layer 1", color: secondary)
+    #v(0.3em)
+    #text(font: font-serif, size: 22pt, weight: "semibold")[Host compiler]
+    #v(0.2em)
+    #text(size: 16pt, fill: muted)[Knows the spec.]
+    #linebreak()
+    #text(size: 16pt, fill: muted)[Speaks `moleasm`.]
+  ][
+    #tag("Layer 0", color: accent)
+    #v(0.3em)
+    #text(font: font-serif, size: 22pt, weight: "semibold")[Bit-cycle engine]
+    #v(0.2em)
+    #text(size: 16pt, fill: muted)[Knows nothing.]
+    #linebreak()
+    #text(size: 16pt, fill: muted)[Drives the wire.]
+  ]
+  #v(0.8em)
+  #align(center)[
+    #text(font: font-serif, size: 18pt, style: "italic", fill: ink-soft)[
+      The bytecode between them is the contract.
+    ]
+  ]
 ]
 
-#slide[
-  = Why bus-agnostic?
-
-  The engine's drive vocabulary is exactly four symbols:
-  `dominant` \/ `recessive` \/ `hiz` \/ `reserved`.
-
-  *No* `i2c_low`. *No* `i3c_push_pull_high`. *No* "drive SCL".
-  Just symbols.
-
-  A single register --- `BUS_MODE` --- maps those symbols to the
-  electrical reality of the active bus class (`i2c`, `i3c-OD`,
-  `i3c-PP`, `hdr-ddr`). Changing class is *one opcode*.
-
-  Adding SMBus, PMBus, LIN, 1-Wire, or CAN to a future Mole is
-  a `BUS_MODE` table entry plus an SDK macro layer. *Zero* ISA
-  churn.
+#content-slide(
+  "Four symbols.",
+  kicker-text: "Bus-agnostic by design",
+)[
+  #v(0.4em)
+  #align(center)[
+    #pill("dominant") #h(0.6em)
+    #pill("recessive") #h(0.6em)
+    #pill("hiz") #h(0.6em)
+    #pill("reserved")
+  ]
+  #v(0.8em)
+  #bullets(
+    [No `i2c_low`. No `i3c_push_pull_high`. Just symbols.],
+    [`BUS_MODE` maps symbols to electrical reality.],
+    [New bus = new table entry. Zero ISA churn.],
+  )
 ]
 
-#slide[
-  = Compile-time error injection
-
-  Mole has *zero* runtime randomness.
-
-  Glitches, bit-flips, premature stops, malformed CCCs --- all
-  decided *at compile time* on the host. The PRNG is in the
-  host. The seed and ratio are inputs to the compiler. The
-  output is a deterministic, fully-baked program.
-
-  Consequences:
-  - `ratio = 0` produces a byte-identical bytecode to the
-    no-injection build.
-  - Every bug is replayable. The same seed reproduces the
-    same wire pattern, the same fault, the same response.
-  - The FPGA stays small. No on-chip RNG, no on-chip
-    decision logic.
+#content-slide(
+  "Zero runtime randomness.",
+  kicker-text: "Error injection",
+)[
+  #bullets(
+    [PRNG lives on the *host*. Output is baked.],
+    [`ratio = 0` → byte-identical to clean build.],
+    [Same seed, same wire pattern, every time.],
+  )
+  #v(0.4em)
+  #align(center)[
+    #text(font: font-serif, size: 22pt, style: "italic", fill: accent)[
+      Every bug replayable.
+    ]
+  ]
 ]
