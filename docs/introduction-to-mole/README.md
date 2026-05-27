@@ -1,82 +1,112 @@
 # Introduction to Mole --- slide deck
 
-A Typst-based introduction deck for the Mole compliance / conformance
-test rig. Targets a ~30-minute audience-of-engineers talk: what Mole
-is, why it exists, how the architecture splits into a tiny FPGA
-engine plus a host-side compiler, and what writing a test program
-looks like end-to-end.
+A Typst-based introduction to the Mole I3C / I2C compliance and
+conformance test rig. Built for a ~30-minute training slot: what
+Mole is, why it exists, how the engine + host compiler split, and
+what writing -- and intentionally breaking -- a test program looks
+like end to end.
+
+The deck is structured around seven labelled parts. Each one opens
+with a section divider, ends with a recap of the two or three
+things to remember, and seeds a "try it" thought-experiment before
+the answer lands on the following slide. The closing slide points
+to the long-form mdBook (`mole-asm/book/`) for everything the deck
+only had time to sketch.
 
 ## Build
 
 Requirements:
 
 - [Typst](https://typst.app) 0.14.2 or newer.
-- Polylux 0.4.0 (resolved automatically from the typst package
-  cache; pinned in `lib.typ`). Newer 0.4.x point releases should
-  work but are not verified.
+- Polylux 0.4.0 and cetz 0.4.2 (resolved automatically from the
+  typst package cache; pinned in `lib.typ` and the figures under
+  `figures/`).
 - The [Aporetic](https://github.com/SaschaSommer/aporetic) font
-  family installed on the OS font path. The deck expects the
-  family names `Aporetic Sans`, `Aporetic Serif`, and
-  `Aporetic Sans Mono`. If your install registers different
-  face names, tweak the `#set text` blocks at the top of
-  `slides.typ`.
+  family installed on the OS font path (`Aporetic Sans`,
+  `Aporetic Serif`, `Aporetic Sans Mono`). The deck falls back
+  to Inter / EB Garamond / Cascadia Mono when those are absent
+  -- typst emits font-fallback warnings; pass `QUIET=1` to mute
+  them.
 - GNU `make` for the convenience wrapper.
 
 From this directory:
 
 ```sh
-make            # builds slides.pdf
-make watch      # auto-rebuild while editing
-make clean      # remove slides.pdf
+make             # builds slides.pdf
+make notes       # builds slides-notes.pdf (speaker notes inlined)
+make all         # both
+make watch       # auto-rebuild slides.pdf while editing
+make clean       # remove built PDFs
+make QUIET=1     # filter out harmless font-fallback warnings
 ```
 
 Or invoke Typst directly:
 
 ```sh
-typst compile slides.typ
+typst compile slides.typ                       # slides only
+typst compile --input notes=true slides.typ    # with speaker notes
 ```
 
-The produced `slides.pdf` is gitignored.
+Both produced PDFs (`slides.pdf`, `slides-notes.pdf`) are
+gitignored.
 
 ## Layout
 
 ```text
-slides.typ            ; entry point: page setup, fonts, chapter
-                      ;   include list.
-chapters/             ; one .typ file per logical section.
-  00-cover.typ        ; title slide + agenda.
-  01-problem.typ      ; what compliance testing is, and why
-                      ;   today's tools don't reach every desk.
-  02-architecture.typ ; engine + compiler split.
-  03-quarter-bits.typ ; the timing model.
-  04-isa-tour.typ     ; the 14-opcode ISA.
-  05-moleasm-syntax.typ
-  06-worked-example-i2c.typ
-  07-worked-example-glitch.typ
-  08-results-ring.typ
-  09-tooling.typ
-  10-roadmap.typ
-figures/              ; reusable diagrams (typst code, not images).
+slides.typ            ; entry point: page setup, fonts,
+                      ;   include list across the seven parts.
+lib.typ               ; design system: tokens, atoms,
+                      ;   slide kinds, notes-mode switch.
+chapters/             ; one .typ file per part.
+  00-promise.typ      ; cover, what-you-get, opening hook.
+  01-the-problem.typ  ; compliance vs conformance, today's gaps.
+  02-architecture.typ ; three boxes, two layers, contract.
+  03-timing.typ       ; quarter-bit time and why four.
+  04-isa-and-moleasm.typ
+                      ; 14 opcodes, BUS_MODE, sticky flags,
+                      ;   the assembly syntax.
+  05-first-test.typ   ; worked I2C single-byte write.
+  06-breaking-it.typ  ; same write with a deliberate glitch.
+  07-where-this-goes.typ
+                      ; CLI, sims, three SKUs, thank-you.
+figures/              ; reusable cetz diagrams (typst code,
+                      ;   not images).
 Makefile              ; build wrapper.
 ```
 
-## Scope
+## Slide kinds
 
-This first cut covers the **controller-role** half of Mole: what
-ships today, what you can write `moleasm` for today, what the host
-toolchain looks like today. **Target-role** (Mole replying as a
-peripheral, including I3C DAA arbitration) is under development on
-the `phase5-target-role` branch and is mentioned in the roadmap
-chapter at the end of the deck rather than walked through in
-detail. Once target role lands, a follow-up chapter slots in
-between the worked-example glitch chapter and the results-ring
-chapter.
+`lib.typ` exposes a small vocabulary of slide kinds so chapters can
+stay terse and the styling stays consistent:
 
-## Style
+- `cover-slide`, `section-slide`, `thank-you-slide` -- dark chrome,
+  no footer.
+- `content-slide` -- the everyday slide.
+- `stat-slide` -- one big number, optional caption.
+- `definition-slide` -- one word, italic subtitle, body.
+- `try-it-slide` -- prompt + hint + "answer on the next slide"
+  banner, anchored so a long prompt can't push the banner onto
+  an orphan page.
+- `compare-slide` -- two columns + optional verdict.
+- `code-slide` -- titled slide with a dark code panel as body.
+- `quote-slide` -- big italic pull-quote.
+- `recap-slide` -- end-of-part summary with checkmarks, optional
+  "next up" callout, optional "go deeper" pointer into the
+  mdBook.
 
-- Polylux 0.4.x slide template, 16:9 aspect ratio.
-- Body text in Aporetic Sans 22pt, code in Aporetic Sans Mono
-  18pt, headings in Aporetic Serif.
-- A single deep-red accent (`#9a3324`) for titles and emphasis;
-  a muted grey for secondary text. No other colour --- the deck
-  reads cleanly when projected or printed.
+## Speaker notes
+
+Wrap any prose inside `#note[...]` and it stays invisible in the
+default slide build. Pass `--input notes=true` (or run
+`make notes`) and the same content renders as a faint italic block
+at the bottom of each slide -- useful for self-study and for
+rehearsing the live talk.
+
+## Palette + typography
+
+- ef-melissa-light (Protesilaos Stavrou) palette: warm honey
+  paper, dark olive ink, burnt-honey accent.
+- Aporetic Sans for kickers / chrome, Aporetic Serif for titles
+  and body, Aporetic Sans Mono for code.
+- Single accent for emphasis, secondary teal for left-side
+  compare cues, muted chestnut for asides.
