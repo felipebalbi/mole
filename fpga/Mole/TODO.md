@@ -1243,11 +1243,31 @@ linted by the assembler).
 per AGENTS §3.15, so the standard `BRANCH_ON MISMATCH ...`
 fail-fast idiom composes cleanly inside a loop body.
 
-**Sim:** `sim-isa` covers the encode/decode round-trip (1024 new
-checks plus updated `ReservedV05` golden). The
-`BitCycleEngineCore` FSM lands in a follow-up commit (engine
-half); the sim will gain explicit count-down / nested /
-LCR=0-wrap test cases there.
+**Sim:** `sim-isa` covers the encode/decode round-trip (1024
+new checks plus updated `ReservedV05` golden).
+`sim-engine-full` (`BitCycleEngineSim`) adds four explicit
+loop-counter cases:
+
+- `loop-single-count-down` --- `LOAD_LOOP lcr0, 4` plus
+  `DEC_BRANCH lcr0, -2` around a `MARK` body produces exactly
+  four MARK records.
+- `loop-nested` --- outer `lcr1=3`, inner `lcr0=2`, MARK in
+  the inner body produces `3 * 2 = 6` records (catches
+  reg-id miswire and inner-counter-fails-to-re-prime bugs).
+- `loop-boundary` --- two consecutive segments verify
+  `DEC_BRANCH` with `LCR=1` falls through (no back-edge) and
+  `LCR=2` back-edges exactly once.
+- `loop-flag-neutral` --- a deliberate `MISMATCH_FLAG` set by
+  an `EMIT_BIT` survives an intervening 3-iter
+  `DEC_BRANCH` loop, then a `BRANCH_ON MISMATCH` correctly
+  takes the branch. Catches any future regression that
+  accidentally writes a sticky flag from the `DEC_BRANCH`
+  arm.
+
+The pre-existing `reserved-opcode-trap` test was updated to
+target slot `0xE` (still reserved) instead of the now-claimed
+`0xC` so it still exercises the trap arm in the decode
+switch's `default` clause.
 
 **Divergence from the original plan (PR plan.md):** none. The
 two-LCR / DEC-only scope was confirmed at planning time; this
@@ -1269,8 +1289,8 @@ step lands exactly that.
 Two reserved slots remain (`FLAG_CLEAR` at 0xE, `CAPTURE_RUN`
 at 0xF) --- enough headroom for the canonical v0.5 additions.
 
-**Makefile:** no new target --- the engine FSM lands in a
-follow-up commit and reuses `sim-engine-full`.
+**Makefile:** no new target --- the engine FSM ships under the
+existing `sim-engine-full` aggregate.
 
 ---
 

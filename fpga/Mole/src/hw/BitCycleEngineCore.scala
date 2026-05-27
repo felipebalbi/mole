@@ -397,6 +397,28 @@ case class BitCycleEngineCore(cfg: MoleConfig) extends Component {
   val captureValueReg = Reg(Bool()) init (False)
 
   // ------------------------------------------------------------------
+  // Loop counter registers (Step 20 --- bounded loops)
+  //
+  // Two independent 8-bit architectural counters, one writer
+  // (`LOAD_LOOP`) and one read-modify-writer (`DEC_BRANCH`). One
+  // bit of `instrReg(11)` selects the active register on either
+  // opcode; the remaining `instrReg(10 downto 8)` pad stays
+  // reserved (=0) per AGENTS §3.17 for a future 16-LCR widening
+  // with no wire-format break.
+  //
+  // Reset to 0 on power-on AND on program-start in `idleState`'s
+  // `io.start` handler --- same documented program-start re-arm
+  // path that covers the sticky flags, result ring, and MARK
+  // timestamp. A program that begins with `DEC_BRANCH` before any
+  // `LOAD_LOOP` sees the wraparound (`0 -> 0xFF -> ... -> 1 -> 0`)
+  // documented in ROADMAP §"Bounded loops --- LOAD_LOOP +
+  // DEC_BRANCH". `DEC_BRANCH` is flag-neutral: it must not touch
+  // `mismatchFlag` / `timeoutFlag` / `startFlag` / `stopFlag`.
+  // ------------------------------------------------------------------
+
+  val lcrRegs = Vec(Reg(UInt(8 bits)) init (0), 2)
+
+  // ------------------------------------------------------------------
   // HALT bookkeeping latches (Step 11)
   //
   // Captured at HALT entry (by the [[Halt]] opcode itself, by the
@@ -530,6 +552,10 @@ case class BitCycleEngineCore(cfg: MoleConfig) extends Component {
           resultWp := U(resultBase + 2, addrWidth bits)
           resultOverflow := False
           markTimestamp := U(0, 32 bits)
+          // Step 20: re-arm both loop counters. Documented
+          // program-start exception (see lcrRegs block).
+          lcrRegs(0) := U(0, 8 bits)
+          lcrRegs(1) := U(0, 8 bits)
           goto(fetchState)
         }
       }
@@ -835,8 +861,49 @@ case class BitCycleEngineCore(cfg: MoleConfig) extends Component {
             }
           }
 
+          // -- LOAD_LOOP --------------------------------------------
+          //
+          // Field layout: [11]=reg, [10:8]=reserved (=0),
+          // [7:0]=imm8. Writes the immediate into `lcrRegs(reg)`.
+          // Single-cycle; no bus effect; sticky engine flags
+          // untouched. Pads bits [10:8] are not validated against
+          // zero --- per Instruction.scala's decode contract,
+          // stray reserved bits round-trip through `decode` rather
+          // than trapping. The host SDK guarantees clean encodes.
+          is(Opcode.loadLoop) {
+            val regIdx = instrReg(11).asUInt
+            val imm = instrReg(7 downto 0).asUInt
+            lcrRegs(regIdx) := imm
+            pc := pc + 1
+            goto(fetchState)
+          }
+
+          // -- DEC_BRANCH -------------------------------------------
+          //
+          // Field layout: [11]=reg, [10:8]=reserved (=0),
+          // [7:0]=signed 8-bit PC-rel offset (two's complement,
+          // +/-128). Semantics, per fetch:
+          //   1. lcr <- lcrRegs(reg) - 1   (8-bit wrap; 0 -> 0xFF)
+          //   2. if (lcr != 0) PC <- PC + 1 + offset
+          //      else          PC <- PC + 1
+          // Sticky engine flags are not touched --- AGENTS §3.15.
+          // Single-cycle; no bus effect; the bounded-retry pattern
+          // composes cleanly with a `BRANCH_ON MISMATCH ...`
+          // inside the loop body because the mismatch flag survives
+          // this opcode untouched.
+          is(Opcode.decBranch) {
+            val regIdx = instrReg(11).asUInt
+            val decremented = lcrRegs(regIdx) - 1
+            lcrRegs(regIdx) := decremented
+            val offsetSExt =
+              instrReg(7 downto 0).asSInt.resize(pcWidth)
+            val offsetU = offsetSExt.asUInt
+            pc := Mux(decremented =/= 0, pc + 1 + offsetU, pc + 1)
+            goto(fetchState)
+          }
+
           // -- Everything else (SAMPLE_BIT_ON_SCL,
-          //    DRIVE_BIT_ON_SCL, plus the 4 reserved v0.5 slots) --
+          //    DRIVE_BIT_ON_SCL, plus the 2 reserved v0.5 slots) --
           //
           // Step 19 owns the target-role opcodes; the four
           // reserved v0.5 slots have no v0 meaning. Both flavours

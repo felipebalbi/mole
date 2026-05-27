@@ -697,7 +697,7 @@ object InstructionSim extends App {
   println("  HALT: 16 round-trips + overflow-reject OK")
 
   // --------------------------------------------------------------
-  // RESERVED v0.5 opcodes (0xC..0xF)
+  // RESERVED v0.5 opcodes (0xE..0xF)
   // --------------------------------------------------------------
 
   println("--- InstructionSim: ReservedV05 round-trip ---")
@@ -752,7 +752,7 @@ object InstructionSim extends App {
 
   // --------------------------------------------------------------
   // Decoder must produce a ReservedV05 for any word whose opcode
-  // field is 0xC..0xF, regardless of where the payload bits sit.
+  // field is 0xE..0xF, regardless of where the payload bits sit.
   // --------------------------------------------------------------
 
   println("--- InstructionSim: decoder reserved-opcode dispatch ---")
