@@ -1619,6 +1619,23 @@ Runner-up names kept in reserve: **Compás** (Spanish for compass +
 musical measure --- literally describes a quarter-bit timing engine),
 **Berimbau** (Brazilian capoeira instrument, strong rhythm semantics).
 
+### Distribution
+
+Mole is open-source / open-hardware. The three SKUs are *reference
+designs*, not products on a shelf: every Gerber, every BoM, every
+line of Scala / Rust / Scheme lives in this repository under a
+permissive license, so anyone who wants a Verde on their desk can
+order an icebreaker and follow `BRINGUP.md`. A Rojo or Negro
+needs board fabrication, but the design files are the same kind
+of artifact.
+
+A small batch of pre-built kits on something like CrowdSupply is
+possible later if the community asks for one --- as a service to
+people who don't want to fab their own --- but the project is
+not structured around hardware sales. The durable artifact is
+the SDK + bytecode + test catalog, and those don't ship in a
+box.
+
 ### Brand stack
 
 - **pico-de-gallo** --- HIL USB peripheral for firmware automation
