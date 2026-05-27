@@ -22,6 +22,41 @@ set_io io_reset      10
 set_io io_uRx         6
 set_io io_uTx         9
 
+# USB-UART hardware flow control (FT2232H channel A, active-low).
+#
+# Naming follows the FT2232H's pin labels, which match what shows
+# up on the iCEbreaker silkscreen:
+#
+#   io_uCts (pin 18, MOLE OUTPUT) -> FT2232H CTS# input. We drive
+#       this LOW when Mole is ready to receive a new program (i.e.
+#       the top-level phase FSM is in `acceptLoadState`) and HIGH
+#       while a program is running or the result ring is draining.
+#       A host driver with `crtscts` enabled will block its TX
+#       (program-to-Mole direction) on this line, which is exactly
+#       what the user spec asks for: "while program is not HALTED,
+#       don't accept data."
+#
+#   io_uRts (pin 19, MOLE INPUT)  <- FT2232H RTS# output. We sample
+#       this through the same 2-FF synchronizer pattern as `io_uRx`
+#       and use it to back-pressure the drainer's TX stream. When
+#       the host's USB pipe is full it asserts RTS# HIGH and Mole's
+#       drainer halts via `Stream.haltWhen`; when the host can take
+#       more bytes RTS# drops LOW and the drainer streams again.
+#       Standard hardware-flow-control semantics: deassertion does
+#       not abort an in-flight byte, only future starts.
+#
+# Pull-up on the RTS# input: if a board does not wire FT's RTS#
+# through to FPGA pin 19 (or stty is invoked without `crtscts`),
+# the pin floats. Without a pull-up the synchroniser samples
+# garbage and the drainer's behaviour becomes "sometimes streams,
+# sometimes hangs". With `-pullup yes`, an unwired pin reads HIGH
+# = RTS#-deasserted = drainer halts visibly, which is a clean,
+# diagnosable failure mode (BRINGUP.md §troubleshooting documents
+# the symptom -> cause mapping). The CTS# output does not need a
+# pull-up; it is driven by Mole at all times.
+set_io io_uCts        18
+set_io -pullup yes io_uRts 19
+
 # I3C / I2C bus, brought out on PMOD1A. The pad layer is an explicit
 # SB_IO per line (see src/hw/MoleIoBufUp5k.scala) with PIN_TYPE
 # 6'b101000 (PIN_OUTPUT_TRISTATE | PIN_INPUT, unregistered): the
