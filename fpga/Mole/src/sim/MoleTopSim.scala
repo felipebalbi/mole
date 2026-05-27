@@ -69,19 +69,6 @@ case class MoleTopSimDut(cfg: MoleConfig) extends Component {
     val engineDone = out Bool ()
     val loaderLoaded = out Bool ()
     val loaderFault = out Bool ()
-    val engineStart = out Bool ()
-    val engineResultWriteFire = out Bool ()
-    val drainTrigger = out Bool ()
-    val phaseRunning = out Bool ()
-    val phaseDraining = out Bool ()
-    val resultWriteAddr = out UInt (16 bits)
-    val resultWriteData = out Bits (16 bits)
-    val spramReadCmdFire = out Bool ()
-    val spramReadCmdAddr = out UInt (16 bits)
-    val spramReadRespValid = out Bool ()
-    val spramReadRespData = out Bits (16 bits)
-    val uartTxDataFire = out Bool ()
-    val uartTxLine = out Bool ()
 
     /** Pad ports passed straight through to MoleTop's `io_sda` / `io_scl` inout
       * pads. Verilator otherwise rejects MoleTop's instantiation with
@@ -150,19 +137,6 @@ case class MoleTopSimDut(cfg: MoleConfig) extends Component {
   io.engineDone := mole.io.sim_engineDone
   io.loaderLoaded := mole.io.sim_loaderLoaded
   io.loaderFault := mole.io.sim_loaderFault
-  io.engineStart := mole.io.sim_engineStart
-  io.engineResultWriteFire := mole.io.sim_engineResultWriteFire
-  io.drainTrigger := mole.io.sim_drainTrigger
-  io.phaseRunning := mole.io.sim_phaseRunning
-  io.phaseDraining := mole.io.sim_phaseDraining
-  io.resultWriteAddr := mole.io.sim_resultWriteAddr
-  io.resultWriteData := mole.io.sim_resultWriteData
-  io.spramReadCmdFire := mole.io.sim_spramReadCmdFire
-  io.spramReadCmdAddr := mole.io.sim_spramReadCmdAddr
-  io.spramReadRespValid := mole.io.sim_spramReadRespValid
-  io.spramReadRespData := mole.io.sim_spramReadRespData
-  io.uartTxDataFire := mole.io.sim_uartTxDataFire
-  io.uartTxLine := mole.io.sim_uartTxLine
 }
 
 /** End-to-end audit for [[MoleTop]].
@@ -315,66 +289,14 @@ object MoleTopSim extends App {
       Instruction.encode(Instruction.Halt(0))
     )
     val frame = buildFrame(program)
-    println(
-      s"   frame (${frame.length} bytes): ${frame.map(b => f"$b%02x").mkString(" ")}"
-    )
 
-    // Watcher fork: count loader.loaded pulses, fault pulses, engineDone
-    // edges so we can tell after the fact whether the engine ran at all.
-    var loadedPulses = 0
-    var faultPulses = 0
-    var engineDoneFalseSeen = false
-    var engineStartHighCycles = 0
-    var resultWriteFires = 0
-    var drainTriggerPulses = 0
-    var phaseRunningCycles = 0
-    var phaseDrainingCycles = 0
-    var uartTxDataFires = 0
-    var uartTxLineLowSeen = false
-    var cycleCount = 0
-    val resultWrites = mutable.Buffer.empty[(Int, Int)]
-    val drainReads = mutable.Buffer.empty[Int]
-    val drainResps = mutable.Buffer.empty[Int]
-    val watcherFork = fork {
-      while (true) {
-        dut.clockDomain.waitSampling()
-        cycleCount += 1
-        if (dut.io.loaderLoaded.toBoolean) loadedPulses += 1
-        if (dut.io.loaderFault.toBoolean) faultPulses += 1
-        if (!dut.io.engineDone.toBoolean) engineDoneFalseSeen = true
-        if (dut.io.engineStart.toBoolean) engineStartHighCycles += 1
-        if (dut.io.engineResultWriteFire.toBoolean) {
-          resultWriteFires += 1
-          resultWrites += ((
-            dut.io.resultWriteAddr.toInt,
-            dut.io.resultWriteData.toInt
-          ))
-        }
-        if (dut.io.drainTrigger.toBoolean) drainTriggerPulses += 1
-        if (dut.io.phaseRunning.toBoolean) phaseRunningCycles += 1
-        if (dut.io.phaseDraining.toBoolean) {
-          phaseDrainingCycles += 1
-          if (dut.io.spramReadCmdFire.toBoolean) {
-            drainReads += dut.io.spramReadCmdAddr.toInt
-          }
-          if (dut.io.spramReadRespValid.toBoolean) {
-            drainResps += dut.io.spramReadRespData.toInt
-          }
-        }
-        if (dut.io.uartTxDataFire.toBoolean) uartTxDataFires += 1
-        if (!dut.io.uartTxLine.toBoolean) uartTxLineLowSeen = true
-      }
-    }
-
-    // Sim-side fork: drain bytes as they arrive so back-pressure
-    // from the drainer is visible to the engine, and we don't have
-    // a single mega-stall on the host side.
+    // Sim-side fork: drain bytes as they arrive so the drainer's
+    // UART stream sees real consumer back-pressure and is not
+    // mass-stalled on a single host-side read at the end.
     val received = mutable.Buffer.empty[Int]
-    val recvCycles = mutable.Buffer.empty[Int]
     val drainFork = fork {
       while (received.size < cfg.resultRingByteCount) {
         received += recvByte(dut)
-        recvCycles += cycleCount
       }
     }
 
@@ -382,49 +304,6 @@ object MoleTopSim extends App {
     drainFork.join()
 
     val expected = received.size
-    val hex = received.map(b => f"$b%02x").mkString(" ")
-    println(s"   drained $expected bytes: $hex")
-    println(
-      s"   end-state: loaded=${dut.io.loaderLoaded.toBoolean} " +
-        s"fault=${dut.io.loaderFault.toBoolean} " +
-        s"engineDone=${dut.io.engineDone.toBoolean}"
-    )
-    println(
-      s"   counters: loadedPulses=$loadedPulses faultPulses=$faultPulses " +
-        s"engineDoneFalseSeen=$engineDoneFalseSeen"
-    )
-    println(
-      s"   engine: startHighCycles=$engineStartHighCycles " +
-        s"resultWriteFires=$resultWriteFires " +
-        s"drainTriggerPulses=$drainTriggerPulses"
-    )
-    println(
-      s"   phase: runningCycles=$phaseRunningCycles " +
-        s"drainingCycles=$phaseDrainingCycles"
-    )
-    println(
-      s"   resultWrites (addr,data): " +
-        resultWrites.map { case (a, d) => f"($a%d,0x$d%04x)" }.mkString(" ")
-    )
-    println(
-      s"   drainReads (first 16): " +
-        drainReads.take(16).mkString(" ")
-    )
-    println(
-      s"   drainResps (first 16): " +
-        drainResps.take(16).map(d => f"0x$d%04x").mkString(" ")
-    )
-    println(
-      s"   uart: dataFires=$uartTxDataFires lineLowSeen=$uartTxLineLowSeen " +
-        s"totalCycles=$cycleCount"
-    )
-    println(
-      s"   recvCycles (first 8): " + recvCycles.take(8).mkString(" ")
-    )
-    println(
-      s"   recvCycles (last 4): " +
-        recvCycles.takeRight(4).mkString(" ")
-    )
     assert(
       expected == cfg.resultRingByteCount,
       s"short-halt: expected $expected == ${cfg.resultRingByteCount}"
