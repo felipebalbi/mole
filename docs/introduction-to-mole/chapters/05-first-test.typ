@@ -22,9 +22,9 @@
     #pill("1 STOP")
   ]
   #note[
-    Smallest meaningful real-world I2C transaction. Mirrors
-    `mole-asm/tests/fixtures/i2c-write-one-byte.moleasm` byte-for-byte
-    so the audience can pull the file up and read along.
+    The smallest I2C transaction that actually does something useful.
+    Mirrors `mole-asm/tests/fixtures/i2c-write-one-byte.moleasm`
+    byte-for-byte -- pull the file up alongside and read along.
   ]
 ]
 
@@ -131,4 +131,5 @@ halt     status=0
     [The decoder closes the loop back to your source lines.],
   ),
   next: [breaking it on purpose -- injecting a single-quarter glitch.],
+  deeper: [`mole-asm/book/src/{quickstart,worked-examples}.md` -- the same write, end to end.],
 )

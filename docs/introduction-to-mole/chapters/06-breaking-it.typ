@@ -92,4 +92,5 @@
     [Compile-time determinism means \"flake\" is a thing of the past.],
   ),
   next: [the tooling, the SKUs, and where Mole is going next.],
+  deeper: [`mole-asm/book/src/patterns.md` -- recipes for the common cases.],
 )

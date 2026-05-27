@@ -125,6 +125,12 @@ $ make flash       ; iceprog
     [A worked I2C test, a glitch fuzz, and the result ring that records both.],
   ),
   next: [`mole-asm/book` -- the mdBook tutorial picks up from here.],
+  deeper: [`ROADMAP.md` for the design rationale; `AGENTS.md` for how to contribute.],
 )
 
-#thank-you-slide("github.com/6mil-Labs/mole")
+#thank-you-slide(
+  "github.com/6mil-Labs/mole",
+  book: "mole-asm/book/",
+  roadmap: "ROADMAP.md",
+  contributing: "AGENTS.md",
+)

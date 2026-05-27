@@ -384,8 +384,11 @@
 ]
 
 // Recap slide: end-of-part summary with checkmarks. Optional `next`
-// pointer to the next part, so the audience sees the through-line.
-#let recap-slide(title, points, next: none, kicker-text: "Recap") = slide[
+// pointer to the next part, plus an optional `deeper` pointer into
+// the long-form mdBook -- the deck is a tour, the book is the manual.
+#let recap-slide(
+  title, points, next: none, deeper: none, kicker-text: "Recap",
+) = slide[
   #slide-title(title, kicker-text: kicker-text)
   #checks(..points)
   #if next != none [
@@ -395,17 +398,62 @@
       icon: "→",
     )[Next up: #next]
   ]
+  #if deeper != none [
+    #v(0.4em)
+    #align(left)[
+      #text(font: font-sans, size: 11pt, fill: muted, tracking: 1pt)[
+        ↪ Go deeper: #deeper
+      ]
+    ]
+  ]
   #chrome()
 ]
 
-#let thank-you-slide(link-text) = slide[
+// Thank-you slide. Warm dark close with a short list of where to
+// land next: the mdBook, the roadmap, the repo. Each pointer is the
+// filesystem / URL path itself so the audience can copy/paste.
+#let thank-you-slide(
+  repo,
+  book: none,
+  roadmap: none,
+  contributing: none,
+) = slide[
   #set page(fill: bg-dark)
   #set text(fill: ink-invert)
   #v(1fr)
   #align(center)[
-    #text(font: font-serif, size: 96pt, weight: "bold", fill: ink-invert)[Thanks.]
-    #v(1em)
-    #text(font: font-mono, size: 18pt, fill: accent)[#link-text]
+    #text(font: font-serif, size: 96pt, weight: "bold", fill: ink-invert)[
+      Thanks.
+    ]
+    #v(0.4em)
+    #text(font: font-serif, size: 20pt, style: "italic", fill: muted-light)[
+      Now go break something on purpose.
+    ]
+  ]
+  #v(0.8em)
+  #align(center)[
+    #box(width: 78%)[
+      #grid(
+        columns: (auto, 1fr),
+        column-gutter: 18pt,
+        row-gutter: 10pt,
+        align: (right, left),
+        text(font: font-sans, size: 12pt, fill: accent, tracking: 2pt)[#upper("Repo")],
+        text(font: font-mono, size: 14pt, fill: ink-invert)[#repo],
+        ..if book != none {(
+          text(font: font-sans, size: 12pt, fill: accent, tracking: 2pt)[#upper("Manual")],
+          text(font: font-mono, size: 14pt, fill: ink-invert)[#book],
+        )} else { () },
+        ..if roadmap != none {(
+          text(font: font-sans, size: 12pt, fill: accent, tracking: 2pt)[#upper("Design")],
+          text(font: font-mono, size: 14pt, fill: ink-invert)[#roadmap],
+        )} else { () },
+        ..if contributing != none {(
+          text(font: font-sans, size: 12pt, fill: accent, tracking: 2pt)[#upper("Hack on it")],
+          text(font: font-mono, size: 14pt, fill: ink-invert)[#contributing],
+        )} else { () },
+      )
+    ]
   ]
   #v(1fr)
 ]

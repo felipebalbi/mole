@@ -88,4 +88,5 @@
     [A six-item wishlist that the rest of the deck answers point by point.],
   ),
   next: [how the architecture splits the work between host and FPGA.],
+  deeper: [`mole-asm/book/src/introduction.md` -- why this exists at all.],
 )

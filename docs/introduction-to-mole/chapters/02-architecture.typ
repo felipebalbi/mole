@@ -21,9 +21,10 @@
     ]
   ]
   #note[
-    Three boxes is the whole thing. The host is your existing dev
-    environment. The DUT is whatever you're characterising. Mole is the
-    little FPGA in the middle that turns one into the other.
+    Three boxes is the whole thing -- no rack, no DUT carrier, no
+    instrumentation server. The host is your existing dev environment;
+    the DUT is whatever you're characterising; Mole is the little FPGA
+    in the middle that turns one into the other.
   ]
 ]
 
@@ -79,4 +80,5 @@
     [Compile-time determinism: every bug has a seed.],
   ),
   next: [the clock that makes all of this tick -- one quarter-bit at a time.],
+  deeper: [`mole-asm/book/src/mental-model.md` -- the layered view in long form.],
 )
