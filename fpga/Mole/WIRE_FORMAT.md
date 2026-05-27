@@ -128,7 +128,16 @@ CRC-CCITT-FALSE's non-reflected cousin). The full parameter set:
 | Reflect output | false     | final register used as-is              |
 | XOR output     | `0x0000`  | no final XOR                           |
 | Check          | `0x31C3`  | CRC of the ASCII string `"123456789"`  |
-| Residue        | `0x0000`  | unused by Mole; documented for parity  |
+
+Note on residue: CRC-16/XMODEM's catalogue residue is `0x0000`,
+but that property only holds when the CRC trailer is appended
+**big-endian** (high byte first). Mole appends the trailer
+**little-endian**, so feeding `payload || crc_lo || crc_hi` back
+through the algorithm does **not** yield zero. The correct loader
+pattern is: compute the CRC over the payload bytes only, then
+compare against the 16-bit trailer reassembled from
+`(crc_hi << 8) | crc_lo`. The hardware loader follows that pattern;
+hosts validating their own builders should do the same.
 
 ### 3.1 Reference algorithm (bytewise, MSB-first)
 
