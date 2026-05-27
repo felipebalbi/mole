@@ -79,6 +79,23 @@ object MoleTopFlowControlSim extends App {
 
   val cleanHaltWord = 0xc000
 
+  // Verilator defaults to randomising every Reg without an `initial`
+  // block, which races MoleTop's 2-FF reset bridge: the synchroniser
+  // chain itself starts random, so `resetSync` can read low at t=0
+  // even though external reset is held. The fabric clock domain's
+  // sync-reset Regs (engine FSM, drive enables, busModeReg) are then
+  // never cleared, and the engine pad-wrapper assert fires at the
+  // first post-reset posedge on the unlucky seed.
+  //
+  // `--x-assign 0` / `--x-initial 0` force Verilator to use 0 for
+  // every otherwise-undefined value, matching the SpinalHDL
+  // `init(False)` intent on all reset-bridge and fabric-domain Regs.
+  val simConfig = SimConfig
+    .addSimulatorFlag("--x-assign")
+    .addSimulatorFlag("0")
+    .addSimulatorFlag("--x-initial")
+    .addSimulatorFlag("0")
+
   // ----------------------------------------------------------------
   // Common helpers (sim-side UART byte injection + capture).
   // ----------------------------------------------------------------
@@ -168,36 +185,10 @@ object MoleTopFlowControlSim extends App {
   // ----------------------------------------------------------------
   // Case 1: CTS asserted in acceptLoad.
   // ----------------------------------------------------------------
-  //
-  // *** Temporary diagnostic ***
-  // Seed 1523062563 reproducibly trips
-  // `MoleIoBufUp5k: sda bus contention (driveLow && driveHigh)`
-  // at sim t=170 on the user's Linux box. A first-pass fix in
-  // `MoleIoBufUp5k.scala` (wrapping the bare `assert(...)` in
-  // `when(!ClockDomain.current.isResetActive)`) was confirmed to
-  // be a no-op by inspecting `gen/sim-iobuf/MoleIoBufUp5k.v`:
-  // SpinalHDL already emits the assert inside
-  // `always @(posedge clk or posedge reset) if(reset)/else`, so
-  // the wrapping `when(!reset)` lives inside the `else(reset)`
-  // branch where it is structurally always true.
-  //
-  // To diagnose the actual cause, pin the failing Verilator seed
-  // and enable VCD dumping. The dump lands at
-  // `simWorkspace/MoleTopSimDut/cts-asserted-on-reset.vcd` and
-  // the relevant signals to inspect at t=160..180 are:
-  //   - `sdaDriveLow` / `sdaDriveHigh` on the engine boundary
-  //   - the engine FSM state register
-  //   - `resetSync` (fabric reset; check for X-prop)
-  //   - `busModeReg` (in case X-resolved bus mode briefly takes
-  //     a path through SymbolDecoder that we missed)
-  //
-  // Revert this block (drop `.withWave`, drop `seed = ...`) once
-  // the root cause is identified and fixed.
-  // ----------------------------------------------------------------
   println("--- MoleTopFlowControlSim: cts-asserted-on-reset ---")
-  SimConfig.withWave
+  simConfig
     .compile(MoleTopSimDut(cfg))
-    .doSim("cts-asserted-on-reset", seed = 1523062563L) { dut =>
+    .doSim("cts-asserted-on-reset") { dut =>
       dut.clockDomain.forkStimulus(period = 10)
       doReset(dut)
 
@@ -222,7 +213,7 @@ object MoleTopFlowControlSim extends App {
   // Case 2: CTS deasserted during run+drain.
   // ----------------------------------------------------------------
   println("--- MoleTopFlowControlSim: cts-deasserted-during-run ---")
-  SimConfig
+  simConfig
     .compile(MoleTopSimDut(cfg))
     .doSim("cts-deasserted-during-run") { dut =>
       dut.clockDomain.forkStimulus(period = 10)
@@ -282,7 +273,7 @@ object MoleTopFlowControlSim extends App {
   // Case 3: TX backpressure on RTS deasserted.
   // ----------------------------------------------------------------
   println("--- MoleTopFlowControlSim: tx-halts-when-rts-deasserted ---")
-  SimConfig
+  simConfig
     .compile(MoleTopSimDut(cfg))
     .doSim("tx-halts-when-rts-deasserted") { dut =>
       dut.clockDomain.forkStimulus(period = 10)
@@ -331,7 +322,7 @@ object MoleTopFlowControlSim extends App {
   // Case 4: TX resumes after mid-drain halt.
   // ----------------------------------------------------------------
   println("--- MoleTopFlowControlSim: tx-resumes-after-mid-drain-halt ---")
-  SimConfig
+  simConfig
     .compile(MoleTopSimDut(cfg))
     .doSim("tx-resumes-after-mid-drain-halt") { dut =>
       dut.clockDomain.forkStimulus(period = 10)

@@ -235,6 +235,18 @@ object MoleTopSim extends App {
   // reserved=0 = 0xC000.
   val cleanHaltWord = 0xc000
 
+  // See `MoleTopFlowControlSim.simConfig` for the rationale. Without
+  // these flags Verilator randomises every uninitialised Reg, and on
+  // unlucky seeds MoleTop's reset bridge synchroniser starts low,
+  // letting fabric-domain Regs (engine FSM, drive enables, busModeReg)
+  // skip their sync-reset clear and trip the iobuf bus-contention
+  // assert at the first post-reset posedge.
+  val simConfig = SimConfig
+    .addSimulatorFlag("--x-assign")
+    .addSimulatorFlag("0")
+    .addSimulatorFlag("--x-initial")
+    .addSimulatorFlag("0")
+
   // ----------------------------------------------------------------
   // Common helpers.
   // ----------------------------------------------------------------
@@ -306,7 +318,7 @@ object MoleTopSim extends App {
   // Case 1: short-halt round-trip.
   // ----------------------------------------------------------------
   println("--- MoleTopSim: short halt round-trip ---")
-  SimConfig.compile(MoleTopSimDut(cfg)).doSim("short-halt") { dut =>
+  simConfig.compile(MoleTopSimDut(cfg)).doSim("short-halt") { dut =>
     dut.clockDomain.forkStimulus(period = 10)
     doReset(dut)
 
@@ -371,7 +383,7 @@ object MoleTopSim extends App {
   // it completes).
   // ----------------------------------------------------------------
   println("--- MoleTopSim: bus toggle ---")
-  SimConfig.compile(MoleTopSimDut(cfg)).doSim("bus-toggle") { dut =>
+  simConfig.compile(MoleTopSimDut(cfg)).doSim("bus-toggle") { dut =>
     dut.clockDomain.forkStimulus(period = 10)
     doReset(dut)
 
@@ -458,7 +470,7 @@ object MoleTopSim extends App {
   // normally.
   // ----------------------------------------------------------------
   println("--- MoleTopSim: bad CRC + recovery ---")
-  SimConfig.compile(MoleTopSimDut(cfg)).doSim("bad-crc") { dut =>
+  simConfig.compile(MoleTopSimDut(cfg)).doSim("bad-crc") { dut =>
     dut.clockDomain.forkStimulus(period = 10)
     doReset(dut)
 
@@ -534,7 +546,7 @@ object MoleTopSim extends App {
   // Case 4: back-to-back frames.
   // ----------------------------------------------------------------
   println("--- MoleTopSim: back-to-back frames ---")
-  SimConfig.compile(MoleTopSimDut(cfg)).doSim("back-to-back") { dut =>
+  simConfig.compile(MoleTopSimDut(cfg)).doSim("back-to-back") { dut =>
     dut.clockDomain.forkStimulus(period = 10)
     doReset(dut)
 
