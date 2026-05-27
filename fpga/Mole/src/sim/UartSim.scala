@@ -78,15 +78,16 @@ case class UartLoopbackDut(cfg: UartConfig) extends Component {
   *
   *   1. **12 MHz / 115 200 baud** — sibling project default; sanity check that
   *      the upstream import still works at the original clock rate.
-  *   2. **48 MHz / 115 200 baud** — Mole "early dev" config; same baud, fast
-  *      fabric. Catches BaudGenerator phase increment sizing regressions
-  *      introduced by the higher clock.
-  *   3. **48 MHz / 2 Mbaud** — Mole production default per
-  *      `MoleConfig.uartBaud`. 2 Mbaud × 16× oversample = 32 MHz tick rate,
-  *      which fits comfortably in the 24-bit DDS at 48 MHz fabric (`phaseInc ≈
+  *   2. **24 MHz / 115 200 baud** — Mole Verde "early dev" config; same baud,
+  *      production fabric. Catches BaudGenerator phase increment sizing
+  *      regressions introduced by the higher clock.
+  *   3. **24 MHz / 1 Mbaud** — Mole Verde production default per
+  *      `MoleConfig.uartBaud`. 1 Mbaud × 16× oversample = 16 MHz tick rate,
+  *      which fits comfortably in the 24-bit DDS at 24 MHz fabric (`phaseInc ≈
   *      11_184_811 = 0xAAA_AAB`, well below the 2^24 ceiling). iCEBreaker's
-  *      FT2232H supports up to 12 Mbaud, so 2 Mbaud has plenty of host-side
-  *      headroom.
+  *      FT2232H supports up to 12 Mbaud, so 1 Mbaud has plenty of host-side
+  *      headroom; the engine is throttled by the fabric clock long before UART
+  *      becomes the bottleneck.
   *
   * Coverage at each config:
   *   - Single-byte round trip across a representative pattern set (`0x00`,
@@ -270,8 +271,8 @@ object UartSim {
   def main(args: Array[String]): Unit = {
     val configs = Seq(
       "12MHz_115200" -> UartConfig(clkFreqHz = 12000000, baudRate = 115200),
-      "48MHz_115200" -> UartConfig(clkFreqHz = 48000000, baudRate = 115200),
-      "48MHz_2000000" -> UartConfig(clkFreqHz = 48000000, baudRate = 2000000)
+      "24MHz_115200" -> UartConfig(clkFreqHz = 24000000, baudRate = 115200),
+      "24MHz_1000000" -> UartConfig(clkFreqHz = 24000000, baudRate = 1000000)
     )
     configs.foreach { case (label, cfg) => runOne(label, cfg) }
     println("UartSim OK")

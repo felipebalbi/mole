@@ -198,12 +198,12 @@ object MoleTopSim extends App {
   // bytes drained per halt). Keeps the worst-case per-test wall
   // time manageable.
   val cfg = MoleConfig(
-    fabricFreqHz = 48 MHz,
-    quarterPeriodCyclesReset = 12,
+    fabricFreqHz = 24 MHz,
+    quarterPeriodCyclesReset = 6,
     programWordCount = 16,
     resultRingByteCount = 32,
     captureMaxBits = 64,
-    uartBaud = 2_000_000
+    uartBaud = 1_000_000
   )
 
   // Result-ring bytes: Revision lo at [0..1], Revision hi at [2..3],
@@ -427,7 +427,7 @@ object MoleTopSim extends App {
   //
   // Send a frame with a corrupted CRC trailer; verify the engine
   // does NOT start and the loader fault LED pulses (the
-  // pulse-stretcher then holds it for ~87 ms = many sim cycles).
+  // pulse-stretcher then holds it for ~175 ms = many sim cycles).
   // After the idle gap, send a good frame and verify it loads
   // normally.
   // ----------------------------------------------------------------

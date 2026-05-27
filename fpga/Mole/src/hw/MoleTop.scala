@@ -13,7 +13,7 @@ import spinal.lib.fsm._
   * ==Clocking and reset==
   *
   *   - The 12 MHz package pin `io_clk` feeds a [[MolePllUp5k]] that produces a
-  *     48 MHz fabric clock.
+  *     24 MHz fabric clock.
   *   - The external `io_reset` button is active-low. The reset bridge
   *     async-asserts the fabric reset on either `!pll.locked` or `!io_reset`,
   *     and sync-deasserts it through a 2-FF chain in the fabric clock domain.
@@ -84,13 +84,13 @@ import spinal.lib.fsm._
   * ==LED state==
   *
   *   - `io_ledR` --- pulse-stretched loader fault. When `loader.fault` fires, a
-  *     22-bit downcounter is loaded; the LED stays lit until it decays (~87 ms
-  *     at 48 MHz, comfortably visible).
+  *     22-bit downcounter is loaded; the LED stays lit until it decays (~175 ms
+  *     at 24 MHz, comfortably visible).
   *   - `io_ledG` --- `!engine.done`, i.e. high whenever the engine is not in
   *     its idle state. Direct visual indication of "the engine is busy".
   *   - `io_ledB` --- heartbeat. A 26-bit counter that only increments while the
   *     engine is idle; the LED follows the counter's top bit AND `engine.done`.
-  *     While running, the LED is off; while idle, it blinks at about 0.7 Hz so
+  *     While running, the LED is off; while idle, it blinks at about 0.36 Hz so
   *     a freshly-flashed board announces itself.
   *
   * @param cfg
@@ -181,7 +181,7 @@ case class MoleTop(
   }
   noIoPrefix()
 
-  // PLL: 12 MHz -> 48 MHz. The sim-bypass variant just passes io_clk
+  // PLL: 12 MHz -> 24 MHz. The sim-bypass variant just passes io_clk
   // through and reports `locked = True` so MoleTopSim does not need
   // an SB_PLL40_PAD model.
   val pll = MolePllUp5k(useBlackBox = useBlackBox)
@@ -427,7 +427,7 @@ case class MoleTop(
     // LEDs
     // ----------------------------------------------------------------
 
-    // Red: pulse-stretched loader fault. ~87 ms at 48 MHz so a
+    // Red: pulse-stretched loader fault. ~175 ms at 24 MHz so a
     // 1-cycle pulse is comfortably visible.
     val faultStretchWidth = 22
     val faultStretchMax = (1 << faultStretchWidth) - 1

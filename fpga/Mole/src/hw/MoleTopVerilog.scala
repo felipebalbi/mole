@@ -20,6 +20,6 @@ import spinal.core._
 object MoleTopVerilog extends App {
   SpinalConfig(
     targetDirectory = "gen",
-    defaultClockDomainFrequency = FixedFrequency(48 MHz)
+    defaultClockDomainFrequency = FixedFrequency(24 MHz)
   ).generateVerilog(MoleTop(MoleConfig(), useBlackBox = true))
 }

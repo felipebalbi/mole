@@ -13,8 +13,8 @@ import spinal.core.sim._
   *      depends on, since Verilator has no model of the iCE40 `SB_PLL40_PAD`
   *      cell.
   *   2. The BlackBox path elaborates to Verilog without errors and emits the
-  *      `SB_PLL40_PAD` primitive with the 4x-recipe generics (DIVR=0, DIVF=31,
-  *      DIVQ=3, FILTER_RANGE=1, FEEDBACK_PATH="SIMPLE"). yosys's `synth_ice40`
+  *      `SB_PLL40_PAD` primitive with the 2x-recipe generics (DIVR=0, DIVF=31,
+  *      DIVQ=4, FILTER_RANGE=1, FEEDBACK_PATH="SIMPLE"). yosys's `synth_ice40`
   *      is the actual end-to-end check; here we just verify the SpinalHDL
   *      elaboration stage produces a Verilog file that mentions the primitive,
   *      so a future refactor that silently drops the BlackBox is caught at sim

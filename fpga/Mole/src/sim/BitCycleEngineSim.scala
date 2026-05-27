@@ -114,12 +114,12 @@ object BitCycleEngineSim {
   // --------------------------------------------------------------
 
   private val cfg = MoleConfig(
-    fabricFreqHz = 48 MHz,
-    quarterPeriodCyclesReset = 12,
+    fabricFreqHz = 24 MHz,
+    quarterPeriodCyclesReset = 6,
     programWordCount = 64,
     resultRingByteCount = 64,
     captureMaxBits = 65536,
-    uartBaud = 2_000_000
+    uartBaud = 1_000_000
   )
 
   private val addrWidth: Int =
