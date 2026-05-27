@@ -38,6 +38,22 @@ object BusModeOps {
     (busMode === BusMode.i3cPp) || (busMode === BusMode.hdrDdr)
 }
 
+/** Bundled output of [[SymbolDecoder]] --- the pair of pad-driver
+  * enables for one `(tx_symbol, BUS_MODE)` decode.
+  *
+  * Named fields rather than a `(Bool, Bool)` tuple because Scala 2's
+  * pattern-bind desugaring of `val (a, b) = SymbolDecoder(...)`
+  * interacts badly with SpinalHDL's IDSL compiler-plugin rewrite of
+  * `is(...){...}` and `when(...){...}` bodies --- the rewrite loses the
+  * tuple's type parameters and the bound names come out as `Any`.
+  * Named-field access (`.driveLow` / `.driveHigh`) bypasses pattern
+  * binding entirely and is robust against the rewrite.
+  *
+  * The case class is small and pure-Scala; it does not elaborate to
+  * RTL on its own. Spinal sees only the two `Bool` wires inside.
+  */
+case class SymbolDrive(driveLow: Bool, driveHigh: Bool)
+
 /** Pure-combinational symbol decoder --- the *only* place in the
   * engine that maps a per-bit / per-quarter `tx_symbol` (plus the
   * current `BUS_MODE`) onto pad-driver enables.
@@ -71,12 +87,12 @@ object BusModeOps {
   */
 object SymbolDecoder {
 
-  /** Decode `(txSymbol, busMode)` to `(driveLow, driveHigh)`. Both
-    * outputs are fresh combinational wires; the caller is expected to
-    * `:=` them into registered pad drivers per
-    * `fpga/Mole/AGENTS.md` §"Bus-shaped FSM idiom".
+  /** Decode `(txSymbol, busMode)` to a [[SymbolDrive]] bundle of
+    * `(driveLow, driveHigh)`. Both wires are fresh combinational
+    * `Bool`s; the caller is expected to `:=` them into registered pad
+    * drivers per `fpga/Mole/AGENTS.md` §"Bus-shaped FSM idiom".
     */
-  def apply(txSymbol: TxSymbol.E, busMode: BusMode.E): (Bool, Bool) = {
+  def apply(txSymbol: TxSymbol.E, busMode: BusMode.E): SymbolDrive = {
     val driveLow = Bool()
     val driveHigh = Bool()
 
@@ -98,6 +114,6 @@ object SymbolDecoder {
     // hiz / reserved: both defaults stay False. No bus contention
     // possible.
 
-    (driveLow, driveHigh)
+    SymbolDrive(driveLow, driveHigh)
   }
 }

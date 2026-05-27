@@ -304,17 +304,17 @@ case class BitCycleEngineCore(cfg: MoleConfig) extends Component {
             val sdaSym = TxSymbol()
             sdaSym.assignFromBits(instrReg(11 downto 10))
 
-            val (sdaLow, sdaHigh) = SymbolDecoder(sdaSym, busModeReg)
-            sdaDriveLow := sdaLow
-            sdaDriveHigh := sdaHigh
+            val sda = SymbolDecoder(sdaSym, busModeReg)
+            sdaDriveLow := sda.driveLow
+            sdaDriveHigh := sda.driveHigh
 
             // Q0 = dominant per SclWaveformGen --- pre-compute and
             // latch into the SCL regs so the very first quarter
             // dwell shows the correct level.
             val sclSymQ0 = SclWaveformGen(U(0, 2 bits))
-            val (sclLow, sclHigh) = SymbolDecoder(sclSymQ0, busModeReg)
-            sclDriveLow := sclLow
-            sclDriveHigh := sclHigh
+            val sclQ0 = SymbolDecoder(sclSymQ0, busModeReg)
+            sclDriveLow := sclQ0.driveLow
+            sclDriveHigh := sclQ0.driveHigh
 
             qIdx := 0
             timerLoad := True
@@ -355,9 +355,9 @@ case class BitCycleEngineCore(cfg: MoleConfig) extends Component {
             // Update SCL for the new quarter. SDA stays as latched on
             // entry to this state (held for the full bit per spec).
             val sclSym = SclWaveformGen(nextQ)
-            val (sclLow, sclHigh) = SymbolDecoder(sclSym, busModeReg)
-            sclDriveLow := sclLow
-            sclDriveHigh := sclHigh
+            val scl = SymbolDecoder(sclSym, busModeReg)
+            sclDriveLow := scl.driveLow
+            sclDriveHigh := scl.driveHigh
           }
         }
       }
