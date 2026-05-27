@@ -17,6 +17,7 @@
 
 #slide[
   = The opcodes (drive + observe)
+
   #table(
     columns: (auto, 1fr),
     stroke: 0.5pt + muted,
@@ -32,6 +33,7 @@
 
 #slide[
   = The opcodes (flow + status)
+
   #table(
     columns: (auto, 1fr),
     stroke: 0.5pt + muted,

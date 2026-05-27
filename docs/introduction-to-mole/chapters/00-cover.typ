@@ -6,7 +6,7 @@
   "Mole",
   "An I3C / I2C compliance test rig you can build yourself",
   "Felipe Balbi",
-  "6mil Labs --- 2026",
+  "2026",
 )
 
 #slide[

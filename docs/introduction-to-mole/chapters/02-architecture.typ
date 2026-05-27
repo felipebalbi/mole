@@ -6,6 +6,7 @@
 
 #slide[
   = Two layers, one contract
+
   *Layer 0 --- the bit-cycle engine.* Tiny FPGA core. Knows nothing
   about I2C, I3C, CCCs, addresses, parity, or HDR. Executes a
   16-bit fixed-width ISA over quarter-bit drive symbols on SDA
@@ -22,7 +23,8 @@
 
 #slide[
   = Why bus-agnostic?
-  The engine's drive vocabulary is exactly four symbols: \
+
+  The engine's drive vocabulary is exactly four symbols:
   `dominant` \/ `recessive` \/ `hiz` \/ `reserved`.
 
   *No* `i2c_low`. *No* `i3c_push_pull_high`. *No* "drive SCL".
@@ -39,6 +41,7 @@
 
 #slide[
   = Compile-time error injection
+
   Mole has *zero* runtime randomness.
 
   Glitches, bit-flips, premature stops, malformed CCCs --- all
@@ -53,22 +56,4 @@
     same wire pattern, the same fault, the same response.
   - The FPGA stays small. No on-chip RNG, no on-chip
     decision logic.
-]
-
-#slide[
-  = Two tiers from one design
-  Mole Verde *and* Mole Rojo run the same RTL. The difference is
-  the FPGA budget and the I/O front-end.
-
-  #table(
-    columns: (1fr, 1.5fr, 1.5fr),
-    align: (left, left, left),
-    stroke: 0.5pt + muted,
-    [], [*Mole Verde*], [*Mole Rojo*],
-    [FPGA],     [iCE40 UP5K (\$5)],   [ECP5-45K (\$25)],
-    [Buffer],   [SPRAM, ~256 KB],     [SDRAM, megabytes],
-    [Channels], [1],                   [2 + sync],
-    [Target],   [developer's desk],   [bench, compliance],
-    [Eventual], [Verde-DAA addon],    [Rojo-CertusPro NX],
-  )
 ]
