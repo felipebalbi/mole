@@ -73,6 +73,11 @@ fn i2c_write_one_byte_golden() {
     check_fixture("i2c-write-one-byte");
 }
 
+#[test]
+fn loop_counter_demo_golden() {
+    check_fixture("loop-counter-demo");
+}
+
 // ---------------------------------------------------------------------------
 // Range boundary tests at the assembler level (encoder unit tests cover
 // the raw bit-pack; these confirm the assembler's PC math gets the
@@ -203,7 +208,12 @@ fn python_parity_against_reference() {
     let py = dir.join("mole-asm.py");
     assert!(py.exists(), "reference python at {py:?} not found");
 
-    for name in ["first-light", "tmp108", "i2c-write-one-byte"] {
+    for name in [
+        "first-light",
+        "tmp108",
+        "i2c-write-one-byte",
+        "loop-counter-demo",
+    ] {
         let src = dir.join(format!("{name}.moleasm"));
         let tmp_dir = std::env::temp_dir().join("mole-asm-parity");
         let _ = std::fs::create_dir_all(&tmp_dir);

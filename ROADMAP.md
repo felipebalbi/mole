@@ -26,7 +26,7 @@ already on the icebreaker).
 The architecture is a **bit-stream + Scheme SDK** design:
 
 - **FPGA hosts a tiny, protocol-agnostic bit-cycle engine** ("Layer 0"):
-  ~12 opcodes, ~1700 LUTs, no knowledge of I2C / I3C, just drives
+  ~14 opcodes, ~1700 LUTs, no knowledge of I2C / I3C, just drives
   quarter-bit patterns on SDA/SCL and compares them against expects.
 - **Host hosts a Scheme SDK** ("Layer 1"): all of I2C and I3C lives
   here as Scheme source --- spec-compliant primitives (`sdr/write-byte`,
@@ -85,7 +85,7 @@ Five consequences worth naming explicitly:
    |    v                                            |
    | Bit-cycle engine (Layer 0)                      |
    |   - quarter-bit FSM                             |
-   |   - 12-opcode decoder                           |
+   |   - 14-opcode decoder                           |
    |   - expect comparator                           |
    |   - capture path                                |
    |   - timing dividers (pp/od/i2c-freq)            |
@@ -152,9 +152,9 @@ Every protocol-aware shortcut we resist baking into the engine is a
 place where "fix a spec bug" becomes "edit Scheme" instead of
 "respin the bitstream". This is the architectural win.
 
-### ISA (v0 --- 12 opcodes, 16-bit encoding)
+### ISA (v0 --- 14 opcodes, 16-bit encoding)
 
-The ISA splits into four buckets:
+The ISA splits into five buckets:
 
 - **Wire engine --- role-agnostic primitives** (`EMIT_BIT`,
   `EMIT_QUARTER`, `STRETCH_SCL`, `WAIT_ON`): valid in both
@@ -178,6 +178,11 @@ The ISA splits into four buckets:
   are now `WAIT_ON START_SEEN, t` / `WAIT_ON STOP_SEEN, t`.)
 - **Control flow / bookkeeping** (`JMP`, `BRANCH_ON`, `HALT`,
   `MARK`, `LOAD_TIMING`): role-agnostic.
+- **Bounded loops** (`LOAD_LOOP`, `DEC_BRANCH`): two architectural
+  8-bit loop counters (`LCR0`, `LCR1`) plus the priming +
+  count-down opcodes that drive them. Role-agnostic; flag-neutral
+  (do not touch sticky engine flags). One level of nesting
+  without spilling to scratch.
 
 Role is a config bit, not an opcode: the same program may issue
 both role-agnostic ops and either-role helpers, but in practice
@@ -302,15 +307,51 @@ Bookkeeping:
   Pure --- does not change the active mode (use `SET_BUS_MODE`
   for that).
 
-Total: 12 opcodes. The 4-bit opcode field holds 16 codes; four
-slots are intentionally reserved. The first reserved slot is
-earmarked for a future `WAIT_ADDRESSED` target-side accelerator
-(address compare in hardware) if the SDK-level loop of
-`SAMPLE_BIT_ON_SCL × 7 + compare + ACK` proves too slow at I3C
-SDR rates. A future `MISMATCH_CLEAR` opcode (see "Engine
-flags") would, if needed, take a second slot. Two more remain
-genuinely uncommitted --- ample headroom for `FLAG_CLEAR`,
-`CAPTURE_RUN`, or whatever v0.5 demands.
+Total: 14 opcodes. The 4-bit opcode field holds 16 codes; two
+slots remain reserved (0xE / 0xF). Slots 0xC and 0xD originally
+held `WAIT_ADDRESSED` and `MISMATCH_CLEAR` as v0.5 reservations
+and graduated to v0 as `LOAD_LOOP` and `DEC_BRANCH` --- see
+"Reserved for v0.5" for the displacement rationale. The
+remaining slots are ample headroom for `FLAG_CLEAR`,
+`CAPTURE_RUN`, or whatever v0.5 actually demands.
+
+#### Bounded loops --- `LOAD_LOOP` + `DEC_BRANCH`
+
+Two architectural 8-bit loop counters (`LCR0`, `LCR1`) plus a
+priming opcode and a count-down opcode replace what would
+otherwise be unrolled `EMIT_BIT * N` sequences in source.
+
+- `LOAD_LOOP reg, imm8` --- writes the 8-bit immediate into
+  `LCR[reg]`. `reg = 0` selects `LCR0`, `reg = 1` selects
+  `LCR1`.
+- `DEC_BRANCH reg, offset` --- decrements `LCR[reg]` (8-bit
+  wrap; `0 -> 0xFF`) then back-edges by the signed 8-bit
+  PC-relative offset iff the post-decrement value is non-zero.
+
+Two registers buy one level of nesting (outer LCR + inner LCR)
+without spilling to a scratch slot in the result ring. Beyond
+that, fall back to manual unrolling or layer a counter above
+moleasm.
+
+`DEC_BRANCH` is **flag-neutral** --- it does not touch
+`MISMATCH_FLAG`, `TIMEOUT_FLAG`, `START_FLAG`, or `STOP_FLAG`
+per AGENTS §3.15. The canonical `BRANCH_ON MISMATCH ...`
+fail-fast idiom therefore composes cleanly inside a loop body:
+
+```moleasm
+        LOAD_LOOP     lcr0, 8
+bit_loop:
+        EMIT_BIT      tx=hiz expect=0 mask=1 capture=1
+        BRANCH_ON     MISMATCH, fail        ; bail on first ACK miss
+        DEC_BRANCH    lcr0, bit_loop
+        HALT          status=0
+fail:
+        HALT          status=1
+```
+
+Slot mapping (`0xC` = `LOAD_LOOP`, `0xD` = `DEC_BRANCH`) is
+locked. The 3-bit `[10:8]` pad on both opcodes is reserved
+(=0) for a future 16-LCR widening with no wire-format break.
 
 #### Replacement mapping (WAIT_* → WAIT_ON)
 
@@ -363,6 +404,8 @@ BRANCH_ON          [15:12]op [11:8]cond_code [7:0]pc_rel_offset_signed
 HALT               [15:12]op [11:8]status [7:0]reserved
 MARK               [15:12]op [11:4]label [3:0]reserved
 LOAD_TIMING        [15:12]op [11:10]reg [9:0]divider_word
+LOAD_LOOP          [15:12]op [11]reg [10:8]reserved [7:0]imm8
+DEC_BRANCH         [15:12]op [11]reg [10:8]reserved [7:0]pc_rel_offset_signed
 ```
 
 `WAIT_ON` and `BRANCH_ON` share field shape (`[11:8]cond_code
@@ -444,10 +487,9 @@ next passing compare" rule is what keeps the flag from going
 permanently stale: any successful expect resets it.
 
 v0 deliberately does **not** ship an explicit `MISMATCH_CLEAR`
-opcode; one of the four reserved opcode slots in §"ISA" (first
-earmarked for `WAIT_ADDRESSED`) could host it in v0.5 if a
-program ever needs to clear the flag without consuming a wire
-bit.
+opcode; the `FLAG_CLEAR` reserved slot at `0xE` could host
+fine-grained mismatch clearing in v0.5 if a program ever needs
+to clear the flag without consuming a wire bit.
 
 **`TIMEOUT_FLAG`**:
 
@@ -1032,24 +1074,16 @@ wasted memory.
 
 ### Reserved for v0.5 (do not implement yet)
 
-Opcodes (held in the four free opcode-field slots --- see
+Opcodes (held in the two remaining free opcode-field slots --- see
 §"ISA"):
 
-- `WAIT_ADDRESSED my_addr, timeout` --- target-side accelerator:
-  wait for Start, sample 8 bits, compare against `my_addr`, ACK
-  on hit / release on miss --- all in hardware. Defer until the
-  SDK-level expansion (`WAIT_ON START_SEEN, t` + 8 ×
-  `SAMPLE_BIT_ON_SCL` + host-compiled compare + conditional
-  `DRIVE_BIT_ON_SCL`) proves too slow for I3C SDR target
-  emulation at full rate.
-- `MISMATCH_CLEAR` --- explicitly clear `MISMATCH_FLAG` without
-  consuming a wire bit. Defer until a real program needs to
-  branch on stale-vs-fresh mismatch state.
-- `FLAG_CLEAR mask` --- broader cousin: clear any subset of the
-  sticky engine flags (`MISMATCH_FLAG`, `TIMEOUT_FLAG`,
-  `START_FLAG`, `STOP_FLAG`) in one shot. Would subsume
-  `MISMATCH_CLEAR`; defer until at least one use case wants
-  multi-flag reset.
+- `WAIT_ADDRESSED my_addr, timeout` --- moved to Displaced reservations below.
+- `MISMATCH_CLEAR` --- moved to Displaced reservations below.
+- `FLAG_CLEAR mask` --- clear any subset of the sticky engine
+  flags (`MISMATCH_FLAG`, `TIMEOUT_FLAG`, `START_FLAG`,
+  `STOP_FLAG`) in one shot. Subsumes the originally-planned
+  `MISMATCH_CLEAR` (see Displaced reservations below). Defer
+  until at least one use case wants multi-flag reset.
 - `CAPTURE_RUN n into addr` --- pure listening for `n` quarters,
   no drive, no expect. Defer until loop-based capture shows
   measurable timing jitter.
@@ -1063,8 +1097,27 @@ Opcodes (held in the four free opcode-field slots --- see
   surrounding `BUS_MODE`. Defer until a real compliance case
   needs it; until then the encoding is reserved.
 
-The opcode field has **four free slots**, so two or three of
-the above can land in v0.5 without an ISA-width bump.
+The opcode field has **two free slots**, so one or two of the
+above can land in v0.5 without an ISA-width bump.
+
+#### Displaced reservations (graduated or subsumed)
+
+Slots `0xC` and `0xD` originally held the v0.5 reservations
+`WAIT_ADDRESSED` and `MISMATCH_CLEAR`. Both have moved aside
+in the v1 ISA to make room for the loop counter pair
+(`LOAD_LOOP` at `0xC`, `DEC_BRANCH` at `0xD`).
+
+- `WAIT_ADDRESSED my_addr, timeout` was earmarked as a
+  target-side accelerator: wait for Start, sample 8 bits,
+  compare against `my_addr`, ACK on hit / release on miss in
+  hardware. The SDK-level expansion has not yet shown the
+  I3C-rate timing pressure that would justify a dedicated
+  accelerator. If it ever does, one of the two remaining
+  reserved slots can host it.
+- `MISMATCH_CLEAR` was a narrow precursor to `FLAG_CLEAR`,
+  which keeps its slot at `0xE`. If a v0.5 program ever wants
+  fine-grained mismatch clearing, `FLAG_CLEAR` with a
+  mismatch-only mask covers it.
 
 `BRANCH_ON` / `WAIT_ON` condition codes (held in the 6 free
 `cond_code` slots --- codes 10..15 ---  see §"Engine flags ---
@@ -1214,7 +1267,7 @@ is the readable surface.
 | Block                                 | LUT estimate |
 |---------------------------------------|--------------|
 | Quarter-bit FSM + timing dividers     | ~250         |
-| 12-opcode decoder + dispatch          | ~150         |
+| 14-opcode decoder + dispatch          | ~170         |
 | PC + JMP / branch logic               | ~120         |
 | Expect comparator + capture path      | ~250         |
 | Result ring controller                | ~250         |
@@ -1497,7 +1550,7 @@ substitute for the formal CTS lab.
 
 ### v0 --- pocket prototype on icebreaker (no Pico, no flash, no PCB)
 
-- **Phase 0 --- ISA + compiler skeleton**: finalize the 12-opcode ISA
+- **Phase 0 --- ISA + compiler skeleton**: finalize the 14-opcode ISA
   encoding (controller-role + target-role + control flow). Write a
   host-side bytecode encoder in Rust. Hand-assemble one tiny
   controller test program *and* one tiny target test program.

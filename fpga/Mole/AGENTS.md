@@ -46,19 +46,19 @@ rule in `../../AGENTS.md` §3.4.
 
 ## ISA is a stable contract
 
-The **12-opcode ISA** --- `EMIT_BIT`, `EMIT_QUARTER`,
+The **14-opcode ISA** --- `EMIT_BIT`, `EMIT_QUARTER`,
 `STRETCH_SCL`, `WAIT_ON`, `SET_BUS_MODE`, `SAMPLE_BIT_ON_SCL`,
 `DRIVE_BIT_ON_SCL`, `JMP`, `BRANCH_ON`, `HALT`, `MARK`,
-`LOAD_TIMING` (plus four reserved opcode slots) --- and its
-**16-bit fixed-width** encoding are externally visible: the host
-compiler emits exactly this byte format and every deployed Mole
-decodes it. Reordering opcodes, shrinking fields, repurposing
-reserved bits, moving the flag triple off `[2:0]`, *or changing
-the fixed 16-bit width* (to 8-bit, to variable-length, or
-anything else) is a wire-format break that requires a
-bytecode-version bump. See ROADMAP §"ISA" and §"Encoding width"
-for the per-opcode field budget and why narrower widths were
-rejected.
+`LOAD_TIMING`, `LOAD_LOOP`, `DEC_BRANCH` (plus two reserved
+opcode slots) --- and its **16-bit fixed-width** encoding are
+externally visible: the host compiler emits exactly this byte
+format and every deployed Mole decodes it. Reordering opcodes,
+shrinking fields, repurposing reserved bits, moving the flag
+triple off `[2:0]`, *or changing the fixed 16-bit width* (to
+8-bit, to variable-length, or anything else) is a wire-format
+break that requires a bytecode-version bump. See ROADMAP §"ISA"
+and §"Encoding width" for the per-opcode field budget and why
+narrower widths were rejected.
 
 If the ISA truly needs to change:
 1. Bump a bytecode-format version word at the top of every
@@ -68,13 +68,17 @@ If the ISA truly needs to change:
    `../../mole-asm/`, with its CLI front-end in `../../mole-asm-cli/`)
    in the same PR.
 
-The `WAIT_ADDRESSED`, `MISMATCH_CLEAR`, `FLAG_CLEAR`,
-`CAPTURE_RUN`, `CALL`, and `RET` opcodes are **reserved for
-v0.5** (see ROADMAP §"Reserved for v0.5"). Do not implement them
-in v0 even if a step seems to want them --- add the requirement
-to the v0.5 plan instead. Likewise the `tx_symbol = 11` encoding
-is reserved for the v0.5 `raw_override` escape and must not be
-repurposed.
+The `FLAG_CLEAR`, `CAPTURE_RUN`, `CALL`, and `RET` opcodes are
+**reserved for v0.5** (see ROADMAP §"Reserved for v0.5"). Do not
+implement them in v0 even if a step seems to want them --- add
+the requirement to the v0.5 plan instead. Likewise the
+`tx_symbol = 11` encoding is reserved for the v0.5 `raw_override`
+escape and must not be repurposed.
+
+(Slots `0xC` and `0xD` --- originally reserved for `WAIT_ADDRESSED`
+and `MISMATCH_CLEAR` --- graduated to v0 as `LOAD_LOOP` and
+`DEC_BRANCH`. See ROADMAP §"Reserved for v0.5" for the
+displacement rationale.)
 
 **`EMIT_BYTE` (and any byte-level / word-level emit) is
 explicitly rejected**, not deferred. See ROADMAP §"Why no

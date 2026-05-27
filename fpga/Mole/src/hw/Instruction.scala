@@ -49,24 +49,31 @@ import spinal.core._
 
 /** Opcode field --- bits `[15:12]` of every instruction word.
   *
-  * Sixteen total slots (4-bit field), twelve in v0 use plus four reserved for
-  * v0.5 (`WAIT_ADDRESSED`, `MISMATCH_CLEAR`, `FLAG_CLEAR`, `CAPTURE_RUN`).
-  * Numeric assignment locked here is the wire-format contract: declaration
-  * order is the binary code under SpinalHDL's default `binarySequential`
-  * encoding.
+  * Sixteen total slots (4-bit field), fourteen in v0 use plus two reserved for
+  * v0.5 (`FLAG_CLEAR`, `CAPTURE_RUN`). Numeric assignment locked here is the
+  * wire-format contract: declaration order is the binary code under SpinalHDL's
+  * default `binarySequential` encoding.
   *
   * `HALT` deliberately occupies code `0x0` so a zero-initialised SPRAM word (or
   * a fetch off the end of a loaded program) traps cleanly rather than decoding
   * as a free-running `EMIT_BIT`.
   *
-  * The four reserved slots are claimed by v0.5 candidates per ROADMAP
+  * Slots `0xC` and `0xD` carry the v1 loop-counter pair `LOAD_LOOP` and
+  * `DEC_BRANCH` --- they consume what was previously reserved for
+  * `WAIT_ADDRESSED` and `MISMATCH_CLEAR`. Both deferred-v0.5 candidates were
+  * lower-priority than ergonomic bounded loops: the SDK-level expansion for
+  * `WAIT_ADDRESSED` (Start + 8 SAMPLE_BIT_ON_SCL + host compare + conditional
+  * DRIVE_BIT_ON_SCL) has not yet shown the I3C-rate timing pressure that would
+  * justify reserving a slot, and `MISMATCH_CLEAR`'s use case is fully served by
+  * the broader `FLAG_CLEAR` still reserved at `0xE`. See ROADMAP §"Reserved for
+  * v0.5" for the full deferral note.
+  *
+  * The remaining two reserved slots are claimed by v0.5 candidates per ROADMAP
   * §"Reserved for v0.5". `CALL` / `RET` were considered and deliberately
   * dropped --- the SDK inlines call sites at compile time, so dedicated
-  * control-flow opcodes never become necessary. The `MISMATCH_CLEAR` +
-  * `FLAG_CLEAR` overlap is intentional: v0.5 picks one or both depending on the
-  * use case that surfaces; reserving slots for each preserves that choice. The
-  * slots are reservations only; v0 has no decoder behaviour for them and the
-  * engine rejects them at fetch (Step 8).
+  * control-flow opcodes never become necessary. The slots are reservations
+  * only; v0 has no decoder behaviour for them and the engine rejects them at
+  * fetch (Step 8).
   */
 object Opcode extends SpinalEnum {
   val halt = newElement() // 0x0  --- safer trap on zero-memory fetch
@@ -81,16 +88,16 @@ object Opcode extends SpinalEnum {
   val mark = newElement() // 0x9  --- record labelled marker in ring
   val sampleBitOnScl = newElement() // 0xA  --- target-role sample
   val driveBitOnScl = newElement() // 0xB  --- target-role drive + sample
-  val waitAddressed = newElement() // 0xC  reserved (v0.5)
-  val mismatchClear = newElement() // 0xD  reserved (v0.5)
+  val loadLoop = newElement() // 0xC  --- load 8-bit loop counter LCR[reg]
+  val decBranch = newElement() // 0xD  --- decrement LCR[reg], branch if != 0
   val flagClear = newElement() // 0xE  reserved (v0.5)
   val captureRun = newElement() // 0xF  reserved (v0.5)
 
-  /** `true` for opcode codes 0x0..0xB (the twelve v0 opcodes). `false` for
-    * 0xC..0xF (reserved v0.5 slots). Host encoder uses this to refuse
+  /** `true` for opcode codes 0x0..0xD (the fourteen v0 opcodes). `false` for
+    * 0xE..0xF (reserved v0.5 slots). Host encoder uses this to refuse
     * generating reserved-slot instructions in v0 programs.
     */
-  def isV0(op: Opcode.E): Boolean = op.position < 12
+  def isV0(op: Opcode.E): Boolean = op.position < 14
 }
 
 /** Per-line drive operand --- 2 bits, named symbolically per ROADMAP §"TX
@@ -407,6 +414,46 @@ object Instruction {
       capture: Boolean
   ) extends Instruction
 
+  /** `LOAD_LOOP reg, imm8` --- load an 8-bit immediate into one of the two loop
+    * counter registers (`LCR0` at `reg=0`, `LCR1` at `reg=1`). Layout:
+    *
+    * {{{
+    *   [15:12] opcode   [11] reg   [10:8] reserved (=0)   [7:0] imm8
+    * }}}
+    *
+    * Bits `[10:8]` are reserved (= 0) in the v1 two-LCR build; widening to a
+    * future 16-LCR file uses those three bits as additional reg-id bits with no
+    * wire-format break. The encoder pins `reg` to `{0, 1}`.
+    *
+    * Paired with [[DecBranch]] for bounded loops: `LOAD_LOOP reg=0, imm=N`
+    * primes LCR0 to `N`, then `DEC_BRANCH reg=0, back_offset` decrements LCR0
+    * each pass and back-edges while LCR0 != 0. `imm = 0` is legal but unusual
+    * --- the SDK warns since the matching `DEC_BRANCH` wraps to `0xFF` and runs
+    * a full 256 iterations. Documented in the moleasm book.
+    */
+  case class LoadLoop(reg: Int, imm: Int) extends Instruction
+
+  /** `DEC_BRANCH reg, offset` --- decrement `LCR[reg]` and conditionally branch
+    * by a signed 8-bit PC-relative offset (±128 instructions) if the
+    * post-decrement value is non-zero. Layout:
+    *
+    * {{{
+    *   [15:12] opcode   [11] reg   [10:8] reserved (=0)
+    *   [7:0] pc_rel_offset (signed)
+    * }}}
+    *
+    * Semantics, per fetch:
+    *   1. `LCR[reg] <- LCR[reg] - 1` (8-bit wrap; `0 -> 0xFF`).
+    *   2. `if (LCR[reg] != 0) PC <- PC + offset`.
+    *
+    * Same reserved-bit shape as [[LoadLoop]] --- `[10:8]` reserved for the
+    * eventual wider reg field. Same 8-bit signed offset shape as [[BranchOn]]
+    * --- the encoder shares the validation. Sticky engine flags
+    * (`MISMATCH_FLAG`, `TIMEOUT_FLAG`, `START_FLAG`, `STOP_FLAG`) are NOT
+    * touched by `DEC_BRANCH` per AGENTS §3.15.
+    */
+  case class DecBranch(reg: Int, pcRelOffset: Int) extends Instruction
+
   /** Reserved-v0.5 opcode carrier. Round-trips a 12-bit operand payload
     * verbatim --- v0 has no semantics for any of the four reserved slots, and
     * the per-opcode payload layout is a v0.5 design decision that has not
@@ -536,6 +583,32 @@ object Instruction {
         (tx.position << 10) |
         flagTripleBits(expect, mask, capture)
 
+    case LoadLoop(reg, imm) =>
+      require(
+        reg >= 0 && reg < 2,
+        s"LOAD_LOOP reg must be 0 or 1, got $reg"
+      )
+      require(
+        imm >= 0 && imm < (1 << 8),
+        s"LOAD_LOOP imm must fit in 8 bits unsigned, got $imm"
+      )
+      (Opcode.loadLoop.position << OPCODE_LO) |
+        (reg << 11) |
+        (imm & 0xff)
+
+    case DecBranch(reg, pcRelOffset) =>
+      require(
+        reg >= 0 && reg < 2,
+        s"DEC_BRANCH reg must be 0 or 1, got $reg"
+      )
+      require(
+        pcRelOffset >= -128 && pcRelOffset <= 127,
+        s"DEC_BRANCH pc_rel_offset must be signed 8-bit (-128..127), got $pcRelOffset"
+      )
+      (Opcode.decBranch.position << OPCODE_LO) |
+        (reg << 11) |
+        (pcRelOffset & 0xff)
+
     case ReservedV05(opcode, payload) =>
       // Constructor already enforces non-v0 opcode + 12-bit payload range.
       (opcode.position << OPCODE_LO) | payload
@@ -641,8 +714,20 @@ object Instruction {
           capture = bitSet(word, CAPTURE_BIT)
         )
 
+      case Opcode.loadLoop =>
+        LoadLoop(
+          reg = (word >> 11) & 0x1,
+          imm = word & 0xff
+        )
+
+      case Opcode.decBranch =>
+        DecBranch(
+          reg = (word >> 11) & 0x1,
+          pcRelOffset = signExtend8(word & 0xff)
+        )
+
       case reserved =>
-        // Codes 0xC..0xF: the four v0.5 reserved slots. Round-trip the
+        // Codes 0xE..0xF: the two v0.5 reserved slots. Round-trip the
         // payload verbatim; the engine traps these at fetch (Step 8 / 11).
         ReservedV05(opcode = reserved, payload = word & 0xfff)
     }

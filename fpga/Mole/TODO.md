@@ -16,13 +16,13 @@ bring-up plan (TBD).
 Each completed step gets a "What landed" entry so the design
 rationale survives independently of the source.
 
-The 12-opcode ISA (`EMIT_BIT`, `EMIT_QUARTER`, `STRETCH_SCL`,
+The 14-opcode ISA (`EMIT_BIT`, `EMIT_QUARTER`, `STRETCH_SCL`,
 `WAIT_ON`, `SET_BUS_MODE`, `SAMPLE_BIT_ON_SCL`,
 `DRIVE_BIT_ON_SCL`, `JMP`, `BRANCH_ON`, `HALT`, `MARK`,
-`LOAD_TIMING`; four reserved opcode slots) and its
-16-bit fixed-width encoding are the externally visible contract.
-See `../../ROADMAP.md` §"Layer 0" and `AGENTS.md` §"ISA is a
-stable contract" before changing either.
+`LOAD_TIMING`, `LOAD_LOOP`, `DEC_BRANCH`; two reserved opcode
+slots) and its 16-bit fixed-width encoding are the externally
+visible contract. See `../../ROADMAP.md` §"Layer 0" and
+`AGENTS.md` §"ISA is a stable contract" before changing either.
 
 ---
 
@@ -37,7 +37,7 @@ stable contract" before changing either.
 - [x] **Step 4 --- UART sims.** Imported 8 sub-block sims; added top-level `UartSim` loopback.
 - [x] **Step 5 --- `SpramController`.** One-tile SPRAM wrapper with read-priority arbitration; `SB_SPRAM256KA` BlackBox + `Mem` sim path.
 - [x] **Step 6 --- `SpramControllerSim`.** 7 black-box cases against the `Mem` substitute: write/read coverage, read-priority arbitration (both writers), wrap-around, latency, same-address r/w.
-- [x] **Step 7 --- `Instruction` ISA scaffolding.** 12-opcode + 4-reserved-slot encoder/decoder with 16-bit fixed-width wire format; full round-trip + flag-triple invariant + range-reject sim under `sim-isa`.
+- [x] **Step 7 --- `Instruction` ISA scaffolding.** 12-opcode + 4-reserved-slot encoder/decoder with 16-bit fixed-width wire format; full round-trip + flag-triple invariant + range-reject sim under `sim-isa`. *(Step 20 later bumped the opcode count to 14 and the reserved-slot count to 2; the round-trip suite was extended accordingly.)*
 - [x] **Step 8 --- `BitCycleEngineCore` (minimal).** `EMIT_BIT` / `SET_BUS_MODE` / `HALT` decoded; quarter-bit pacing via shared `QuarterBitTimer`; `SymbolDecoder` + `SclWaveformGen` + `BusModeOps.isPpClass` as the engine's only protocol context; `Revision` word emitted as two 16-bit halves on `HALT`. Sim lands in Step 9.
 - [x] **Step 9 --- `BitCycleEngineSmokeSim`.** Per-cycle bus-driver trace under `i3c-OD` vs `i3c-PP`, asserting "released" vs "actively driven high" on the SCL high half + the SDA decode for `dominant` / `recessive` / `hiz`. Distinguishes pulled-high (pull-up) from driven-high (PP) by reading the engine's `driveHigh` directly. `sim-engine-smoke` uncommented; aggregate `sim` target picks it up.
 - [x] **Step 10 --- Async waits + stretch.** `EMIT_QUARTER` / `STRETCH_SCL` / `WAIT_ON cond, timeout` added to `BitCycleEngineCore`. Sticky flag set wired up (`MISMATCH_FLAG`, `TIMEOUT_FLAG`, `START_FLAG`, `STOP_FLAG` per AGENTS §3.15). Bus observer (2-FF sync on SDA/SCL + edge detectors). Reserved cond codes trap to halt.
@@ -47,6 +47,7 @@ stable contract" before changing either.
 - [x] **Step 14 --- `MoleTopSim`.** End-to-end Verilator sim under one `MoleTopSimDut` compile (sim-side `UartTx` / `UartRx` so the host pushes / pops bytes via Spinal Streams instead of bit-banging the wire). 4 cases: short-halt round-trip (HALT word + Revision asserts), bus-toggle (SDA driveLow + release observed during execution), bad-CRC recovery (loaderLoaded never pulses, engineDone never goes low, fault LED lights; then a good frame loads cleanly after the resync gap), back-to-back frames (phase FSM cycles cleanly twice). Small test config (`programWordCount=16`, `resultRingByteCount=32`) keeps each case under ~50 K cycles.
 - [x] **Step 15 --- `MoleTopVerilog`.** Canonical Verilog generation entrypoint. `useBlackBox = true` so yosys infers SB_PLL40_PAD + SB_IO as hard cells; `defaultClockDomainFrequency = 24 MHz` so derived dividers infer the right size. Output at `gen/MoleTop.v`; gitignored via `.gitignore`'s per-project rule.
 - [x] **Step 16 --- Flashable bitstream + synth chain.** `make gen` / `make all` / `make flash` enabled end-to-end. `nextpnr --freq 12` bumped to `--freq 24` (the actual fabric clock after the PLL; originally `--freq 48`, retargeted to 24 MHz after the first real synth on UP5K SG48I came in at Fmax ~28 MHz --- see `MoleConfig.scala` and ROADMAP §"Clocks" for the rationale); timing now reports against the real budget. Bring-up procedure (build, flash, talk, three smoke programs) documented in `BRINGUP.md`.
+- [x] **Step 20 --- `LOAD_LOOP` + `DEC_BRANCH` (ISA ergonomics).** Two new v0 opcodes claim reserved slots 0xC / 0xD, displacing `WAIT_ADDRESSED` (lowest-priority of the v0.5 reservations) and `MISMATCH_CLEAR` (subsumed by the still-reserved `FLAG_CLEAR` at 0xE). Two 8-bit loop-counter registers (`LCR0`, `LCR1`) enable bounded loops with one level of nesting, no scratch-slot spill. Wire encoding `[15:12]op [11]reg [10:8]reserved=0 [7:0]imm-or-offset`; the 3-bit pad reserves room for a 16-LCR widening with no wire-format break. Out of declared phase order (lands ahead of Steps 17--19 which are hardware-bring-up gated). See Phase 5 below for the closeout block.
 
 ---
 
@@ -433,8 +434,8 @@ and result-ring wrap-around.
   0x3 STRETCH_SCL      0x4 WAIT_ON            0x5 BRANCH_ON
   0x6 JMP              0x7 SET_BUS_MODE       0x8 LOAD_TIMING
   0x9 MARK             0xA SAMPLE_BIT_ON_SCL  0xB DRIVE_BIT_ON_SCL
-  0xC WAIT_ADDRESSED   0xD MISMATCH_CLEAR     0xE FLAG_CLEAR     0xF CAPTURE_RUN
-                       (the four 0xC..0xF slots are reserved for v0.5;
+  0xC LOAD_LOOP        0xD DEC_BRANCH         0xE FLAG_CLEAR     0xF CAPTURE_RUN
+                       (the two 0xE..0xF slots are reserved for v0.5;
                        round-trip via `ReservedV05` carrier; engine traps
                        at fetch when Step 8 / 11 land.)
   ```
@@ -1143,12 +1144,10 @@ silicon.
 - Pacing: combined with `STRETCH_SCL`, a target can pace the
   controller by pulling SCL low *before* releasing SDA
   (controller sees SCL stretched and waits).
-- v0.5 may add `WAIT_ADDRESSED my_addr, timeout` as a
-  hardware accelerator if the SDK expansion (`WAIT_ON
-  START_SEEN, t` + 8 × `SAMPLE_BIT_ON_SCL` + host-compiled
-  compare + conditional `DRIVE_BIT_ON_SCL`) proves too slow
-  for I3C SDR target emulation at full rate. Out of scope for
-  v0.
+- v0.5 may add `WAIT_ADDRESSED my_addr, timeout` as a hardware
+  accelerator (in one of the two remaining reserved opcode slots
+  0xE / 0xF) if the SDK expansion proves too slow for I3C SDR
+  target emulation at full rate. Out of scope for v0.
 
 **Sim notes:** drive the sim bus from a second engine instance
 configured as controller (or a hand-rolled SCL+SDA waveform
@@ -1173,6 +1172,125 @@ in target role. After this step the v0 engine is fully ISA-
 complete in both roles.
 
 **Makefile:** uncomment `sim-target`.
+
+---
+
+## ✅ Phase 5 --- ISA ergonomics (bounded loops)
+
+### ✅ Step 20 --- `LOAD_LOOP` + `DEC_BRANCH`
+
+**Goal:** give moleasm authors a real bounded-loop construct
+backed by hardware loop counters, instead of unrolling repeats
+in source. Two new v0 opcodes plus two 8-bit architectural
+registers, claimed from the four reserved v0.5 slots.
+
+Lands out of declared phase order (ahead of Steps 17--19, which
+are hardware-bring-up gated and therefore slower to close).
+
+**Files:**
+
+- `src/hw/Instruction.scala` --- Opcode enum renames
+  (`waitAddressed` -> `loadLoop`, `mismatchClear` -> `decBranch`);
+  `isV0` boundary 12 -> 14; new `LoadLoop(reg, imm)` and
+  `DecBranch(reg, pcRelOffset)` case classes with encode/decode
+  arms.
+- `src/sim/InstructionSim.scala` --- 1024 new round-trip checks
+  (512 each), reg-field + reserved-pad invariants, range
+  rejects, and updated `ReservedV05` golden (now `flagClear` at
+  `0xE000` instead of `waitAddressed` at `0xC000`).
+- `../../mole-asm/src/{symbols,assembler,encoder}.rs` --- new
+  `LOOP_REG_ALIASES`, `MNEMONICS` bump to 14, `enc_load_loop` /
+  `enc_dec_branch` helpers, parser arms with two new resolvers
+  (`resolve_loop_reg`, `resolve_dec_branch_target`).
+- `../../mole-asm/tests/fixtures/mole-asm.py` --- golden python
+  assembler mirrors the same surface, including a new
+  `_resolve_dec_branch_target` and `_resolve_loop_reg`.
+- `../../mole-asm/tests/fixtures/loop-counter-demo.{moleasm,
+  molecode,mole.bin}` --- 15-word worked example: part 1 sends
+  8 dominant bits via `lcr0`, part 2 prints a 3x4 grid of MARK
+  records using both LCRs nested.
+- `../../mole-asm/book/src/{opcodes,patterns,reference,
+  bounded-loops,SUMMARY,errors,glossary,syntax}.md` --- new
+  "Bounded loops" chapter; LOAD_LOOP / DEC_BRANCH sections in
+  Opcodes; the bounded-retry pattern rewritten to use the new
+  counter (the prior version apologised for the engine having
+  no counter); reference table + glossary entries for the LCR
+  pair; reserved-mnemonic mentions updated everywhere
+  (`WAIT_ADDRESSED` / `MISMATCH_CLEAR` graduated, only
+  `FLAG_CLEAR` / `CAPTURE_RUN` remain).
+- `../../README.md`, `../../AGENTS.md`, `README.md`, `AGENTS.md`,
+  `Makefile` --- opcode count bump (12 -> 14), reserved-slot
+  count bump (4 -> 2), short prose calling out the loop
+  counter pair.
+
+**Wire format (locked):**
+
+```text
+LOAD_LOOP   [15:12]op=0xC [11]reg [10:8]reserved=0 [7:0]imm8
+DEC_BRANCH  [15:12]op=0xD [11]reg [10:8]reserved=0 [7:0]offset_signed
+```
+
+`reg = 0` selects `LCR0`, `reg = 1` selects `LCR1`. The 3-bit
+`[10:8]` pad is reserved (= 0) so a future 16-LCR expansion can
+claim those bits with no wire-format break. `DEC_BRANCH`
+back-edges if and only if the post-decrement value of `LCR[reg]`
+is non-zero; the decrement wraps 8-bit (0 -> 0xFF, hence
+`LOAD_LOOP r, 0` runs a full 256 iterations --- legal but
+linted by the assembler).
+
+`DEC_BRANCH` does **not** touch the sticky engine flags
+(`MISMATCH_FLAG`, `TIMEOUT_FLAG`, `START_FLAG`, `STOP_FLAG`)
+per AGENTS §3.15, so the standard `BRANCH_ON MISMATCH ...`
+fail-fast idiom composes cleanly inside a loop body.
+
+**Sim:** `sim-isa` covers the encode/decode round-trip (1024
+new checks plus updated `ReservedV05` golden).
+`sim-engine-full` (`BitCycleEngineSim`) adds four explicit
+loop-counter cases:
+
+- `loop-single-count-down` --- `LOAD_LOOP lcr0, 4` plus
+  `DEC_BRANCH lcr0, -2` around a `MARK` body produces exactly
+  four MARK records.
+- `loop-nested` --- outer `lcr1=3`, inner `lcr0=2`, MARK in
+  the inner body produces `3 * 2 = 6` records (catches
+  reg-id miswire and inner-counter-fails-to-re-prime bugs).
+- `loop-boundary` --- two consecutive segments verify
+  `DEC_BRANCH` with `LCR=1` falls through (no back-edge) and
+  `LCR=2` back-edges exactly once.
+- `loop-flag-neutral` --- a deliberate `MISMATCH_FLAG` set by
+  an `EMIT_BIT` survives an intervening 3-iter
+  `DEC_BRANCH` loop, then a `BRANCH_ON MISMATCH` correctly
+  takes the branch. Catches any future regression that
+  accidentally writes a sticky flag from the `DEC_BRANCH`
+  arm.
+
+The pre-existing `reserved-opcode-trap` test was updated to
+target slot `0xE` (still reserved) instead of the now-claimed
+`0xC` so it still exercises the trap arm in the decode
+switch's `default` clause.
+
+**Divergence from the original plan (PR plan.md):** none. The
+two-LCR / DEC-only scope was confirmed at planning time; this
+step lands exactly that.
+
+**Why these two reserved slots:**
+
+- `WAIT_ADDRESSED` (formerly 0xC) was the lowest-priority slot
+  reservation --- its SDK-level expansion (Start + 8x
+  `SAMPLE_BIT_ON_SCL` + host compare + conditional
+  `DRIVE_BIT_ON_SCL`) has not yet shown the I3C-rate timing
+  pressure that would justify a dedicated hardware accelerator.
+- `MISMATCH_CLEAR` (formerly 0xD) was earmarked as a narrow
+  special case of the broader `FLAG_CLEAR`, which keeps its
+  slot at 0xE. If a v0.5 use case ever wants fine-grained
+  mismatch clearing, `FLAG_CLEAR` with the mismatch-only mask
+  covers it.
+
+Two reserved slots remain (`FLAG_CLEAR` at 0xE, `CAPTURE_RUN`
+at 0xF) --- enough headroom for the canonical v0.5 additions.
+
+**Makefile:** no new target --- the engine FSM ships under the
+existing `sim-engine-full` aggregate.
 
 ---
 

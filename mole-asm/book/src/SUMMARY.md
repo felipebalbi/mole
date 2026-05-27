@@ -8,6 +8,7 @@
 - [Mental Model](./mental-model.md)
 - [Syntax](./syntax.md)
 - [Opcodes](./opcodes.md)
+- [Bounded Loops](./bounded-loops.md)
 - [Worked Examples](./worked-examples.md)
 - [Patterns](./patterns.md)
 

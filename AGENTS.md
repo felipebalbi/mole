@@ -30,7 +30,7 @@ model, and the compile-time error-injection contract.
 ### One-paragraph architecture
 
 A small **bit-cycle engine** in the FPGA ("Layer 0") executes a
-**12-opcode ISA** (16-bit fixed-width instructions, 4 reserved
+**14-opcode ISA** (16-bit fixed-width instructions, 2 reserved
 opcode slots) over quarter-bit-resolution SDA/SCL patterns. The
 engine is **literally bus-agnostic**: per-bit / per-quarter drive
 fields are 2-bit `tx_symbol = {dominant, recessive, hiz,
@@ -42,9 +42,11 @@ bytecode. Spec-compliant primitives live in `i2c/`, `i3c/`,
 in `raw/` and require explicit opt-in. The engine plays
 controller *or* target via a config bit; target-role bytes use
 `SAMPLE_BIT_ON_SCL` / `DRIVE_BIT_ON_SCL` to slave to the
-external controller's SCL. Error injection is decided at compile
-time (PRNG in the host) so `ratio = 0` is *exactly* zero, not
-"approximately zero".
+external controller's SCL. Bounded loops use a two-register loop
+counter (`LCR0`/`LCR1`) primed by `LOAD_LOOP` and counted down by
+`DEC_BRANCH`. Error injection is decided at compile time (PRNG
+in the host) so `ratio = 0` is *exactly* zero, not "approximately
+zero".
 
 ---
 

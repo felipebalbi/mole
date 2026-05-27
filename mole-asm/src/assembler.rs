@@ -12,7 +12,8 @@ use std::collections::HashMap;
 use crate::encoder::{self};
 use crate::error::{AsmError, Result, SourceLocation};
 use crate::symbols::{
-    self, BUS_MODES, COND_CODES, MNEMONICS, RESERVED_V05_MNEMONICS, TIMING_REG_ALIASES, TX_SYMBOLS,
+    self, BUS_MODES, COND_CODES, LOOP_REG_ALIASES, MNEMONICS, RESERVED_V05_MNEMONICS,
+    TIMING_REG_ALIASES, TX_SYMBOLS,
 };
 
 // ---------------------------------------------------------------------------
@@ -547,6 +548,63 @@ fn resolve_jmp_target(tok: &str, syms: &SymbolTable, loc: &SourceLocation) -> Re
     parse_int(tok, loc)
 }
 
+fn resolve_loop_reg(tok: &str, loc: &SourceLocation) -> Result<i64> {
+    // Source uses `lcr0` / `lcr1`; the encoder takes the wire value.
+    if let Some(v) = symbols::lookup(LOOP_REG_ALIASES, tok) {
+        return Ok(v as i64);
+    }
+    // Numeric `0` / `1` also accepted so disassembler output round-trips.
+    parse_int(tok, loc).and_then(|n| {
+        if (0..2).contains(&n) {
+            Ok(n)
+        } else {
+            Err(AsmError::operand(
+                loc,
+                format!(
+                    "loop reg '{tok}' must be lcr0|lcr1 or a literal 0|1 \
+                     (allowed names: {:?})",
+                    symbols::sorted_names(LOOP_REG_ALIASES)
+                ),
+            ))
+        }
+    })
+}
+
+fn resolve_dec_branch_target(
+    tok: &str,
+    branch_pc: u16,
+    syms: &SymbolTable,
+    loc: &SourceLocation,
+) -> Result<i64> {
+    // Same shape and PC-relative arithmetic as `resolve_branch_target`,
+    // distinct only in the error message label so users debugging a
+    // out-of-range loop see "DEC_BRANCH" not "BRANCH_ON".
+    let offset = if looks_like_identifier(tok) {
+        let sym = syms.get(tok).ok_or_else(|| {
+            AsmError::symbol(loc, format!("undefined DEC_BRANCH target: '{tok}'"))
+        })?;
+        if sym.kind != SymbolKind::Label {
+            return Err(AsmError::symbol(
+                loc,
+                format!("DEC_BRANCH target '{tok}' is an .equ constant, not a label"),
+            ));
+        }
+        sym.value - (branch_pc as i64) - 1
+    } else {
+        parse_int(tok, loc)?
+    };
+    if !(-128..=127).contains(&offset) {
+        return Err(AsmError::range(
+            loc,
+            format!(
+                "DEC_BRANCH offset {offset} out of signed 8-bit range \
+                 (branch_pc={branch_pc})"
+            ),
+        ));
+    }
+    Ok(offset)
+}
+
 // ---------------------------------------------------------------------------
 // Pass 2: encode each (pc, statement) into a 16-bit word
 // ---------------------------------------------------------------------------
@@ -698,6 +756,28 @@ fn encode_mnemonic(m: &str, stmt: &Statement, pc: u16, syms: &SymbolTable) -> Re
             let addr = resolve_jmp_target(&stmt.operands[0], syms, loc)?;
             encoder::enc_jmp(addr).map_err(rangify)
         }
+        "LOAD_LOOP" => {
+            if stmt.operands.len() != 2 {
+                return Err(AsmError::operand(
+                    loc,
+                    "LOAD_LOOP takes two positional operands: reg, imm8",
+                ));
+            }
+            let reg = resolve_loop_reg(&stmt.operands[0], loc)?;
+            let imm = resolve_literal_or_equate(&stmt.operands[1], syms, loc)?;
+            encoder::enc_load_loop(reg, imm).map_err(rangify)
+        }
+        "DEC_BRANCH" => {
+            if stmt.operands.len() != 2 {
+                return Err(AsmError::operand(
+                    loc,
+                    "DEC_BRANCH takes two positional operands: reg, target",
+                ));
+            }
+            let reg = resolve_loop_reg(&stmt.operands[0], loc)?;
+            let offset = resolve_dec_branch_target(&stmt.operands[1], pc, syms, loc)?;
+            encoder::enc_dec_branch(reg, offset).map_err(rangify)
+        }
         other => Err(AsmError::lex(
             loc,
             format!("unhandled mnemonic in encoder: '{other}'"),
@@ -757,12 +837,7 @@ mod tests {
 
     #[test]
     fn reserved_v05_mnemonic_rejected() {
-        for m in [
-            "WAIT_ADDRESSED",
-            "MISMATCH_CLEAR",
-            "FLAG_CLEAR",
-            "CAPTURE_RUN",
-        ] {
+        for m in ["FLAG_CLEAR", "CAPTURE_RUN"] {
             let err = assemble(&format!("{m}\n"), "<t>").unwrap_err();
             assert_eq!(err_kind(&err), Some(Kind::Lex), "mnemonic {m}");
         }

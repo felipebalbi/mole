@@ -58,7 +58,7 @@ pub(crate) const TIMING_REG_ALIASES: &[(&str, u8)] = &[
     ("hdr_ddr_freq", 3),
 ];
 
-/// Recognised mnemonics (UPPER CASE). The 12 v0 opcodes; everything
+/// Recognised mnemonics (UPPER CASE). The 14 v0 opcodes; everything
 /// else either belongs in [`RESERVED_V05_MNEMONICS`] or is rejected
 /// outright.
 pub(crate) const MNEMONICS: &[&str] = &[
@@ -74,17 +74,23 @@ pub(crate) const MNEMONICS: &[&str] = &[
     "MARK",
     "SAMPLE_BIT_ON_SCL",
     "DRIVE_BIT_ON_SCL",
+    "LOAD_LOOP",
+    "DEC_BRANCH",
 ];
 
 /// Reserved-v0.5 mnemonics; the assembler rejects them and points the
 /// user at `.dw` for raw-word injection. Names mirror Opcode case
-/// names in `Instruction.scala`.
-pub(crate) const RESERVED_V05_MNEMONICS: &[&str] = &[
-    "WAIT_ADDRESSED",
-    "MISMATCH_CLEAR",
-    "FLAG_CLEAR",
-    "CAPTURE_RUN",
-];
+/// names in `Instruction.scala`. Slots 0xC and 0xD (formerly
+/// `WAIT_ADDRESSED` and `MISMATCH_CLEAR`) graduated to v0 as
+/// `LOAD_LOOP` and `DEC_BRANCH`; only the two remaining reservations
+/// are listed here.
+pub(crate) const RESERVED_V05_MNEMONICS: &[&str] = &["FLAG_CLEAR", "CAPTURE_RUN"];
+
+/// Loop-counter register aliases for [`Instruction::LoadLoop`] /
+/// [`Instruction::DecBranch`]. One bit on the wire: `lcr0` -> 0,
+/// `lcr1` -> 1. The `[10:8]` pad above the reg bit stays reserved so
+/// a future 16-LCR widening reuses those bits with no wire break.
+pub(crate) const LOOP_REG_ALIASES: &[(&str, u8)] = &[("lcr0", 0), ("lcr1", 1)];
 
 /// Lookup helpers. Linear scans are fine: every table has at most a
 /// dozen entries and gets hit a handful of times per source line.
@@ -98,8 +104,9 @@ pub(crate) fn contains(table: &[&str], name: &str) -> bool {
 }
 
 /// True iff `name` is reserved (a mnemonic, a v0.5 reserved mnemonic,
-/// or any named tx / bus-mode / cond / timing-reg symbol). Used by the
-/// symbol table to refuse user-defined names that would shadow built-ins.
+/// or any named tx / bus-mode / cond / timing-reg / loop-reg symbol).
+/// Used by the symbol table to refuse user-defined names that would
+/// shadow built-ins.
 pub(crate) fn is_reserved_name(name: &str) -> bool {
     contains(MNEMONICS, name)
         || contains(RESERVED_V05_MNEMONICS, name)
@@ -107,6 +114,7 @@ pub(crate) fn is_reserved_name(name: &str) -> bool {
         || BUS_MODES.iter().any(|(n, _)| *n == name)
         || COND_CODES.iter().any(|(n, _)| *n == name)
         || TIMING_REG_ALIASES.iter().any(|(n, _)| *n == name)
+        || LOOP_REG_ALIASES.iter().any(|(n, _)| *n == name)
 }
 
 /// Sorted list of accepted names from a `(name, value)` table, used in

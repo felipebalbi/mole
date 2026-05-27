@@ -21,7 +21,9 @@ them.
 | `MARK`              | `0x9`     | `label=0..255`                             | Push an 8-bit marker into the result ring.                |
 | `SAMPLE_BIT_ON_SCL` | `0xA`     | `[expect/mask/capture]`                    | Target-role: sample SDA, slaved to controller SCL.        |
 | `DRIVE_BIT_ON_SCL`  | `0xB`     | `tx=... [expect/mask/capture]`             | Target-role: drive SDA while slaved to controller SCL.    |
-| (reserved v0.5)     | `0xC..0xF`| --- (rejected, reach via `.dw`)             | Reserved: `FLAG_CLEAR`, `WAIT_ADDRESSED`, ...             |
+| `LOAD_LOOP`         | `0xC`     | `<lcr0|lcr1>, imm (0..255)`                | Prime loop counter LCR[reg] with 8-bit immediate.         |
+| `DEC_BRANCH`        | `0xD`     | `<lcr0|lcr1>, target (label or signed-8)`  | Decrement LCR[reg]; PC-relative branch if non-zero.       |
+| (reserved v0.5)     | `0xE..0xF`| --- (rejected, reach via `.dw`)            | Reserved: `FLAG_CLEAR`, `CAPTURE_RUN`.                    |
 
 ## Instruction word layout
 
@@ -29,7 +31,7 @@ All opcodes share these field positions:
 
 | Field        | Bits   | Notes                                                            |
 |--------------|--------|------------------------------------------------------------------|
-| `opcode`     | 15:12  | 4-bit opcode (12 used + 4 reserved-v0.5).                        |
+| `opcode`     | 15:12  | 4-bit opcode (14 used + 2 reserved-v0.5).                        |
 | `expect`     | 2      | Present on `EMIT_BIT`, `EMIT_QUARTER`, `SAMPLE_BIT_ON_SCL`, `DRIVE_BIT_ON_SCL`. |
 | `mask`       | 1      | Same opcodes as `expect`.                                        |
 | `capture`    | 0      | Same opcodes as `expect`.                                        |
@@ -86,6 +88,17 @@ register.
 
 A bare numeric literal (`0..3`) is also accepted in place of the
 alias.
+
+## Loop registers
+
+| Alias  | Reg | Width  | Used by                 |
+|--------|-----|--------|-------------------------|
+| `lcr0` | 0   | 8 bits | `LOAD_LOOP`, `DEC_BRANCH` |
+| `lcr1` | 1   | 8 bits | `LOAD_LOOP`, `DEC_BRANCH` |
+
+Two independent 8-bit counters. A bare numeric literal (`0` or
+`1`) is also accepted. See the [Bounded loops](./bounded-loops.md)
+chapter for the canonical idioms.
 
 ## Sticky flags (engine state, set by opcodes, observed by `BRANCH_ON`)
 

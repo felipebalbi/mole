@@ -100,6 +100,11 @@ lives here: spec-correct I2C / I3C / CCC / HDR-DDR primitives plus
 fault-injection knobs. moleasm is the lowest level of Layer 1 a
 human writes directly; above it sits the Scheme SDK.
 
+**LCR.** *Loop counter register.* One of two 8-bit hardware
+counters (`lcr0`, `lcr1`) primed by `LOAD_LOOP` and decremented by
+`DEC_BRANCH`. Independent registers enable one level of nested
+loops without spilling to a scratch slot.
+
 **Mark.** An 8-bit marker pushed into the result ring (`MARK
 label=...`). Lets the host decoder discriminate between captures
 from different parts of the program.
@@ -130,8 +135,8 @@ to ship over UART.
 line floats high through an external pull-up. The model for I2C and
 I3C-OD electrical behaviour.
 
-**Opcode.** The 4-bit field at `[15:12]` of every instruction. 12
-in use, 4 reserved for v0.5.
+**Opcode.** The 4-bit field at `[15:12]` of every instruction. 14
+v0 opcodes plus two reserved-v0.5 slots.
 
 **Pass 1 / Pass 2.** The two phases of the assembler. Pass 1 lexes,
 builds the symbol table, and assigns PC values. Pass 2 encodes each

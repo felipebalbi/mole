@@ -153,10 +153,11 @@ object InstructionSim extends App {
   val allCondCodes: Seq[CondCode.E] =
     (0 until 16).map(i => CondCode.elements(i))
 
-  /** The four reserved-v0.5 opcode slots. */
+  /** The two reserved-v0.5 opcode slots. (Slots 0xC and 0xD now host
+    * `LOAD_LOOP` and `DEC_BRANCH`; see [[Instruction.LoadLoop]] /
+    * [[Instruction.DecBranch]].)
+    */
   val reservedOpcodes: Seq[Opcode.E] = Seq(
-    Opcode.waitAddressed,
-    Opcode.mismatchClear,
     Opcode.flagClear,
     Opcode.captureRun
   )
@@ -575,6 +576,101 @@ object InstructionSim extends App {
   )
 
   // --------------------------------------------------------------
+  // LOAD_LOOP (slot 0xC)
+  // --------------------------------------------------------------
+
+  println("--- InstructionSim: LOAD_LOOP round-trip ---")
+
+  for {
+    reg <- 0 until 2
+    imm <- 0 until 256
+  } {
+    val insn = LoadLoop(reg, imm)
+    val word = roundTrip(insn)
+    assertOpcode(word, Opcode.loadLoop, "LOAD_LOOP")
+    assert(
+      field(word, 11, 11) == reg,
+      f"LOAD_LOOP reg field mismatch (reg=$reg, word=0x$word%04X)"
+    )
+    assertReservedZero(word, 10, 8, "LOAD_LOOP")
+    assert(
+      field(word, 7, 0) == imm,
+      f"LOAD_LOOP imm field mismatch (imm=$imm, word=0x$word%04X)"
+    )
+  }
+  // Golden: LOAD_LOOP(0, 0) = 0xC000.
+  assert(encode(LoadLoop(0, 0)) == 0xc000, "LOAD_LOOP(0,0) golden mismatch")
+  // Golden: LOAD_LOOP(1, 0xff) = 0xC8FF (reg bit at [11], imm at [7:0]).
+  assert(
+    encode(LoadLoop(1, 0xff)) == 0xc8ff,
+    "LOAD_LOOP(1,0xff) golden mismatch"
+  )
+  // Range rejects.
+  try {
+    encode(LoadLoop(2, 0))
+    sys.error("LOAD_LOOP(2, 0) should have thrown (reg > 1)")
+  } catch { case _: IllegalArgumentException => () }
+  try {
+    encode(LoadLoop(-1, 0))
+    sys.error("LOAD_LOOP(-1, 0) should have thrown")
+  } catch { case _: IllegalArgumentException => () }
+  try {
+    encode(LoadLoop(0, 256))
+    sys.error("LOAD_LOOP(0, 256) should have thrown (imm > 0xff)")
+  } catch { case _: IllegalArgumentException => () }
+  println("  LOAD_LOOP: 512 round-trips + range-reject OK")
+
+  // --------------------------------------------------------------
+  // DEC_BRANCH (slot 0xD)
+  // --------------------------------------------------------------
+
+  println("--- InstructionSim: DEC_BRANCH round-trip ---")
+
+  for {
+    reg <- 0 until 2
+    off <- -128 to 127
+  } {
+    val insn = DecBranch(reg, off)
+    val word = roundTrip(insn)
+    assertOpcode(word, Opcode.decBranch, "DEC_BRANCH")
+    assert(
+      field(word, 11, 11) == reg,
+      f"DEC_BRANCH reg field mismatch (reg=$reg, word=0x$word%04X)"
+    )
+    assertReservedZero(word, 10, 8, "DEC_BRANCH")
+    assert(
+      field(word, 7, 0) == (off & 0xff),
+      f"DEC_BRANCH offset field mismatch (off=$off, word=0x$word%04X)"
+    )
+  }
+  // Golden: DEC_BRANCH(0, 0) = 0xD000.
+  assert(encode(DecBranch(0, 0)) == 0xd000, "DEC_BRANCH(0,0) golden mismatch")
+  // Golden: DEC_BRANCH(0, -1) = 0xD0FF (two's-complement low byte).
+  assert(
+    encode(DecBranch(0, -1)) == 0xd0ff,
+    "DEC_BRANCH(0,-1) two's-complement encoding mismatch"
+  )
+  // Golden: DEC_BRANCH(1, 127) = 0xD87F (reg bit at [11]).
+  assert(
+    encode(DecBranch(1, 127)) == 0xd87f,
+    "DEC_BRANCH(1,127) golden mismatch"
+  )
+  // Range rejects.
+  try {
+    encode(DecBranch(2, 0))
+    sys.error("DEC_BRANCH(2, 0) should have thrown (reg > 1)")
+  } catch { case _: IllegalArgumentException => () }
+  try {
+    encode(DecBranch(0, 128))
+    sys.error("DEC_BRANCH(0, 128) should have thrown")
+  } catch { case _: IllegalArgumentException => () }
+  try {
+    encode(DecBranch(0, -129))
+    sys.error("DEC_BRANCH(0, -129) should have thrown")
+  } catch { case _: IllegalArgumentException => () }
+  println("  DEC_BRANCH: 512 round-trips + range-reject OK")
+
+  // --------------------------------------------------------------
   // HALT
   // --------------------------------------------------------------
 
@@ -601,7 +697,7 @@ object InstructionSim extends App {
   println("  HALT: 16 round-trips + overflow-reject OK")
 
   // --------------------------------------------------------------
-  // RESERVED v0.5 opcodes (0xC..0xF)
+  // RESERVED v0.5 opcodes (0xE..0xF)
   // --------------------------------------------------------------
 
   println("--- InstructionSim: ReservedV05 round-trip ---")
@@ -619,10 +715,11 @@ object InstructionSim extends App {
       f"ReservedV05 payload field mismatch (payload=$p, word=0x$word%04X)"
     )
   }
-  // Golden: ReservedV05(waitAddressed, 0) = 0xC000.
+  // Golden: ReservedV05(flagClear, 0) = 0xE000 (lowest reserved slot
+  // after LOAD_LOOP / DEC_BRANCH claimed 0xC and 0xD in v1).
   assert(
-    encode(ReservedV05(Opcode.waitAddressed, 0)) == 0xc000,
-    "ReservedV05(waitAddressed, 0) golden mismatch"
+    encode(ReservedV05(Opcode.flagClear, 0)) == 0xe000,
+    "ReservedV05(flagClear, 0) golden mismatch"
   )
   // Golden: ReservedV05(captureRun, 0xfff) = 0xFFFF.
   assert(
@@ -634,9 +731,19 @@ object InstructionSim extends App {
     ReservedV05(Opcode.emitBit, 0)
     sys.error("ReservedV05(emitBit, ...) should have thrown")
   } catch { case _: IllegalArgumentException => () }
+  // ReservedV05 constructor must reject v0 opcodes in the newly-claimed
+  // 0xC / 0xD slots too.
+  try {
+    ReservedV05(Opcode.loadLoop, 0)
+    sys.error("ReservedV05(loadLoop, ...) should have thrown")
+  } catch { case _: IllegalArgumentException => () }
+  try {
+    ReservedV05(Opcode.decBranch, 0)
+    sys.error("ReservedV05(decBranch, ...) should have thrown")
+  } catch { case _: IllegalArgumentException => () }
   // ReservedV05 constructor must reject payload overflow.
   try {
-    ReservedV05(Opcode.waitAddressed, 0x1000)
+    ReservedV05(Opcode.flagClear, 0x1000)
     sys.error("ReservedV05 with 0x1000 payload should have thrown")
   } catch { case _: IllegalArgumentException => () }
   println(
@@ -645,7 +752,7 @@ object InstructionSim extends App {
 
   // --------------------------------------------------------------
   // Decoder must produce a ReservedV05 for any word whose opcode
-  // field is 0xC..0xF, regardless of where the payload bits sit.
+  // field is 0xE..0xF, regardless of where the payload bits sit.
   // --------------------------------------------------------------
 
   println("--- InstructionSim: decoder reserved-opcode dispatch ---")

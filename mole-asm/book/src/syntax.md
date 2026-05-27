@@ -53,14 +53,14 @@ not contain dashes; `.equ` names may.
 Two name spaces are *reserved* and your own identifiers may not
 collide with them:
 
-- The 12 v0 mnemonics (`HALT`, `EMIT_BIT`, ...) and the four v0.5
-  reserved mnemonics (`WAIT_ADDRESSED`, `MISMATCH_CLEAR`,
-  `FLAG_CLEAR`, `CAPTURE_RUN`).
+- The 14 v0 mnemonics (`HALT`, `EMIT_BIT`, ...) and the two v0.5
+  reserved mnemonics (`FLAG_CLEAR`, `CAPTURE_RUN`).
 - The named-symbol tables: `dominant`, `recessive`, `hiz`, `dom`,
   `rec` (tx symbols); `i2c`, `i3c-od`, `i3c-pp`, `hdr-ddr` (bus
-  modes); the condition codes (`ALWAYS`, `MISMATCH`, ...); and the
+  modes); the condition codes (`ALWAYS`, `MISMATCH`, ...); the
   timing-register aliases (`i2c_freq`, `i3c_od_freq`,
-  `i3c_pp_freq`, `hdr_ddr_freq`).
+  `i3c_pp_freq`, `hdr_ddr_freq`); and the loop-counter aliases
+  (`lcr0`, `lcr1`).
 
 The assembler rejects a colliding name with a clear error pointing
 at the conflict. See the [Errors](./errors.md) chapter for the full
@@ -151,8 +151,8 @@ rejected.
 
 `.dw` is the escape hatch for emitting opcodes or symbols the
 assembler refuses to encode directly --- for example, the
-reserved-v0.5 mnemonics (`FLAG_CLEAR`, `WAIT_ADDRESSED`, etc.) or
-the reserved `tx_symbol` code `0b11`. The compiler's refusal is a
+reserved-v0.5 mnemonics (`FLAG_CLEAR`, `CAPTURE_RUN`) or the
+reserved `tx_symbol` code `0b11`. The compiler's refusal is a
 guard rail; `.dw` lets you cross it when you really need to.
 
 Note that the assembler does not advance PC for `.equ` and advances

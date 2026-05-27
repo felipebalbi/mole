@@ -140,7 +140,7 @@ sim-uart: ## Run UART TX -> RX loopback (Step 4)
 sim-spram: ## Run SPRAM controller sim (Step 6)
 	$(SBT) -batch "runMain $(PACKAGE).SpramControllerSim"
 
-sim-isa: ## Round-trip the 12-opcode encoder/decoder (Step 7)
+sim-isa: ## Round-trip the 14-opcode encoder/decoder (Step 7)
 	$(SBT) -batch "runMain $(PACKAGE).InstructionSim"
 
 sim-engine-smoke: ## EMIT_BIT smoke: i3c-OD vs i3c-PP byte trace (Step 9)

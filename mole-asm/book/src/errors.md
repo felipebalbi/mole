@@ -118,11 +118,11 @@ file.moleasm:1: equate name 'HALT' collides with a reserved
                 mnemonic / symbol / alias
 ```
 
-Fix: rename the `.equ`. Reserved names cover the 12 v0 mnemonics,
-the 4 reserved-v0.5 mnemonics, the tx-symbol names (`dominant`,
+Fix: rename the `.equ`. Reserved names cover the 14 v0 mnemonics,
+the 2 reserved-v0.5 mnemonics, the tx-symbol names (`dominant`,
 `recessive`, `hiz`, `dom`, `rec`), the bus-mode names (`i2c`,
-`i3c-od`, `i3c-pp`, `hdr-ddr`), the cond codes, and the timing-reg
-aliases.
+`i3c-od`, `i3c-pp`, `hdr-ddr`), the cond codes, the timing-reg
+aliases, and the loop-counter aliases (`lcr0`, `lcr1`).
 
 ### Undefined symbol
 

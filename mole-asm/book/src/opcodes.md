@@ -1,6 +1,6 @@
 # Opcodes
 
-The Mole engine implements **12 v0 opcodes**, each encoded as a
+The Mole engine implements **14 v0 opcodes**, each encoded as a
 16-bit word. This chapter walks through them in roughly the order
 you will reach for them as a new user. Each section gives the
 mnemonic, its operands, a short description, the wire encoding
@@ -290,15 +290,79 @@ DRIVE_BIT_ON_SCL tx=dominant                  ; target ACK
 DRIVE_BIT_ON_SCL tx=hiz capture=1             ; release; record what was seen
 ```
 
+## `LOAD_LOOP`
+
+Primes one of the two 8-bit loop-counter registers (`lcr0` or
+`lcr1`) with an unsigned immediate, ready for [`DEC_BRANCH`](#dec_branch)
+to count down. The two LCRs are completely independent, which lets
+you write nested loops without spilling to a result-ring scratch
+slot.
+
+| Field    | Bits     | Description                                       |
+|----------|----------|---------------------------------------------------|
+| opcode   | `[15:12]`| `0xC`                                             |
+| reg      | `[11]`   | `0` = `lcr0`, `1` = `lcr1`.                       |
+| reserved | `[10:8]` | Must be `0` in v1; reserved for a future widening.|
+| imm      | `[7:0]`  | Unsigned 8-bit initial value (0..255).            |
+
+```text
+LOAD_LOOP lcr0, 8                             ; eight iterations
+LOAD_LOOP lcr1, 0                             ; lints in source; runs 256 iters
+```
+
+`LOAD_LOOP r, 0` is legal but unusual: the matching `DEC_BRANCH r`
+wraps the counter from `0` to `0xFF` on the first iteration and
+runs a full 256 passes. The assembler warns when it sees a
+literal `0`; if you really need a 256-iteration loop, prefer
+`LOAD_LOOP r, 0` with a comment explaining the intent.
+
+The `[10:8]` reserved bits stay zero in v1. A future 16-LCR
+widening will use those three bits as additional reg-id bits with
+no wire-format break.
+
+## `DEC_BRANCH`
+
+Decrements one of the LCRs and branches by a signed 8-bit
+PC-relative offset (±128 instructions) if the post-decrement
+value is non-zero. The branch target is usually a label; the
+assembler computes the offset for you.
+
+| Field    | Bits     | Description                                                |
+|----------|----------|------------------------------------------------------------|
+| opcode   | `[15:12]`| `0xD`                                                      |
+| reg      | `[11]`   | `0` = `lcr0`, `1` = `lcr1`.                                |
+| reserved | `[10:8]` | Must be `0` in v1.                                         |
+| offset   | `[7:0]`  | Signed 8-bit PC-relative offset (target = PC + 1 + offset).|
+
+Semantics, per fetch:
+
+1. `LCR[reg] <- LCR[reg] - 1` (8-bit wrap; `0` becomes `0xFF`).
+2. `if (LCR[reg] != 0) PC <- PC + 1 + offset`.
+
+```text
+LOAD_LOOP   lcr0, 8                           ; eight bits
+bit_loop:
+EMIT_BIT    tx=dominant
+DEC_BRANCH  lcr0, bit_loop                    ; back-edge while lcr0 != 0
+```
+
+`DEC_BRANCH` does **not** touch any of the sticky engine flags
+(`MISMATCH_FLAG`, `TIMEOUT_FLAG`, `START_FLAG`, `STOP_FLAG`),
+so it composes cleanly with the `BRANCH_ON MISMATCH ...`
+fail-fast idiom inside the loop body.
+
 ## A note on the reserved-v0.5 mnemonics
 
-The mnemonics `WAIT_ADDRESSED`, `MISMATCH_CLEAR`, `FLAG_CLEAR`, and
-`CAPTURE_RUN` are reserved for a future opcode expansion (see
-`AGENTS.md` §3.14). The assembler rejects them at parse time and
-points you at `.dw` for raw injection. Do not be tempted to
-re-encode them by hand even with `.dw` unless you really mean to:
-the engine will currently ignore those opcode bits as no-ops, but
-that will change.
+The mnemonics `FLAG_CLEAR` and `CAPTURE_RUN` are reserved for a
+future opcode expansion (see `AGENTS.md` §3.14). The assembler
+rejects them at parse time and points you at `.dw` for raw
+injection. Do not be tempted to re-encode them by hand even with
+`.dw` unless you really mean to: the engine will currently ignore
+those opcode bits as no-ops, but that will change.
+
+(Two slots that used to be reserved --- `WAIT_ADDRESSED` at `0xC`
+and `MISMATCH_CLEAR` at `0xD` --- graduated to v0 as `LOAD_LOOP`
+and `DEC_BRANCH` above.)
 
 You now have a complete tour of the v0 ISA. The next chapter ties
 it together with three end-to-end programs.
