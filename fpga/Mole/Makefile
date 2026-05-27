@@ -71,7 +71,8 @@ $(BIN): $(ASC)
 # grows (see TODO.md). Keep this list and .PHONY in sync.
 sim: sim-config sim-opendrain sim-baud-gen sim-rx-sync \
      sim-tx-shiftreg sim-rx-shiftreg sim-tx-fsm sim-rx-fsm \
-     sim-uart-tx sim-uart-rx sim-uart sim-spram sim-isa ## Run all simulations
+     sim-uart-tx sim-uart-rx sim-uart sim-spram sim-isa \
+     sim-engine-smoke ## Run all simulations
 
 # Per-block sim / gen targets land here once their hint blocks in
 # TODO.md flip from 🔲 to ✅. The naming contract is fixed:
@@ -136,8 +137,8 @@ sim-spram: ## Run SPRAM controller sim (Step 6)
 sim-isa: ## Round-trip the 12-opcode encoder/decoder (Step 7)
 	$(SBT) -batch "runMain $(PACKAGE).InstructionSim"
 
-# sim-engine-smoke: ## EMIT_BIT smoke: drive 0x55 onto sim bus (lands with Step 9)
-# 	$(SBT) -batch "runMain $(PACKAGE).BitCycleEngineSmokeSim"
+sim-engine-smoke: ## EMIT_BIT smoke: i3c-OD vs i3c-PP byte trace (Step 9)
+	$(SBT) -batch "runMain $(PACKAGE).BitCycleEngineSmokeSim"
 
 # sim-engine-full: ## Full ISA coverage (lands with Step 12)
 # 	$(SBT) -batch "runMain $(PACKAGE).BitCycleEngineSim"
@@ -178,4 +179,5 @@ help: ## Show this help (every target with a ## description)
 .PHONY: all sim sim-config sim-opendrain sim-baud-gen sim-rx-sync \
         sim-tx-shiftreg sim-rx-shiftreg sim-tx-fsm sim-rx-fsm \
         sim-uart-tx sim-uart-rx sim-uart sim-spram sim-isa \
+        sim-engine-smoke \
         waves flash clean distclean help

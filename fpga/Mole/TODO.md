@@ -38,6 +38,7 @@ stable contract" before changing either.
 - [x] **Step 6 --- `SpramControllerSim`.** 7 black-box cases against the `Mem` substitute: write/read coverage, read-priority arbitration (both writers), wrap-around, latency, same-address r/w.
 - [x] **Step 7 --- `Instruction` ISA scaffolding.** 12-opcode + 4-reserved-slot encoder/decoder with 16-bit fixed-width wire format; full round-trip + flag-triple invariant + range-reject sim under `sim-isa`.
 - [x] **Step 8 --- `BitCycleEngineCore` (minimal).** `EMIT_BIT` / `SET_BUS_MODE` / `HALT` decoded; quarter-bit pacing via shared `QuarterBitTimer`; `SymbolDecoder` + `SclWaveformGen` + `BusModeOps.isPpClass` as the engine's only protocol context; `Revision` word emitted as two 16-bit halves on `HALT`. Sim lands in Step 9.
+- [x] **Step 9 --- `BitCycleEngineSmokeSim`.** Per-cycle bus-driver trace under `i3c-OD` vs `i3c-PP`, asserting "released" vs "actively driven high" on the SCL high half + the SDA decode for `dominant` / `recessive` / `hiz`. Distinguishes pulled-high (pull-up) from driven-high (PP) by reading the engine's `driveHigh` directly. `sim-engine-smoke` uncommented; aggregate `sim` target picks it up.
 
 ---
 
@@ -614,43 +615,83 @@ and result-ring wrap-around.
 - `HALT` status field encoding (clean / trap / overflow ---
   Step 11 or Step 12).
 
-### 🔲 Step 9 --- `BitCycleEngineSmokeSim`
+### ✅ Step 9 --- `BitCycleEngineSmokeSim`
 
-**Goal:** load a hand-encoded program that emits one byte (e.g.
-`0x55`) onto the sim bus, then `HALT`. Assert the wire trace
-matches the expected quarter-bit pattern.
+**What landed:**
 
-The program must cover both engine-generated SCL drive classes:
+- **Files:** `src/sim/BitCycleEngineSmokeSim.scala` (new).
+- **DUT wrapper:** `BitCycleEngineSmokeDut` --- in-file
+  `case class` that wires a `BitCycleEngineCore` to a
+  `SpramController(useBlackBox = false)` and exposes
+  `loaderWrite` / `start` / `done` / `bus` to the test bench.
+  Lives in `src/sim/` so the `Makefile`'s `HW_SRCS` glob does not
+  pick it up at synthesis time. The wrapper is *not* a
+  `MoleTop` --- the UART loader / drainer integration is Phase 2.
+- **Program:** for each run, the sim hand-encodes 11 instructions
+  via `Instruction.encode` (the Scala sim oracle from Step 7):
+  one `SET_BUS_MODE`, then 9 `EMIT_BIT`s (the byte `0x55` MSB
+  first followed by a `hiz` ACK slot), then `HALT 0`. The bytes
+  drive the loader-write Stream into program memory one word
+  per handshake; `start` rises once the load completes.
+- **Two runs:** `i3c-OD` and `i3c-PP`. The byte is identical;
+  only the active `BUS_MODE` differs. That is the entire point ---
+  any engine that bakes "OD" into a hard-coded SCL waveform mux
+  fails the second run.
+- **Per-cycle trace.** From the moment `done` falls until it
+  re-rises, the sim records a `BusSample(sdaLow, sdaHigh, sclLow,
+  sclHigh)` tuple per fabric cycle. This is the level of
+  visibility you only get because we own the DUT --- a real-world
+  scope cannot tell "released" from "driven high" through a pull
+  resistor.
+- **Trace assertions:**
+  - Exactly 9 contiguous `sclLow = True` intervals (one per
+    `EMIT_BIT`). The engine drives SCL low only during `Q0 + Q1`;
+    `Q2 + Q3` and the fetch / decode gap between bits are always
+    `sclLow = False`.
+  - Each interval is `2 * quarterPeriodCyclesReset ± 2` fabric
+    cycles wide (default 24 ± 2 = 22..26). The ± 2 covers the
+    one-cycle aliasing of the sampler vs the SCL reg's update
+    edge.
+  - SDA in the middle of each low interval matches the symbol
+    decoder's expected `(driveLow, driveHigh)` for that bit's
+    `tx_symbol` under the active `BusMode` --- the sim mirrors the
+    decode table in a pure-Scala `expectedSda` oracle.
+  - Between every pair of consecutive low intervals,
+    `sclDriveHigh` matches the expected drive class: `False` for
+    every OD-class `BusMode`, `True` for every PP-class. This is
+    the "released vs driven high" check the Step 9 hint called
+    out.
+  - Bus contention (`driveLow && driveHigh` on the same line in
+    the same cycle) is asserted out on every cycle for both
+    lines. Structural property of `SymbolDecoder` (no decode row
+    asserts both); the assertion catches a future regression that
+    wires the decoder wrong.
+- **Makefile:** `sim-engine-smoke` uncommented as a top-level
+  target. Added to the aggregate `sim` target and to
+  `.PHONY`.
+- **What we deliberately do *not* assert.** Cycle-exact
+  duration of the trailing tail after the 9th SCL-low interval
+  (the engine sits in `HALT` result-ring writes for two cycles
+  plus arbitration with the loader port that is now idle; SDA /
+  SCL regs hold their `Q3` values throughout, which is correct
+  but verbose to assert on). A future Step 12 full-ISA sim
+  validates the result-ring writes properly.
 
-**Run 1: `SET_BUS_MODE i3c-OD` + EMIT_BIT × 9.** Expected SCL
-trace per bit: pulled low Q0/Q1, **released** (Hi-Z, pull-up
-wins) Q2/Q3.
+**Divergence from the Step 9 hint block:**
 
-**Run 2: `SET_BUS_MODE i3c-PP` + EMIT_BIT × 9.** Expected SCL
-trace per bit: pulled low Q0/Q1, **actively driven high (PP)**
-Q2/Q3.
+- **No `OpenDrainBusSim`-style wired-AND model in the trace.**
+  The hint suggested "a sim helper that distinguishes 'pulled
+  high by pull-up' from 'driven high by the DUT' on the wired
+  bus". We have something better: direct visibility into the
+  engine's `driveLow` / `driveHigh` registers. A pull-up model
+  on top of those would only obscure the distinction the engine
+  is responsible for making.
+- **Single program, two runs** instead of two distinct programs.
+  Same `0x55 + hiz` byte for both modes; only `SET_BUS_MODE`
+  changes. Makes the contrast between the two traces direct ---
+  any difference is attributable to the mode switch.
 
-A sim helper that distinguishes "pulled high by pull-up" from
-"driven high by the DUT" on the wired bus is what catches an
-engine that ignores `BUS_MODE.mode[2]` or wires `SclWaveformGen`
-to a stuck mode.
-
-Also cover both `tx_symbol` encodings of "1" for SDA in
-`EMIT_BIT`:
-- **OD release** (`tx_symbol = recessive` under `i3c-OD`) ---
-  symbol decoder produces `(driveLow=0, driveHigh=0)`; bus
-  floats, sim pull-up wins.
-- **PP high** (`tx_symbol = recessive` under `i3c-PP`) --- symbol
-  decoder produces `(driveLow=0, driveHigh=1)`; DUT actively
-  drives the wired bus high; pull-up irrelevant.
-
-`tx_symbol = hiz` is also exercised on at least one bit (the ACK
-slot is the natural place): decoder produces `(0, 0)`
-regardless of `BUS_MODE`.
-
-**Files:** `src/sim/BitCycleEngineSmokeSim.scala`.
-
-**Makefile:** uncomment `sim-engine-smoke`.
+**Sim run:** `make sim-engine-smoke`.
 
 ### 🔲 Step 10 --- Async waits + stretch
 
