@@ -37,6 +37,7 @@ stable contract" before changing either.
 - [x] **Step 5 --- `SpramController`.** One-tile SPRAM wrapper with read-priority arbitration; `SB_SPRAM256KA` BlackBox + `Mem` sim path.
 - [x] **Step 6 --- `SpramControllerSim`.** 7 black-box cases against the `Mem` substitute: write/read coverage, read-priority arbitration (both writers), wrap-around, latency, same-address r/w.
 - [x] **Step 7 --- `Instruction` ISA scaffolding.** 12-opcode + 4-reserved-slot encoder/decoder with 16-bit fixed-width wire format; full round-trip + flag-triple invariant + range-reject sim under `sim-isa`.
+- [x] **Step 8 --- `BitCycleEngineCore` (minimal).** `EMIT_BIT` / `SET_BUS_MODE` / `HALT` decoded; quarter-bit pacing via shared `QuarterBitTimer`; `SymbolDecoder` + `SclWaveformGen` + `BusModeOps.isPpClass` as the engine's only protocol context; `Revision` word emitted as two 16-bit halves on `HALT`. Sim lands in Step 9.
 
 ---
 
@@ -514,74 +515,104 @@ and result-ring wrap-around.
     per opcode --- the current `InstructionWord` keeps the
     payload raw and per-opcode slicing lives in the consumer.
 
-### 🔲 Step 8 --- `BitCycleEngineCore` + `QuarterBitTimer` + `BusMode` + `Revision`
+### ✅ Step 8 --- `BitCycleEngineCore` + `QuarterBitTimer` + `BusMode` + `Revision`
 
-**Goal:** the smallest engine that decodes `EMIT_BIT` +
-`SET_BUS_MODE` + `HALT` and nothing else. Drives the bus with
-quarter-bit timing derived from `MoleConfig.quarterPeriodCyclesReset`.
-Generates canonical SCL waveform internally per current `BUS_MODE`.
-Reports a fixed `REVISION` word on `HALT`.
+**What landed:**
 
-**Files:** `src/hw/QuarterBitTimer.scala`,
-`src/hw/BitCycleEngineCore.scala`, `src/hw/BusMode.scala`,
-`src/hw/SclWaveformGen.scala`, `src/hw/Revision.scala`.
+- **Files:** `src/hw/Revision.scala`, `src/hw/QuarterBitTimer.scala`,
+  `src/hw/SclWaveformGen.scala`, `src/hw/BusMode.scala`,
+  `src/hw/BitCycleEngineCore.scala`. All new. No `Makefile`
+  change --- the smoke sim lands with Step 9.
+- **`Revision`** is a Scala `object` that reads
+  `-Drevision.{major,minor,patch}` from `sys.props` with defaults
+  matching `Makefile`'s `REVISION_*`. Exposes `wordLo` (low 16
+  bits) and `wordHi` (high 16 bits) as `Int`, plus `hwLo` / `hwHi`
+  as fixed `Bits(16 bits)` literals. The 32-bit word lands in the
+  result ring as two consecutive halves, low first (matches the
+  little-endian byte stream the host expects).
+- **`QuarterBitTimer`** is a `Component` with
+  `reload` / `load` / `enable` / `tick` IO. Counter width sized
+  from a constructor `maxReloadValue` (default `1023` = the
+  10-bit `LOAD_TIMING` divider field, so the same instance
+  survives Step 11 without re-elaboration). `load` (level)
+  forces the counter to `reload` next edge with no tick;
+  `enable` runs the counter down by one per cycle and pulses
+  `tick` on underflow (re-loading from `reload` the same edge).
+  Documented period: `reload + 1` enable cycles per tick.
+- **`SclWaveformGen`** is a pure-Scala `object` with one
+  combinational helper `apply(quarterIndex: UInt): TxSymbol.E`
+  that returns `dominant` for Q0/Q1 and `recessive` for Q2/Q3.
+  Returning a `TxSymbol.E` (and not a raw drive pair) is what
+  lets the engine route the SCL waveform through the same
+  `SymbolDecoder` as SDA, so the Q2/Q3 high half automatically
+  becomes OD-release under `i2c` / `i3c-OD` and PP-high under
+  `i3c-PP` / `hdr-ddr` with no duplicate logic.
+- **`BusMode.scala`** adds two engine-side helpers next to the
+  enum (which still lives in `Instruction.scala` as the host-side
+  wire-contract source of truth): `BusModeOps.isPpClass(busMode)`
+  for the `mode[2]` read, and `SymbolDecoder(txSymbol, busMode)`
+  as the *one* `(tx_symbol, BUS_MODE) → (driveLow, driveHigh)`
+  decoder per the ROADMAP §"TX symbol" table. Decoder is
+  structurally incapable of asserting both `driveLow` and
+  `driveHigh` together (bus contention) by inspection of the
+  table.
+- **`BitCycleEngineCore`** is a `Component(MoleConfig)` with one
+  `StateMachine` (`Idle → Fetch → FetchWait → Decode →
+  (EmitBit) → Fetch`, plus a parallel `Halt` exit that emits
+  the two `Revision` halves and returns to `Idle`). Bus pads
+  are `Reg(Bool())`s at component scope per the
+  `AGENTS.md` §"Bus-shaped FSM idiom"; SDA latches on entry to
+  `EmitBit` (held for the full bit by spec), SCL updates on
+  each timer tick. Between bits the regs hold their `Q3`
+  values --- which is the canonical "SCL stays high between
+  bits" behaviour.
+- **Trap policy (Step 8 only):** the decode `switch` covers
+  `HALT` / `SET_BUS_MODE` / `EMIT_BIT` explicitly and routes
+  *every other opcode* (including the four 0xC..0xF reserved
+  v0.5 slots) to the same `Halt` exit. Step 10 / 11 peel off
+  the real implementations; Step 11 also grows the `HALT`
+  word's status field that distinguishes "clean halt" from
+  "trap on unknown opcode".
+- **Result-ring writes** go to fixed addresses `programWordCount`
+  and `programWordCount + 1` in Step 8 --- there is no write
+  pointer yet. The proper ring pointer (with `MARK` records,
+  per-write increment, and overflow handling) lands in
+  Step 11.
+- **Quarter-bit pacing.** Per ROADMAP §"Quarter-bit timing", the
+  fabric clock is the quarter-bit clock --- the timer divides
+  the fabric clock by `quarterPeriodCyclesReset` (default 12 at
+  48 MHz → 4 MHz quarter rate → 1 MHz bit rate). Each `EMIT_BIT`
+  is therefore 4 × 12 = 48 fabric cycles plus the 3-cycle
+  fetch/decode overhead between bits. Step 11's `LOAD_TIMING`
+  swaps the divider word at runtime by driving `timer.io.reload`
+  from a per-`BusMode` register file.
 
-**Design notes:**
-- Bus drives are **registered**, not per-state combinational
-  (see `AGENTS.md` §"Bus-shaped FSM idiom").
-- **`BusMode` register (3 bits)** holds the current active mode
-  per ROADMAP §"Bus mode register": `mode[1:0]` = active timing
-  divider (`i2c` / `i3c-OD` / `i3c-PP` / `hdr-ddr`), `mode[2]`
-  = SCL high-half drive class (OD-release vs PP-high; `mode[2]`
-  follows from `mode[1:0]` per the named-symbol table but is
-  carried explicitly to keep the SCL-gen path independent of
-  the mode decode). One writer (`SET_BUS_MODE`), two readers
-  (timing-divider mux, `SclWaveformGen`). Reset value: `i2c`
-  (safe default --- OD release on idle bus).
-- **`SymbolDecoder`** is a pure combinational function
-  `(tx_symbol, BUS_MODE) → (driveLow, driveHigh)` per ROADMAP
-  §"TX symbol" decode table. Lives once in the engine; every
-  pad consumer (SDA-from-EMIT_BIT, SDA-from-EMIT_QUARTER,
-  SCL-from-EMIT_QUARTER, SDA-from-DRIVE_BIT_ON_SCL) routes
-  through it. No per-pad mode state.
-- **`SclWaveformGen`** emits the engine-generated SCL
-  `tx_symbol` stream during `EMIT_BIT`: `dominant` for Q0/Q1,
-  `recessive` for Q2/Q3. That stream then goes through the
-  shared `SymbolDecoder` with the current `BUS_MODE`, so the
-  Q2/Q3 high half automatically becomes OD-release under
-  `i2c`/`i3c-OD` and PP-high under `i3c-PP`/`hdr-ddr` without
-  duplicate decode logic.
-- **Canonical `EMIT_BIT` shape (Model A).** One `EMIT_BIT` = one
-  full wire bit = 4 quarters. SDA is held at the instruction's
-  `tx_symbol` across all 4 quarters; the symbol decodes against
-  the active `BUS_MODE`. SCL is driven by `SclWaveformGen` ---
-  *not* by the bitstream. The SDK emits one `EMIT_BIT` per
-  wire bit and never has to think about the SCL waveform. See
-  ROADMAP §"Canonical EMIT_BIT shape" for the contract.
-- **`EMIT_QUARTER` overrides `SclWaveformGen`.** When the
-  current instruction is `EMIT_QUARTER`, the SCL pad takes its
-  `tx_symbol` from the bitstream's `scl_symbol` field instead
-  of `SclWaveformGen`, for that single quarter. SDA likewise
-  takes `sda_symbol` from the bitstream. Both still flow
-  through `SymbolDecoder`. This is the only path to per-quarter
-  SCL control. **Target-role lint:** the SDK rejects
-  `EMIT_QUARTER` with `scl_symbol = recessive` when `BUS_MODE`
-  is PP class (would request PP-drive-1 of SCL --- target must
-  never do that). The engine ignores that combination as
-  defense in depth.
-- Pads are push-pull-capable (SB_IO push-pull mode) so the
-  PP-class `tx_symbol = recessive` decode (`driveHigh := True`)
-  actively drives high (for I3C PP). External pull-ups still
-  present so OD recessive works for I2C / I3C OD; push-pull
-  always wins against the pull-up.
-- Quarter-bit timer is a down-counter loaded with the current
-  active divider's `quarterPeriodCycles` value (selected by
-  `BUS_MODE.mode[1:0]`); the bit FSM advances one quarter-state
-  per timer underflow.
-- `Revision.scala` reads `sys.props.getOrElse("revision.major",
-  "0").toInt` etc. with defaults matching the Makefile.
+**Divergence from the Step 8 hint block:**
 
-**Sim:** Step 9.
+- **`BusMode.scala` does not redeclare the enum.** The
+  SpinalEnum lives once in `Instruction.scala` (so the host
+  encoder and engine RTL share the same wire encoding). This
+  file just adds engine-side helpers (`BusModeOps`,
+  `SymbolDecoder`).
+- **Trap-to-Halt for unrecognised opcodes** was not spelled out
+  in the hint; the alternative ("hold in Decode forever") would
+  produce a deadlock indistinguishable from a stuck FSM. The
+  trap path is the safer Step 8 placeholder.
+- **`HALT` writes two 16-bit halves**, not one. The Revision
+  word is 32 bits per `AGENTS.md` §"REVISION word convention";
+  the result ring is 16-bit-word-grained per `SpramController`.
+  Two writes (low first) is the natural split.
+
+**Sim:** none in this step. The `BitCycleEngineSmokeSim` and the
+`sim-engine-smoke` Makefile target land with Step 9.
+
+**Open design decisions held for later:**
+
+- Sticky-flag clearing semantics for `WAIT_ON` (Step 10).
+- Result-ring write pointer + overflow handling + `MARK`
+  timestamp width (Step 11).
+- `HALT` status field encoding (clean / trap / overflow ---
+  Step 11 or Step 12).
 
 ### 🔲 Step 9 --- `BitCycleEngineSmokeSim`
 
