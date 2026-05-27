@@ -82,13 +82,22 @@ object Crc16XmodemSim extends App {
     dut.io.update.payload #= 0
     dut.clockDomain.waitSampling(2)
 
+    // Both helpers follow the canonical "drive input, wait edge, drop
+    // input, wait one extra edge to settle" pattern used by
+    // TxShiftRegSim.loadByte. The trailing waitSampling() is not
+    // optional: `io.value := crc` is combinational off the register,
+    // and a read issued in the same delta as the edge that updated
+    // the register can race the combinational propagation and return
+    // the pre-edge value. Burn one quiet cycle (when/elsewhen are
+    // both false, so the register holds) to let io.value settle to
+    // the new register value before the caller samples it.
+
     def reset(): Unit = {
       dut.io.init #= true
       dut.io.update.valid #= false
-      dut.clockDomain.waitSampling(1)
+      dut.clockDomain.waitSampling() // edge with init=true -> crc := 0
       dut.io.init #= false
-      // After init falls and one rising edge has consumed it, the
-      // register holds INIT. Sample now to confirm.
+      dut.clockDomain.waitSampling() // settle io.value combinational
       assert(
         dut.io.value.toLong == Crc16Xmodem.INIT,
         f"reset: value should be 0x${Crc16Xmodem.INIT}%04X, got 0x${dut.io.value.toLong}%04X"
@@ -99,16 +108,10 @@ object Crc16XmodemSim extends App {
       for (b <- bytes) {
         dut.io.update.valid #= true
         dut.io.update.payload #= (b & 0xff).toLong
-        dut.clockDomain.waitSampling(1)
+        dut.clockDomain.waitSampling() // edge consumes byte
       }
       dut.io.update.valid #= false
-      // One more cycle so the register reflects the final update.
-      // SpinalSim's `Reg` updates on the rising edge that follows the
-      // assignment cycle; we already advanced past that edge inside
-      // the loop, so `io.value` is current as of the cycle after the
-      // last `waitSampling(1)`. Sleep a delta to settle the
-      // combinational output wire, no extra cycle needed.
-      sleep(1)
+      dut.clockDomain.waitSampling() // settle io.value combinational
     }
 
     for (v <- vectors) {
@@ -132,9 +135,10 @@ object Crc16XmodemSim extends App {
     dut.io.init #= true
     dut.io.update.valid #= true
     dut.io.update.payload #= 0xff
-    dut.clockDomain.waitSampling(1)
+    dut.clockDomain.waitSampling() // edge: init=true wins -> crc := 0
     dut.io.init #= false
     dut.io.update.valid #= false
+    dut.clockDomain.waitSampling() // settle io.value combinational
     assert(
       (dut.io.value.toLong & 0xffff) == Crc16Xmodem.INIT,
       f"init+update collision: init must win; got 0x${dut.io.value.toLong}%04X"
