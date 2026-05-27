@@ -289,20 +289,30 @@ case class BitCycleEngineCore(cfg: MoleConfig) extends Component {
   // sample-domain transition that produced them.
   // ------------------------------------------------------------------
 
-  val sdaSyncShift = Reg(Bits(2 bits)) init (B"11")
-  val sclSyncShift = Reg(Bits(2 bits)) init (B"11")
-  sdaSyncShift := sdaSyncShift(0) ## io.bus.sda.read
-  sclSyncShift := sclSyncShift(0) ## io.bus.scl.read
-  val sdaSampled = sdaSyncShift(1)
-  val sclSampled = sclSyncShift(1)
+  // ------------------------------------------------------------------
+  // Bus observer --- factored into [[BusObserver]] (an Area, not a
+  // Component, so the engine's hierarchy stays flat). Exposes both
+  // pure line-direction edges (sda/sclFalling, sda/sclRising) and
+  // the I2C / I3C bus events (startEdge / stopEdge = SDA edge while
+  // SCL is held high). The SCL-direction edges are what target-role
+  // SAMPLE_BIT_ON_SCL (rising) and DRIVE_BIT_ON_SCL (falling) will
+  // pace off when Step 19's FSM states land.
+  //
+  // The named aliases below keep the rest of the FSM bit-identical
+  // to the pre-refactor source --- only the *origin* of the signals
+  // changed. Target-role consumers added in the next commit will
+  // read `observer.sclRising` / `observer.sclFalling` directly.
+  // ------------------------------------------------------------------
 
-  val sdaSampledPrev = RegNext(sdaSampled) init (True)
-  val sclSampledPrev = RegNext(sclSampled) init (True)
-
-  val sdaFalling = sdaSampledPrev && !sdaSampled
-  val sdaRising = !sdaSampledPrev && sdaSampled
-  val startEdge = sdaFalling && sclSampled
-  val stopEdge = sdaRising && sclSampled
+  val observer = BusObserver(io.bus.sda.read, io.bus.scl.read)
+  val sdaSampled = observer.sdaSampled
+  val sclSampled = observer.sclSampled
+  val sdaSampledPrev = observer.sdaSampledPrev
+  val sclSampledPrev = observer.sclSampledPrev
+  val sdaFalling = observer.sdaFalling
+  val sdaRising = observer.sdaRising
+  val startEdge = observer.startEdge
+  val stopEdge = observer.stopEdge
 
   // ------------------------------------------------------------------
   // WAIT_ON / STRETCH_SCL scratch regs --- latched in `decodeState`
