@@ -1,20 +1,27 @@
-# FPGA simulation CI for the Mole project.
+# FPGA CI for the Mole project.
 #
-# Runs every Mole sub-block simulation on push and on every PR
-# targeting `main`. The intent is to catch the class of bugs that
-# only show up when the toolchain (sbt + Verilator + SpinalHDL) is
-# actually invoked --- type errors, scalafmt drift, RTL/sim races,
-# and CRLF creep --- without the user having to remember to spin
-# the simulator up on a second machine.
+# Two parallel jobs:
+#
+#   sim   --- runs every Mole sub-block simulation. Catches the
+#             class of bugs that only show up when the toolchain
+#             (sbt + Verilator + SpinalHDL) is actually invoked:
+#             type errors, scalafmt drift, RTL/sim races, CRLF
+#             creep.
+#
+#   synth --- runs `make all`: SpinalHDL elaboration -> yosys
+#             synth -> nextpnr-ice40 P&R -> icepack. The point of
+#             this job is to catch the class of bugs that
+#             Verilator does *not* model: timing closure regressions
+#             and resource overruns on the UP5K. nextpnr-ice40
+#             exits non-zero when the routed design fails its
+#             clock constraint, so a regression below 48 MHz fails
+#             CI loudly.
 #
 # What this workflow does NOT do:
-#   - run `make` / `make all` --- synth and P&R depend on the
-#     `MoleTopVerilog` entrypoint, which lands at Step 15. Add a
-#     separate job once that exists.
 #   - run hardware bring-up (obviously).
 #   - publish artifacts. On failure, the assertion message from
-#     the failing sim is the diagnostic; revisit if the sim count
-#     grows past a comfortable wall of text.
+#     the failing sim, or nextpnr's critical-path report from the
+#     synth log, is the diagnostic. Revisit if the noise grows.
 
 name: fpga-sim
 
@@ -127,3 +134,67 @@ jobs:
       - name: Run all simulations
         working-directory: fpga/Mole
         run: make sim
+
+  synth:
+    name: iCE40 synth + P&R (yosys + nextpnr + icestorm)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          # Same sbt cache as the sim job. The two jobs share a
+          # cache key by virtue of identical **/*.sbt +
+          # **/project/build.properties contents.
+          cache: sbt
+
+      - name: Install sbt
+        uses: sbt/setup-sbt@v1
+
+      # Synth toolchain is installed from Ubuntu apt rather than
+      # YosysHQ oss-cad-suite for the same reason the sim job pins
+      # Verilator from apt: pinning to a distro-supplied version
+      # gives reproducible CI without depending on the moving
+      # head of oss-cad-suite.
+      #
+      # Ubuntu 24.04 noble ships:
+      #   - yosys           0.36 (apt)
+      #   - nextpnr-ice40   0.6  (apt)
+      #   - fpga-icestorm   2024 (apt, provides icepack)
+      #
+      # All three are recent enough to handle the UP5K and the
+      # current Mole netlist. If a future Spinal/yosys interaction
+      # forces a newer toolchain version, switch this job to
+      # oss-cad-suite at that point and document the trigger.
+      - name: Install yosys + nextpnr-ice40 + icestorm
+        run: |
+          set -eu
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            yosys nextpnr-ice40 fpga-icestorm
+
+      - name: Verify toolchain
+        working-directory: fpga/Mole
+        run: |
+          set -eu
+          java -version
+          sbt --version
+          yosys -V
+          nextpnr-ice40 --version
+
+      # `make all` chains: SpinalHDL elaboration ->
+      # yosys synth_ice40 -> nextpnr-ice40 (with --freq 48) ->
+      # icepack. nextpnr exits non-zero when the routed design
+      # fails its clock constraint, so any timing-closure
+      # regression below 48 MHz fails this job loudly --- which
+      # is the entire point of having a synth job in CI.
+      - name: Build bitstream (make all)
+        working-directory: fpga/Mole
+        run: make all
