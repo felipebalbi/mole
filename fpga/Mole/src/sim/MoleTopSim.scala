@@ -274,6 +274,11 @@ object MoleTopSim extends App {
       s"recvByte: timed out after $maxCycles cycles waiting for sim UART RX"
     )
     val b = dut.io.rxData.payload.toInt
+    // Advance one cycle so the (valid && ready) handshake actually
+    // fires and simRx releases the byte. Without this, valid stays
+    // sticky on the same byte and the next recvByte call returns
+    // the same value instead of waiting for the next real byte.
+    dut.clockDomain.waitSampling()
     dut.io.rxData.ready #= false
     b
   }
