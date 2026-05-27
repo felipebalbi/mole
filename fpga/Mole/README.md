@@ -58,6 +58,7 @@ Mole/
   README.md         this file
   AGENTS.md         project-specific conventions
   TODO.md           phased bring-up plan + design notes per block
+  WIRE_FORMAT.md    host link wire format (UART program upload + drain)
   Makefile
   build.sbt
   icebreaker.pcf    SDA/SCL on PMOD1A; UART on FT2232H ch.A
@@ -90,7 +91,9 @@ that generates it is `mole.MoleTopVerilog`.
 - SDA / SCL exposed on PMOD1A (PMOD1A.1 → SCL, PMOD1A.2 → SDA).
   External 4.7 kΩ pull-ups to 3.3 V required --- not on die.
 - USB-UART on FT2232H channel A (`/dev/ttyUSB0`); channel B is
-  used by `iceprog` to program the bitstream.
+  used by `iceprog` to program the bitstream. The host-link wire
+  format (UART program upload, CRC, result drain) is fully
+  specified in [`WIRE_FORMAT.md`](WIRE_FORMAT.md).
 - Status LEDs (R / G / B) reused for engine state / heartbeat /
   HALT-status indication.
 
