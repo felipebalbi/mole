@@ -75,6 +75,18 @@ import spinal.core._
   *   (worst-case 8 KiB program load at 1 Mbaud × 10 bits/byte = ~80 ms). Mole
   *   Rojo (ECP5, faster fabric) will revisit the production baud default; the
   *   engine itself imposes no upper bound here.
+  *
+  * @param role
+  *   Compile-time selection between controller-role and target-role
+  *   wire semantics. Defaults to [[EngineRole.Controller]] --- today's
+  *   shipping behaviour and the only role exercised by Steps 1..18.
+  *   Set to [[EngineRole.Target]] (Step 19) to get the engine that
+  *   slaves to an external SCL; see [[EngineRole]] for the per-role
+  *   wire-level contracts. A Scala `if` (not a Spinal `when`) reads
+  *   this field at elaboration so the unused half of the bit-cycle
+  *   FSM and the unused half of [[SclWaveformGen]] disappear from
+  *   synthesis. One bitstream per role; switching at runtime is
+  *   intentionally not supported.
   */
 case class MoleConfig(
     fabricFreqHz: HertzNumber =
@@ -83,7 +95,8 @@ case class MoleConfig(
     programWordCount: Int = 4096,
     resultRingByteCount: Int = 8192,
     captureMaxBits: Int = 65536,
-    uartBaud: Int = 1_000_000
+    uartBaud: Int = 1_000_000,
+    role: EngineRole = EngineRole.Controller
 ) {
 
   require(

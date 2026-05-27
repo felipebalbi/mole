@@ -32,6 +32,7 @@ object MoleConfigSim extends App {
   println(s"resultRingByteCount      = ${cfg.resultRingByteCount}")
   println(s"captureMaxBits           = ${cfg.captureMaxBits}")
   println(s"uartBaud                 = ${cfg.uartBaud}")
+  println(s"role                     = ${cfg.role}")
 
   /** Wire bit-rate -> quarter rate (4 quarters per bit). */
   def quarterRate(bitHz: HertzNumber): HertzNumber =
@@ -160,6 +161,15 @@ object MoleConfigSim extends App {
       f"osHz=$uartOsHz%d, phaseInc=$phaseInc%d (0x${phaseInc.toHexString}%s), " +
       f"realised osHz=$realisedOsHz, realised baud=$realisedBaud"
   )
+
+  // Role audit: default must be Controller (today's shipping behaviour
+  // and the only role exercised by Steps 1..18). Catches an accidental
+  // default flip that would silently retarget every bitstream.
+  assert(
+    cfg.role == EngineRole.Controller,
+    s"default MoleConfig.role must be Controller, was ${cfg.role}"
+  )
+  println(s"role audit: default = ${cfg.role}, override = Target available")
 
   println("MoleConfig defaults OK")
 }
