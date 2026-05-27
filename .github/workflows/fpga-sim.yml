@@ -14,7 +14,7 @@
 #             Verilator does *not* model: timing closure regressions
 #             and resource overruns on the UP5K. nextpnr-ice40
 #             exits non-zero when the routed design fails its
-#             clock constraint, so a regression below 48 MHz fails
+#             clock constraint, so a regression below 24 MHz fails
 #             CI loudly.
 #
 # What this workflow does NOT do:
@@ -190,10 +190,10 @@ jobs:
           nextpnr-ice40 --version
 
       # `make all` chains: SpinalHDL elaboration ->
-      # yosys synth_ice40 -> nextpnr-ice40 (with --freq 48) ->
+      # yosys synth_ice40 -> nextpnr-ice40 (with --freq 24) ->
       # icepack. nextpnr exits non-zero when the routed design
       # fails its clock constraint, so any timing-closure
-      # regression below 48 MHz fails this job loudly --- which
+      # regression below 24 MHz fails this job loudly --- which
       # is the entire point of having a synth job in CI.
       - name: Build bitstream (make all)
         working-directory: fpga/Mole

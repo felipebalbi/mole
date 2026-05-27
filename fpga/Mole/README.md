@@ -37,8 +37,8 @@ HDR-DDR, peripheral emulation) live in the host-side Scheme SDK
 - Host link via FT2232H channel A (`/dev/ttyUSB0`) for program
   upload and result-ring readback. No Pico, no external flash ---
   programs live in on-die SPRAM.
-- I2C (all modes) and I3C SDR up to the fabric ceiling (~12 MHz
-  I3C with the UP5K's ~48 MHz fabric --- see ROADMAP §"Clocks").
+- I2C (all modes) and I3C SDR up to the fabric ceiling (~6 MHz SCL
+  on the UP5K's 24 MHz fabric --- see ROADMAP §"Clocks").
 - Same engine plays controller *or* target (selected by host).
 - Custom `MoleBus` bundle on SDA / SCL (`driveLow` + `driveHigh`
   + `read`), backing push-pull-capable iCE40 `SB_IO` pads with

@@ -38,10 +38,18 @@ object MoleConfigSim extends App {
     (bitHz.toBigDecimal * 4).toLong Hz
 
   /** Assert: `cfg` can produce a quarter-rate divider for `bitHz` that fits in
-    * `MoleConfig.quarterPeriodCyclesReset`'s plausible range (>= 1, integer).
+    * `MoleConfig.quarterPeriodCyclesReset`'s plausible range (>= 1, integer)
+    * AND lands within ±5 % of the requested bit rate. The error band catches
+    * the case where truncation pushes the achieved frequency well above the
+    * target — for example I3C OD 4 MHz at 24 MHz fabric truncates the 1.5-
+    * cycle divider to 1 and overshoots to 6 MHz (+50 %). The Phase-0 buses we
+    * actually need on Mole Verde (I2C SM/FM/FM+, I3C OD up to 2 MHz) all fall
+    * inside the band; the asserter is what catches a future fabric change
+    * (or a new bus target) that silently warps a bus speed.
     * Returns the divider for the `println` log line.
     */
-  def auditBus(label: String, bitHz: HertzNumber): Int = {
+  def auditBus(label: String, bitHz: HertzNumber, errTolPct: Double = 5.0)
+      : Int = {
     val qHz = quarterRate(bitHz)
     val div = cfg.quarterPeriodCyclesFor(qHz)
     val achieved = cfg.fabricFreqHz.toBigDecimal / div
@@ -51,18 +59,49 @@ object MoleConfigSim extends App {
     f"$label%-26s target ${bitHz.toBigDecimal}%.0f Hz, quarter ${qHz.toBigDecimal}%.0f Hz, div=$div%4d, achieved ${achievedBit}%.0f Hz, err=${errPct}%+.3f%%" match {
       case line =>
         assert(div >= 1, s"$label: divider $div < 1 — fabric too slow")
+        assert(
+          math.abs(errPct) <= errTolPct,
+          s"$label: achieved $achievedBit Hz deviates ${errPct}%% from " +
+            s"target ${bitHz.toBigDecimal} Hz, exceeds ±$errTolPct%% tolerance " +
+            s"(fabric=${cfg.fabricFreqHz.toBigDecimal} Hz, div=$div)"
+        )
         println(line)
         div
     }
   }
 
-  // Required: every Phase-0 I²C / I³C-OD frequency must produce a
-  // sane divider (>= 1, integer).
+  // Required: every Phase-0 I²C / I³C-OD frequency Mole Verde claims to
+  // support must produce an integer divider with ≤ 5 % bit-rate error.
   auditBus("I2C standard 100 kHz", 100 kHz)
   auditBus("I2C fast 400 kHz", 400 kHz)
   auditBus("I2C fast-plus 1 MHz", 1 MHz)
   auditBus("I3C OD 2 MHz", 2 MHz)
-  auditBus("I3C OD 4 MHz", 4 MHz)
+
+  // Flagged: I3C OD 4 MHz lands at quarter rate 16 MHz, requiring
+  // `quarterPeriodCyclesFor(16 MHz) = floor(24 / 16) = 1`. That's the
+  // engine's minimum divider and overshoots the target by +50 %
+  // (achieved bit rate = 24 / 1 / 4 = 6 MHz, not 4 MHz). Mole Verde
+  // tops out at I3C OD 2 MHz with the default 24 MHz fabric; full-rate
+  // I3C SDR moves to Mole Rojo (ECP5, 100 MHz fabric). Print a warning
+  // line so the constraint is visible but do not assert out — the
+  // engine itself accepts divider=1 cleanly via LOAD_TIMING.
+  val odHighBit = 4 MHz
+  val odHighQ = quarterRate(odHighBit)
+  val odHighDiv = cfg.quarterPeriodCyclesFor(odHighQ)
+  val odHighAchievedBit =
+    (cfg.fabricFreqHz.toBigDecimal / odHighDiv) / 4
+  val odHighErrPct =
+    ((odHighAchievedBit - odHighBit.toBigDecimal)
+      / odHighBit.toBigDecimal * 100).toDouble
+  if (math.abs(odHighErrPct) > 5.0) {
+    println(
+      f"WARN: I3C OD 4 MHz lands at div=$odHighDiv → achieved ${odHighAchievedBit}%.0f Hz, " +
+        f"err=${odHighErrPct}%+.1f%% > 5%% — not supported on Mole Verde's 24 MHz fabric. " +
+        "Use I3C OD ≤ 2 MHz on Verde; full-rate I3C SDR is Mole Rojo (ECP5) territory."
+    )
+  } else {
+    auditBus("I3C OD 4 MHz", odHighBit)
+  }
 
   // Flagged: I³C PP-high (12.5 MHz SCL) requires fabric > 50 MHz or
   // a fractional divider. Phase 0 ships without it. Emit a warning
@@ -80,7 +119,7 @@ object MoleConfigSim extends App {
   }
 
   // Sanity: the reset divider must be one we could actually get from
-  // an integer divider of fabric. (At 48 MHz / div=12 = 4 MHz quarter
+  // an integer divider of fabric. (At 24 MHz / div=6 = 4 MHz quarter
   // = 1 MHz bit. Matches MoleConfig's documented default.)
   assert(
     cfg.quarterPeriodCyclesReset >= 1,

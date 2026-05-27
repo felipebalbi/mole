@@ -160,10 +160,10 @@ case class MoleLoaderFsm(
   // Pre-registered "the word about to be written is the last word of the
   // frame" predicate. Spelt out as a Reg, not a combinational
   // `wordIndex + 1 === frameLen`, because the latter is a 13-bit add +
-  // 13-bit equality chain (for the default programWordCount=4096), and at
-  // 48 MHz on the iCE40 UP5K that chain plus the FSM next-state mesh that
-  // consumes it caps the loader at ~28 MHz --- nextpnr's worst path lands
-  // at `idleCounter.SR` with the wordIndex carry chain dominating.
+  // 13-bit equality chain (for the default programWordCount=4096), and on
+  // the iCE40 UP5K (Mole Verde) that chain plus the FSM next-state mesh
+  // that consumes it was the worst path through `idleCounter.SR` in the
+  // first synth pass --- with the wordIndex carry chain dominating.
   // Pre-registering moves the wide comparator out of the FSM's same-cycle
   // decision and into a 1-bit Reg read.
   //

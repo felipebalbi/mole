@@ -44,8 +44,8 @@ stable contract" before changing either.
 - [x] **Step 12 --- `BitCycleEngineSim`.** Full-ISA Verilator sim with 17 named tests under one `BitCycleEngineFullDut` compile (debug read mux over `SpramController` while the engine is idle). Covers JMP / BRANCH_ON ALWAYS + SDA_LOW + MISMATCH + TIMEOUT / WAIT_ON cond-hit + timeout-hit / MARK records + monotonic timestamps / CAPTURE record value / MISMATCH_FLAG tracking / LOAD_TIMING swap / STRETCH_SCL dwell / Revision word format / HALT status passthrough / reserved-opcode + invalid-BUS_MODE + reserved-tx_symbol traps / result-ring overflow. `sim-engine-full` uncommented; aggregate `sim` picks it up. `SAMPLE_BIT_ON_SCL` / `DRIVE_BIT_ON_SCL` deferred to Step 19.
 - [x] **Step 13 --- `MoleTop`.** Synthesisable top-level. PLL bypass-selectable (`MolePllUp5k`) and SB_IO bypass-selectable (`MoleIoBufUp5k`). 3-state phase FSM (`acceptLoad` -> `running` -> `draining`) gates `engine.start`, SPRAM read-port ownership, and `acceptRx`. Reset bridge (`!pllLocked || !io_reset` async-asserts, 2-FF chain sync-deasserts). Closed-phase RX drain: during `running` / `draining` the UART RX stream is consumed silently so a stale-byte race can't seed the next frame on phase re-open. LEDs: R = pulse-stretched loader fault, G = `!engine.done`, B = 26-bit heartbeat gated by `engine.done`. Supporting blocks landed alongside: `MolePllUp5k`, `MoleIoBufUp5k`, `Crc16Xmodem`, `MoleLoaderFsm`, `MoleDrainerFsm`.
 - [x] **Step 14 --- `MoleTopSim`.** End-to-end Verilator sim under one `MoleTopSimDut` compile (sim-side `UartTx` / `UartRx` so the host pushes / pops bytes via Spinal Streams instead of bit-banging the wire). 4 cases: short-halt round-trip (HALT word + Revision asserts), bus-toggle (SDA driveLow + release observed during execution), bad-CRC recovery (loaderLoaded never pulses, engineDone never goes low, fault LED lights; then a good frame loads cleanly after the resync gap), back-to-back frames (phase FSM cycles cleanly twice). Small test config (`programWordCount=16`, `resultRingByteCount=32`) keeps each case under ~50 K cycles.
-- [x] **Step 15 --- `MoleTopVerilog`.** Canonical Verilog generation entrypoint. `useBlackBox = true` so yosys infers SB_PLL40_PAD + SB_IO as hard cells; `defaultClockDomainFrequency = 48 MHz` so derived dividers infer the right size. Output at `gen/MoleTop.v`; gitignored via `.gitignore`'s per-project rule.
-- [x] **Step 16 --- Flashable bitstream + synth chain.** `make gen` / `make all` / `make flash` enabled end-to-end. `nextpnr --freq 12` bumped to `--freq 48` (the actual fabric clock after the PLL); timing now reports against the real budget. Bring-up procedure (build, flash, talk, three smoke programs) documented in `BRINGUP.md`.
+- [x] **Step 15 --- `MoleTopVerilog`.** Canonical Verilog generation entrypoint. `useBlackBox = true` so yosys infers SB_PLL40_PAD + SB_IO as hard cells; `defaultClockDomainFrequency = 24 MHz` so derived dividers infer the right size. Output at `gen/MoleTop.v`; gitignored via `.gitignore`'s per-project rule.
+- [x] **Step 16 --- Flashable bitstream + synth chain.** `make gen` / `make all` / `make flash` enabled end-to-end. `nextpnr --freq 12` bumped to `--freq 24` (the actual fabric clock after the PLL; originally `--freq 48`, retargeted to 24 MHz after the first real synth on UP5K SG48I came in at Fmax ~28 MHz --- see `MoleConfig.scala` and ROADMAP §"Clocks" for the rationale); timing now reports against the real budget. Bring-up procedure (build, flash, talk, three smoke programs) documented in `BRINGUP.md`.
 
 ---
 
@@ -61,23 +61,27 @@ project.
 **What landed:**
 
 - **Files:** `src/hw/MoleConfig.scala`, `src/sim/MoleConfigSim.scala`.
-- **`MoleConfig` defaults:** `fabricFreqHz = 48 MHz`,
-  `quarterPeriodCyclesReset = 12` (1 MHz bit rate at default
+- **`MoleConfig` defaults:** `fabricFreqHz = 24 MHz`,
+  `quarterPeriodCyclesReset = 6` (1 MHz bit rate at default
   divider), `programWordCount = 4096` (12-bit JMP addr cap),
   `resultRingByteCount = 8192`, `captureMaxBits = 65536`,
-  `uartBaud = 2_000_000`. Each field has a `require(...)` guard;
+  `uartBaud = 1_000_000`. Each field has a `require(...)` guard;
   `programWordCount` is capped at 4096 per the ISA's 12-bit JMP
   operand (ROADMAP §"Encoding width"). One helper:
   `quarterPeriodCyclesFor(quarterHz: HertzNumber): Int`.
 - **`uartBaud` choice:** iCEBreaker's FT2232H supports up to
-  12 Mbaud, so the host side has plenty of headroom. 2 Mbaud is
+  12 Mbaud, so the host side has plenty of headroom. 1 Mbaud is
   the highest baud that still fits the textbook 16× RX oversample
-  on a 48 MHz fabric: `baudRate × oversample = 32 MHz < 48 MHz`,
-  and `phaseInc = round(2_000_000 × 16 × 2^24 / 48_000_000) ≈
+  on a 24 MHz fabric: `baudRate × oversample = 16 MHz < 24 MHz`,
+  and `phaseInc = round(1_000_000 × 16 × 2^24 / 24_000_000) ≈
   11_184_811 (0xAAA_AAB)`, comfortably inside the 24-bit DDS
   accumulator with ppm-level baud accuracy. Pushing higher (e.g.
-  3 Mbaud) would either overflow the DDS at 16× or force dropping
-  oversample to 8× — neither is justified for v0.
+  1.5 Mbaud) at 16× steps onto the DDS overflow threshold with no
+  margin (`1.5e6 × 16 = 24e6 = fabric`), and 2 Mbaud at 16×
+  overflows outright --- both rejected by the `baudRate *
+  oversample < clkFreqHz` guard in [[UartConfig]]. (Original
+  Mole "Phase 2" defaults were 48 MHz / 2 Mbaud --- see ROADMAP
+  §"Clocks" for the retarget rationale.)
 - **Divergence from hint:** the hint said *Sim: none (pure data
   record). Makefile: no new target.* Reconsidered ---
   `MoleConfig` is the source of truth for every sub-block's timing,
@@ -87,7 +91,7 @@ project.
   a valid integer divider for every Phase-0 bus rate
   (I²C 100 k / 400 k / 1 M, I³C OD 2 M / 4 M) and `println`-warns
   about I³C PP-high (12.5 MHz SCL → 50 MHz quarter rate) being
-  out of reach at 48 MHz fabric. Runs in milliseconds; gated by
+  out of reach at 24 MHz fabric. Runs in milliseconds; gated by
   `make sim-config`.
 - **Sim:** `src/sim/MoleConfigSim.scala`. Plain Scala main, not a
   SpinalSim DUT. Asserts spec-floor coverage at default config.
@@ -229,11 +233,11 @@ test back-to-back frames; test stop-bit-missing recovery.
   surfaces the live wire value for waveform inspection.
 - **Three configs exercised:**
   1. `12 MHz / 115 200 baud` — sibling project default; sanity.
-  2. `48 MHz / 115 200 baud` — Mole "early dev".
-  3. `48 MHz / 2 Mbaud` — Mole production default per
+  2. `24 MHz / 115 200 baud` — Mole Verde "early dev".
+  3. `24 MHz / 1 Mbaud` — Mole Verde production default per
      `MoleConfig.uartBaud`. iCEBreaker's FT2232H supports up to
-     12 Mbaud; 2 Mbaud × 16× oversample = 32 MHz tick rate, well
-     under the 24-bit DDS overflow threshold at 48 MHz fabric.
+     12 Mbaud; 1 Mbaud × 16× oversample = 16 MHz tick rate, well
+     under the 24-bit DDS overflow threshold at 24 MHz fabric.
   All three satisfy the rubber-duck-added `baudRate * oversample
   < clkFreqHz` `require` on `UartConfig`.
 - **Coverage per config:** single-byte round-trip across a
@@ -245,11 +249,12 @@ test back-to-back frames; test stop-bit-missing recovery.
   oversample windowing debounces sub-bit pulses).
 - **Divergence from earlier plan:** the original loopback target
   list included 3 MBaud and 12 MBaud stress cases. They're
-  removed — at the v0 default of 48 MHz fabric × 16× oversample
-  they would push DDS phaseInc to / past the 24-bit field limit
-  and would refuse to elaborate under the new `UartConfig`
-  guard. They land as a follow-up once an 8× oversample option
-  is added to `UartConfig`.
+  removed — at Mole Verde's 24 MHz fabric × 16× oversample they
+  push DDS phaseInc past the 24-bit field limit (and even at the
+  original 48 MHz fabric Phase-2 default they were marginal),
+  refusing to elaborate under the `UartConfig` guard. They land
+  as a follow-up once an 8× oversample option is added to
+  `UartConfig`.
 - **Sim runner docstrings fixed:** the upstream copies all had
   `Run: sbt "runMain uart.<name>"`. Swept all 8 to
   `runMain mole.<name>` to match Mole's package.
@@ -588,9 +593,9 @@ and result-ring wrap-around.
   Step 11.
 - **Quarter-bit pacing.** Per ROADMAP §"Quarter-bit timing", the
   fabric clock is the quarter-bit clock --- the timer divides
-  the fabric clock by `quarterPeriodCyclesReset` (default 12 at
-  48 MHz → 4 MHz quarter rate → 1 MHz bit rate). Each `EMIT_BIT`
-  is therefore 4 × 12 = 48 fabric cycles plus the 3-cycle
+  the fabric clock by `quarterPeriodCyclesReset` (default 6 at
+  24 MHz → 4 MHz quarter rate → 1 MHz bit rate). Each `EMIT_BIT`
+  is therefore 4 × 6 = 24 fabric cycles plus the 3-cycle
   fetch/decode overhead between bits. Step 11's `LOAD_TIMING`
   swaps the divider word at runtime by driving `timer.io.reload`
   from a per-`BusMode` register file.
@@ -801,7 +806,7 @@ files --- `timingRegs` lives as a 4-entry `Vec` inside the engine).
   the next quarter-bit period without an extra opcode.
 - **`MARK label`** --- 3-word ring record (see "Result-ring
   format" below). Timestamp is a 32-bit fabric-cycle counter
-  reset on `io.start` (wraps at ~89.5 s @ 48 MHz). Timestamp is
+  reset on `io.start` (wraps at ~179 s @ 24 MHz). Timestamp is
   latched at decode, written across three states so multi-cycle
   writes do not race the running counter.
 - **`HALT status`** --- the existing two-word Revision write is
@@ -877,8 +882,8 @@ encodings down.
   block (e.g. read-back over UART) it can move out cheaply.
 - The 32-bit MARK timestamp is wider than the original "24-bit
   or whatever fits" sketch. Rubber-duck flagged that 16-bit
-  wraps every 1.36 ms @ 48 MHz, which is shorter than a typical
-  compliance trace; 32-bit gives ~89.5 s and round MARK records
+  wraps every 2.7 ms @ 24 MHz, which is shorter than a typical
+  compliance trace; 32-bit gives ~179 s and round MARK records
   to 3 words, which is cleaner than a 2-word format with a
   partial timestamp.
 
@@ -989,9 +994,9 @@ synthesisable top-level.
 - Reset bridge: `resetAsync = !pllLocked || !io_reset` async-
   asserts a 2-FF chain in `bootCd`; the chain's output drives the
   fabric domain's synchronous reset.
-- LEDs: R = pulse-stretched loader fault (~87 ms at 48 MHz so
+- LEDs: R = pulse-stretched loader fault (~175 ms at 24 MHz so
   faults are visible), G = `!engine.done`, B = 26-bit heartbeat
-  gated by `engine.done` (~0.7 Hz blink while idle).
+  gated by `engine.done` (~0.36 Hz blink while idle).
 
 ### ✅ Step 14 --- `MoleTopSim`
 
@@ -1034,7 +1039,7 @@ chain.
 **What landed:**
 - `useBlackBox = true` so yosys infers SB_PLL40_PAD and SB_IO as
   hard cells; the bypass models exist only for `MoleTopSim`.
-- `defaultClockDomainFrequency = 48 MHz` so any
+- `defaultClockDomainFrequency = 24 MHz` so any
   `CounterFreeRun`-style helper infers the right divider without
   per-instance config.
 - Output at `gen/MoleTop.v`; gitignored via the per-project rule
@@ -1049,7 +1054,10 @@ flash`, smoke programs loaded over `/dev/ttyUSB0`.
 
 **What landed:**
 - `nextpnr --freq` bumped from `12` (the package-pin clock) to
-  `48` (the actual fabric clock after the PLL multiply); timing
+  `24` (the actual fabric clock after the PLL multiply, retargeted
+  from 48 to 24 MHz after the first real synth on UP5K SG48I
+  came in at Fmax ~28 MHz --- see `MoleConfig.scala` and
+  ROADMAP §"Clocks (v0)" for the retarget rationale); timing
   reports against the real budget.
 - Bring-up procedure (build, flash, talk, three smoke programs:
   short halt for UART round-trip, infinite loop for green-LED

@@ -20,12 +20,12 @@ make all          # produces gen/MoleTop.bin (Spinal -> yosys -> nextpnr -> icep
 ```
 
 The chain elaborates `MoleTopVerilog` (12 MHz pad clock, PLL
-multiplied to a 48 MHz fabric clock, SPRAM-backed program and
+multiplied to a 24 MHz fabric clock, SPRAM-backed program and
 result memory), synthesises with `yosys -p synth_ice40`,
 places-and-routes with `nextpnr-ice40 --up5k --package sg48 --freq
-48`, and packs the bitstream with `icepack`. The `--freq 48`
+24`, and packs the bitstream with `icepack`. The `--freq 24`
 constraint is the **real** fabric clock; nextpnr will fail the
-build if timing doesn't close at 48 MHz.
+build if timing doesn't close at 24 MHz.
 
 Re-derive only the generated Verilog (e.g. to inspect a change)
 via `make gen` --- it lands at `gen/MoleTop.v` and is gitignored.
@@ -48,7 +48,7 @@ that shares the FT2232H's USB device with the JTAG side.
 
 ## 3. Talk to the engine
 
-Open the UART at **2 000 000 baud, 8N1, no flow control** and
+Open the UART at **1 000 000 baud, 8N1, no flow control** and
 send a frame in the format from [`WIRE_FORMAT.md`](WIRE_FORMAT.md).
 The engine auto-runs on a CRC-valid frame and streams the result
 ring back. Total round-trip:
@@ -137,8 +137,8 @@ EMIT_QUARTER".
 Expected on the scope (PMOD1A.1 = SCL, PMOD1A.2 = SDA):
 
 - Quarter-bit-spaced edges paced by the `quarterPeriodCyclesReset`
-  divider in `MoleConfig` --- default `12` cycles per quarter at
-  48 MHz fabric = **1 MHz bit rate**.
+  divider in `MoleConfig` --- default `6` cycles per quarter at
+  24 MHz fabric = **1 MHz bit rate**.
 - SDA drops low for the first `EMIT_BIT`, releases for the
   second; then SCL toggles via the two `EMIT_QUARTER`s.
 - All edges respect the external pull-up resistor's RC --- the
@@ -156,7 +156,7 @@ external pull-ups against the I2C edge rates.
 
 | Symptom                                | Likely cause                                                                                                                                                                                                                                                                                                                                                                                              |
 |----------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| Red LED pulses, nothing drains         | Bad CRC, wrong `len`, or a UART RX error mid-frame. The loader is in resync. Stop sending for **>= 20 UART bit times** (~10 us at 2 Mbaud) of idle-high on the line so the loader returns to `idleState`, then retry. See [`WIRE_FORMAT.md`](WIRE_FORMAT.md) §"Resync rule" --- this is the host's contract.                                                                                              |
+| Red LED pulses, nothing drains         | Bad CRC, wrong `len`, or a UART RX error mid-frame. The loader is in resync. Stop sending for **>= 20 UART bit times** (~20 us at 1 Mbaud) of idle-high on the line so the loader returns to `idleState`, then retry. See [`WIRE_FORMAT.md`](WIRE_FORMAT.md) §"Resync rule" --- this is the host's contract.                                                                                              |
 | Green LED solid, nothing drains        | The program is in an infinite loop. Press the user button to reset; verify the program eventually hits a `HALT`.                                                                                                                                                                                                                                                                                          |
 | No LEDs change, no drain               | PLL never locked, or the bitstream did not flash. Power-cycle, re-flash via `make flash`, and check `dmesg` for FT2232H enumeration. The PLL-locked deassertion is what releases the fabric reset --- without it the engine sits in reset forever and `io_ledG` stays low.                                                                                                                                |
 | Drain comes back but the HALT word looks wrong | Read the last two bytes (low byte first) of the drain. Bit `[13]` set in the assembled 16-bit word means **overflow**: the engine tried to write more records than the result ring could hold. Bit `[12]` set means **MISMATCH_FLAG was high at HALT entry** (a sampled bit failed an `expect` compare). Bits `[11:8]` are the program-provided status code; `0xF` is the engine's reserved-opcode trap. |

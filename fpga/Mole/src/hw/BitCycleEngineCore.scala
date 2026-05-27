@@ -64,7 +64,7 @@ import spinal.lib.fsm._
   *   - `01`: reserved.
   *   - `10`: MARK (3 words). Word0: `[13:8] = 0`, `[7:0] = label`. Word1:
   *     `timestamp[15:0]`. Word2: `timestamp[31:16]`. Timestamp is a 32-bit
-  *     fabric-cycle counter starting at 0 on `io.start`; wraps at ~89.5 s @ 48
+  *     fabric-cycle counter starting at 0 on `io.start`; wraps at ~179 s @ 24
   *     MHz.
   *   - `11`: HALT (1 word). `[13] = overflow`, `[12] = mismatchAtHalt`,
   *     `[11:8] = status`, `[7:0] = 0`.
@@ -369,7 +369,7 @@ case class BitCycleEngineCore(cfg: MoleConfig) extends Component {
   // MARK timestamp (Step 11)
   //
   // Free-running 32-bit fabric-cycle counter, reset to 0 on every
-  // `io.start`. Wraps at ~89.5 s @ 48 MHz, which is comfortably
+  // `io.start`. Wraps at ~179 s @ 24 MHz, which is comfortably
   // longer than any single compliance program. `markTimestampLatch`
   // captures the counter value at MARK decode so the multi-word
   // record carries the value sampled at the right moment even

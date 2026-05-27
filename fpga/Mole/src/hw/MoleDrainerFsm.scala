@@ -32,7 +32,7 @@ import spinal.lib.fsm._
   * ==UART back-pressure==
   *
   * `UartTx.data.ready` drops while a byte is on the wire (~10 fabric cycles per
-  * UART bit at the default 48 MHz / 2 Mbaud). The FSM holds `txData.valid` and
+  * UART bit at the default 24 MHz / 1 Mbaud). The FSM holds `txData.valid` and
   * `txData.payload` stable in `sendLo` / `sendHi` until the handshake fires ---
   * never advances state or address on `valid && !ready`. The
   * `MoleDrainerFsmSim` random-throttle and long-stall cases verify byte order

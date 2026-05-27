@@ -61,7 +61,7 @@ $(ASC): $(JSON) $(PCF)
 		--pcf $(PCF)    \
 		--json $< \
 		--asc $@  \
-		--freq 48
+		--freq 24
 
 # 4. Pack (ASC -> BIN)
 $(BIN): $(ASC)

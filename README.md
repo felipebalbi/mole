@@ -29,11 +29,11 @@ for byte.
 
 ## Product line
 
-| SKU            | Tier                 | FPGA               | Scope                        |
-|----------------|----------------------|--------------------|------------------------------|
-| **Mole Verde** | pocket / per-dev     | iCE40 UP5K class   | I2C + I3C SDR                |
-| **Mole Rojo**  | bench / compliance   | ECP5-45K class     | adds HDR-DDR + deep capture  |
-| **Mole Negro** | future certification | CertusPro-NX class | full MIPI compliance catalog |
+| SKU            | Tier                 | FPGA               | Scope                                       |
+|----------------|----------------------|--------------------|---------------------------------------------|
+| **Mole Verde** | pocket / per-dev     | iCE40 UP5K class   | I2C all modes + I3C SDR up to ~6 MHz SCL    |
+| **Mole Rojo**  | bench / compliance   | ECP5-45K class     | full-rate I3C SDR + HDR-DDR + deep capture  |
+| **Mole Negro** | future certification | CertusPro-NX class | full MIPI compliance catalog                |
 
 All three share one Scheme SDK, one bytecode format, one ISA, and
 one error-injection model.
@@ -65,7 +65,7 @@ FSM (`acceptLoad` -> `running` -> `draining`) gates `engine.start`,
 SPRAM read-port ownership, and the UART RX drain so the host can
 load a new program, the engine runs it to `HALT`, the drainer
 sweeps the result ring back over UART TX, and the cycle restarts.
-PLL (12 MHz -> 48 MHz) and SB_IO bypass-selectable for sim;
+PLL (12 MHz -> 24 MHz) and SB_IO bypass-selectable for sim;
 `MoleTopVerilog` ships `gen/MoleTop.v` synthesised under
 `useBlackBox = true`. End-to-end coverage via `sim-top` (loader
 + engine + drainer in a single Verilator compile). Bring-up

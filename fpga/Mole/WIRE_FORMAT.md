@@ -10,7 +10,7 @@ The wire format is **raw binary on the UART**. There is no ASCII
 escaping, no SLIP framing, no start-of-frame byte. Frames are
 delimited by **idle time** on the line (see §"Resync rule").
 
-UART settings: **2 000 000 baud, 8N1**, no flow control. The
+UART settings: **1 000 000 baud, 8N1**, no flow control. The
 iCEbreaker's FT2232H channel A is `/dev/ttyUSB0` on Linux and
 typically `COM3` or higher on Windows.
 
@@ -245,12 +245,12 @@ goes wrong --- bad length, bad CRC, UART RX framing/parity/overrun
 error --- the loader latches a fault, lights the red LED, and
 enters a **Resync** state in which it drops every incoming byte
 until the RX line has been continuously high for **at least two
-UART byte-times** (~20 bit periods, ~10 microseconds at 2 Mbaud).
+UART byte-times** (~20 bit periods, ~20 microseconds at 1 Mbaud).
 
 The host is therefore obligated to:
 
 1. **After any host-side abort or retransmit:** stop sending,
-   wait at least 10 microseconds (a safe round number is 1 ms),
+   wait at least 20 microseconds (a safe round number is 1 ms),
    then send the next frame from byte 0.
 2. **Between back-to-back frames:** the host SHOULD wait for the
    result drain to complete before sending the next program. If
@@ -347,7 +347,7 @@ def build_frame(words: list[int]) -> bytes:
 
 # Send it
 import serial
-port = serial.Serial("/dev/ttyUSB0", 2_000_000, timeout=1)
+port = serial.Serial("/dev/ttyUSB0", 1_000_000, timeout=1)
 port.write(build_frame([0x9000, 0x6000]))   # placeholder opcodes
 ```
 

@@ -1228,15 +1228,27 @@ debug instrumentation. SPRAM (1 Mbit = 128 KB) holds the bytecode
 program + result ring with no external flash. BRAM (120 Kbit ~ 15 KB)
 becomes a small scratch / prefetch buffer if needed.
 
-### Clocks (v0 / icebreaker)
+### Clocks (v0 / icebreaker --- Mole Verde)
 
-- 12 MHz crystal (on icebreaker) → PLL → ~48 MHz fabric.
-- Quarter-bit granularity: ~21 ns per quarter.
-- Max I3C bit rate: ~48 MHz / 4 = 12 MHz wire (matches I3C SDR spec
-  max of 12.5 MHz with a tiny margin).
-- Max I2C bit rate: way above any I2C mode.
+- 12 MHz crystal (on icebreaker) → PLL → 24 MHz fabric.
+- Quarter-bit granularity: ~42 ns per quarter (one fabric cycle).
+- Max I3C bit rate: ~24 MHz / 4 = 6 MHz wire (half the I3C SDR spec
+  max of 12.5 MHz, comfortably above the I2C ceiling and the
+  bus-speed at which the vast majority of in-the-field I3C devices
+  actually run).
+- Max I2C bit rate: way above any I2C mode (FM+ tops out at 1 MHz).
 - `pp-freq`, `od-freq`, `i2c-freq` are runtime divider words
   loaded via `LOAD_TIMING` --- one PLL, multiple bus speeds.
+- **Why 24 MHz, not 48 MHz**: first real synth on the UP5K SG48I
+  came in at Fmax ~28 MHz even after two rounds of register
+  retiming on the loader FSM critical path. Closing 48 MHz on this
+  part would be a multi-PR refactor of the result-ring drainer
+  plus the UART RX baud chain, with no guaranteed win on UP5K's
+  modest fabric speed (60--80 MHz nominal, much less for the wide
+  carry chains in this design). Mole Verde is positioned as the
+  pocket / per-dev tier; full-rate I3C SDR (12.5 MHz SCL) and
+  HDR-DDR remain Mole Rojo (ECP5-45K) territory by design. See
+  also §"Hardware tiers" and §"Risks and open questions" item 3.
 
 ### Clocks (v2 / ECP5-45K bench tier)
 
@@ -1404,7 +1416,7 @@ trace.
 
 | SKU                     | FPGA                     | I3C ceiling | I2C       | HDR-DDR     | Form factor                           | Target price |
 |-------------------------|--------------------------|-------------|-----------|-------------|---------------------------------------|--------------|
-| **Mole Verde** (pocket) | iCE40 UP5K-SG48          | 12 MHz SDR  | all modes | no          | icebreaker today; USB-stick PCB later | $299         |
+| **Mole Verde** (pocket) | iCE40 UP5K-SG48          | 6 MHz SDR   | all modes | no          | icebreaker today; USB-stick PCB later | $299         |
 | **Mole Rojo** (bench)   | ECP5-45F-CABGA381        | 25 MHz      | all modes | yes         | small custom PCB                      | $599         |
 | **Mole Negro** (future) | TBD (CertusPro-NX class) | per spec    | all modes | yes + HDR-T | rack-friendly                         | premium      |
 
@@ -1460,9 +1472,15 @@ substitute for the formal CTS lab.
    UP5K may land higher than 1800 LUTs. Mitigation: build the engine
    incrementally, measure after each block; UP5K has 3400 LUTs of
    headroom over the estimate.
-3. **iCE40 UP5K fabric speed**: 60--80 MHz routable in practice;
-   12 MHz I3C SDR ceiling is comfortable but HDR-DDR is out of reach
-   on this tier. Mitigation: HDR-DDR is bench-tier only by design.
+3. **iCE40 UP5K fabric speed**: nominally 60--80 MHz routable, but
+   wide carry chains and FSM next-state meshes routinely cap
+   real designs much lower. First synth of the Mole engine landed
+   at Fmax ~28 MHz; Mole Verde ships at **24 MHz fabric** (→ 6 MHz
+   I3C SDR ceiling) accordingly. HDR-DDR was always out of reach
+   on this tier; full-rate I3C SDR (12.5 MHz SCL) drops to Mole
+   Rojo (ECP5) by design --- see §"Clocks (v0)" for the
+   reasoning. Mitigation: Verde positioning as I2C + low-rate
+   I3C; bench-tier (Rojo) for full-rate SDR and HDR-DDR.
 4. **Async clock-stretching semantics**: `WAIT_ON SCL_HIGH, t`
    is the one "real-time, not pre-computed" operation in the
    engine. Need to specify cleanly how it composes with the
