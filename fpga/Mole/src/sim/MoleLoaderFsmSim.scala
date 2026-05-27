@@ -431,6 +431,7 @@ object MoleLoaderFsmSim extends App {
       good.updated(good.size - 1, (good.last ^ 0xff) & 0xff)
     }
     for (b <- bad) driveByte(dut, b)
+    dut.clockDomain.waitSampling(4)
     assert(mon.faultCount() == 1, "expected fault after bad CRC")
     assert(dut.io.inResync.toBoolean, "expected resync after bad CRC")
 
