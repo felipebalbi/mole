@@ -8,19 +8,19 @@ import spinal.lib._
   * with a debug read port that takes over the SPRAM read interface while the
   * engine is idle.
   *
-  * The smoke sim only needs to watch the bus drivers, so the smoke DUT does
-  * not expose a result-ring readback path. The full ISA sim needs to drain
-  * the ring (CAPTURE records, MARK records, HALT status word) to validate
-  * record-stream content, so this DUT adds a read mux:
+  * The smoke sim only needs to watch the bus drivers, so the smoke DUT does not
+  * expose a result-ring readback path. The full ISA sim needs to drain the ring
+  * (CAPTURE records, MARK records, HALT status word) to validate record-stream
+  * content, so this DUT adds a read mux:
   *
   *   - while `engine.done` is false: engine's `programReadCmd` /
   *     `programReadResp` drive the SPRAM read port verbatim.
-  *   - while `engine.done` is true: external `debugReadCmd` /
-  *     `debugReadResp` win arbitration. The test drives ring addresses
-  *     between programs and decodes the response stream into records.
+  *   - while `engine.done` is true: external `debugReadCmd` / `debugReadResp`
+  *     win arbitration. The test drives ring addresses between programs and
+  *     decodes the response stream into records.
   *
-  * Both consumers receive `readResp` regardless of who issued the read;
-  * the engine in idle ignores it.
+  * Both consumers receive `readResp` regardless of who issued the read; the
+  * engine in idle ignores it.
   *
   * The bus pads are again left as `master(MoleBus())` so individual tests can
   * stim them (`bus.sda.read` / `bus.scl.read`) to exercise WAIT_ON cond paths,
@@ -82,11 +82,10 @@ case class BitCycleEngineFullDut(cfg: MoleConfig) extends Component {
 
 /** Full per-opcode coverage for [[BitCycleEngineCore]].
   *
-  * One compile of [[BitCycleEngineFullDut]], many `doSim` runs. Each test
-  * loads a hand-crafted program, raises `start`, waits for halt, then either
-  * inspects the captured bus trace or drains the result ring through the
-  * debug read port to validate record-stream content and the HALT status
-  * word.
+  * One compile of [[BitCycleEngineFullDut]], many `doSim` runs. Each test loads
+  * a hand-crafted program, raises `start`, waits for halt, then either inspects
+  * the captured bus trace or drains the result ring through the debug read port
+  * to validate record-stream content and the HALT status word.
   *
   * Tests covered:
   *
@@ -284,7 +283,10 @@ object BitCycleEngineSim {
 
   private def haltAt(ring: Seq[Int], addr: Int): HaltWord = {
     val w = ring(addr - resultBase)
-    require((w >>> 14) == 0x3, s"word at $addr is not a HALT tag (=${w >>> 14})")
+    require(
+      (w >>> 14) == 0x3,
+      s"word at $addr is not a HALT tag (=${w >>> 14})"
+    )
     HaltWord(
       overflow = ((w >> 13) & 1) != 0,
       mismatch = ((w >> 12) & 1) != 0,
@@ -451,8 +453,8 @@ object BitCycleEngineSim {
     assert(!h.overflow, "MARK test unexpectedly overflowed")
   }
 
-  /** CAPTURE record: emit one EMIT_BIT with capture=1 against known SDA;
-    * verify a CAPTURE record lands at resultBase+2 with the right value.
+  /** CAPTURE record: emit one EMIT_BIT with capture=1 against known SDA; verify
+    * a CAPTURE record lands at resultBase+2 with the right value.
     */
   private def testCaptureRecord(): Unit =
     runTest("capture-record") { dut =>
@@ -518,8 +520,8 @@ object BitCycleEngineSim {
       assert(h.mismatch, "HALT mismatchAtHalt expected True, was False")
     }
 
-  /** BRANCH_ON MISMATCH following an EMIT_BIT that mismatched. Picks the
-    * "saw a mismatch" halt status.
+  /** BRANCH_ON MISMATCH following an EMIT_BIT that mismatched. Picks the "saw a
+    * mismatch" halt status.
     */
   private def testBranchOnMismatch(): Unit =
     runTest("branch-on-mismatch") { dut =>
@@ -552,8 +554,8 @@ object BitCycleEngineSim {
 
   /** LOAD_TIMING swap: load a fast divider into the i2c slot, then emit a bit
     * and measure SCL-low width. Without LOAD_TIMING the width would be ~24
-    * cycles (`2 * (12+1)` = 26 with reload-init slack); with a divider of 2
-    * it drops to `2 * (2+1)` = 6 cycles. The factor-of-4 difference is well
+    * cycles (`2 * (12+1)` = 26 with reload-init slack); with a divider of 2 it
+    * drops to `2 * (2+1)` = 6 cycles. The factor-of-4 difference is well
     * outside any slack window.
     */
   private def testLoadTiming(): Unit = runTest("load-timing") { dut =>
@@ -686,9 +688,9 @@ object BitCycleEngineSim {
       )
     }
 
-  /** Result-ring overflow: smallCfg has 32 result words. After Revision (2)
-    * and reserved HALT slot (1), 29 record words are writable. Each MARK is
-    * 3 words, so 9 MARKs use 27 words; a 10th MARK does not fit and sets
+  /** Result-ring overflow: smallCfg has 32 result words. After Revision (2) and
+    * reserved HALT slot (1), 29 record words are writable. Each MARK is 3
+    * words, so 9 MARKs use 27 words; a 10th MARK does not fit and sets
     * `resultOverflow`.
     */
   private def testRingOverflow(): Unit = runTest("ring-overflow") { dut =>

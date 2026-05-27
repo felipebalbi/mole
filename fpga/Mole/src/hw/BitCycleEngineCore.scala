@@ -23,37 +23,37 @@ import spinal.lib.fsm._
   * [[Revision.wordHi]] and the HALT status word into the result ring and
   * returns to `Idle`. Bus drives happen only in `EmitBit` / `EmitQuarter` /
   * `StretchScl`, all paced by [[QuarterBitTimer]] whose `reload` is muxed from
-  * a 4-entry [[LoadTiming]] register file selected by the active
-  * [[BusMode]]'s low 2 bits. The bus pads come from `Reg(Bool())`s at
-  * component scope so every transition is a single registered edge per
-  * `fpga/Mole/AGENTS.md` §"Bus-shaped FSM idiom".
+  * a 4-entry [[LoadTiming]] register file selected by the active [[BusMode]]'s
+  * low 2 bits. The bus pads come from `Reg(Bool())`s at component scope so
+  * every transition is a single registered edge per `fpga/Mole/AGENTS.md`
+  * §"Bus-shaped FSM idiom".
   *
   * ==Bus driver model==
   *
   * `sda*` and `scl*` driver regs hold whatever value was last latched for them.
   * Between bits (during `Fetch` / `FetchWait` / `Decode` / record-write
   * substates) the regs are not touched, so SCL stays at its `Q3=recessive`
-  * value through fetch overhead --- which is what an I3C / I2C receiver
-  * expects (SCL high between bits). On entry to `Idle` (after `HALT`), the
-  * regs are forced to all-off so the bus releases cleanly.
+  * value through fetch overhead --- which is what an I3C / I2C receiver expects
+  * (SCL high between bits). On entry to `Idle` (after `HALT`), the regs are
+  * forced to all-off so the bus releases cleanly.
   *
   * ==Quarter-bit pacing==
   *
   * The shared [[QuarterBitTimer]] is loaded on entry to `EMIT_BIT` /
   * `EMIT_QUARTER` / `STRETCH_SCL` / `WAIT_ON` and `enable`d while we are in
   * those states. The `reload` value is combinationally muxed from
-  * `timingRegs(busModeReg[1:0])`; switching `BUS_MODE` switches the next
-  * load's period without an extra opcode.
+  * `timingRegs(busModeReg[1:0])`; switching `BUS_MODE` switches the next load's
+  * period without an extra opcode.
   *
   * ==Result ring format (v0, pre-Phase-0)==
   *
   * The ring lives at `[resultBase, resultLimit]` where `resultLimit =
   * resultBase + resultWordCount - 1`. Layout:
   *
-  *   - `resultBase` / `resultBase + 1` --- 32-bit [[Revision]] (always
-  *     written first as part of the HALT tail).
-  *   - `resultBase + 2 ..= resultLimit - 1` --- record stream. Each record is
-  *     1 or 3 words tagged by the high 2 bits of word0.
+  *   - `resultBase` / `resultBase + 1` --- 32-bit [[Revision]] (always written
+  *     first as part of the HALT tail).
+  *   - `resultBase + 2 ..= resultLimit - 1` --- record stream. Each record is 1
+  *     or 3 words tagged by the high 2 bits of word0.
   *   - `resultLimit` --- reserved for the HALT status word. Always written,
   *     always last. Reserved exclusively so an overflowing record stream can
   *     never overwrite the HALT.
@@ -64,17 +64,16 @@ import spinal.lib.fsm._
   *   - `01`: reserved.
   *   - `10`: MARK (3 words). Word0: `[13:8] = 0`, `[7:0] = label`. Word1:
   *     `timestamp[15:0]`. Word2: `timestamp[31:16]`. Timestamp is a 32-bit
-  *     fabric-cycle counter starting at 0 on `io.start`; wraps at ~89.5 s @
-  *     48 MHz.
+  *     fabric-cycle counter starting at 0 on `io.start`; wraps at ~89.5 s @ 48
+  *     MHz.
   *   - `11`: HALT (1 word). `[13] = overflow`, `[12] = mismatchAtHalt`,
   *     `[11:8] = status`, `[7:0] = 0`.
   *
   * `mismatchAtHalt` is the final value of `MISMATCH_FLAG` at HALT entry --- it
-  * does not track "any mismatch ever seen" (since a passing compare clears
-  * the flag per spec). `overflow` latches True the first time the engine
-  * tried to write a record that would not fit before `resultLimit`; once set
-  * it stays set, and subsequent CAPTURE / MARK opcodes silently drop their
-  * writes.
+  * does not track "any mismatch ever seen" (since a passing compare clears the
+  * flag per spec). `overflow` latches True the first time the engine tried to
+  * write a record that would not fit before `resultLimit`; once set it stays
+  * set, and subsequent CAPTURE / MARK opcodes silently drop their writes.
   *
   * Status codes `0x0..0xC` are caller-defined via the [[Halt]] opcode's
   * `status` field. Codes `0xD..0xF` are reserved for engine traps:
