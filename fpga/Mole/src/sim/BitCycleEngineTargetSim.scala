@@ -242,27 +242,36 @@ object BitCycleEngineTargetSim {
       dut.io.start #= false
       var prevDriveLow = false
       var driveLowPulses = 0
+      var monitorStop = false
       val monitor = fork {
-        while (!dut.io.done.toBoolean) {
+        while (!dut.io.done.toBoolean && !monitorStop) {
           val now = dut.io.bus.sda.driveLow.toBoolean
           if (now && !prevDriveLow) driveLowPulses += 1
           prevDriveLow = now
           dut.clockDomain.waitSampling()
         }
       }
-      for (_ <- 0 until 8) controllerBit(dut, bitValue = true)
-      // DRIVE_BIT_ON_SCL phase 2 closes on the NEXT falling edge
-      // after the rising-edge sample. Provide one extra falling
-      // edge so the 8th bit can advance past phase 2 and the
-      // engine can refetch the HALT. The matching rising edge is
-      // not required (no more drive ops after).
-      sclLow(dut)
+      // Each DRIVE_BIT_ON_SCL is a 3-phase state machine that needs
+      // a dedicated falling edge for phase 0, then a rising edge
+      // for phase 1, then ANOTHER dedicated falling edge for phase
+      // 2. The closing falling of bit N cannot serve as the
+      // opening falling of bit N+1 because the engine's onEntry
+      // resets phase to 0 only after refetch, and by that point
+      // the 1-cycle observer.sclFalling pulse has already passed.
+      // So 8 bits need 8 (phase0 falling + rising) + 8 (phase2
+      // falling) = 16 fallings + 8 risings. Achieved by 2
+      // controllerBit calls per intended bit cell:
+      //   - 1st call: phase0 falling + phase1 rising
+      //   - 2nd call: phase2 falling + (extra rising, unused by
+      //     the engine since phase2 only watches for fallings).
+      for (_ <- 0 until 16) controllerBit(dut, bitValue = true)
       dut.io.bus.sda.read #= true
       dut.io.bus.scl.read #= true
       var c = 0
       while (!dut.io.done.toBoolean && c < 50000) {
         dut.clockDomain.waitSampling(); c += 1
       }
+      monitorStop = true
       monitor.join()
       assert(dut.io.done.toBoolean, "target drive: engine never halted")
       assert(
@@ -341,8 +350,9 @@ object BitCycleEngineTargetSim {
       dut.clockDomain.waitSampling(5)
       load(dut, program)
       var anySclDrive = false
+      var monitorStopA = false
       val monitor = fork {
-        while (!dut.io.done.toBoolean) {
+        while (!dut.io.done.toBoolean && !monitorStopA) {
           if (
             dut.io.bus.scl.driveLow.toBoolean ||
             dut.io.bus.scl.driveHigh.toBoolean
@@ -357,6 +367,7 @@ object BitCycleEngineTargetSim {
       while (!dut.io.done.toBoolean && c < 50000) {
         dut.clockDomain.waitSampling(); c += 1
       }
+      monitorStopA = true
       monitor.join()
       assert(dut.io.done.toBoolean, "target no-scl-drive: engine never halted")
       assert(
@@ -381,8 +392,9 @@ object BitCycleEngineTargetSim {
       dut.clockDomain.waitSampling(5)
       load(dut, program)
       var sawSclLow = false
+      var monitorStopB = false
       val monitor = fork {
-        while (!dut.io.done.toBoolean) {
+        while (!dut.io.done.toBoolean && !monitorStopB) {
           if (dut.io.bus.scl.driveLow.toBoolean) sawSclLow = true
           dut.clockDomain.waitSampling()
         }
@@ -394,6 +406,7 @@ object BitCycleEngineTargetSim {
       while (!dut.io.done.toBoolean && c < 50000) {
         dut.clockDomain.waitSampling(); c += 1
       }
+      monitorStopB = true
       monitor.join()
       assert(dut.io.done.toBoolean, "target stretch: engine never halted")
       assert(
@@ -468,8 +481,9 @@ object BitCycleEngineTargetSim {
 
       import OpenDrainBusSim._
       val done = scala.collection.mutable.Set[String]()
+      var monitorStopC = false
       val monitor = fork {
-        while (done.size < 2) {
+        while (done.size < 2 && !monitorStopC) {
           val a = Drive(
             dut.io.busA.sda.driveLow.toBoolean,
             dut.io.busA.sda.driveHigh.toBoolean
@@ -511,6 +525,7 @@ object BitCycleEngineTargetSim {
       while (done.size < 2 && c < 100000) {
         dut.clockDomain.waitSampling(); c += 1
       }
+      monitorStopC = true
       monitor.join()
       assert(done.size == 2, s"engines did not halt (done=$done c=$c)")
 
