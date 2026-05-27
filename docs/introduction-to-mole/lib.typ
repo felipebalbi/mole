@@ -48,10 +48,14 @@
 
 #let notes-mode = sys.inputs.at("notes", default: "false") == "true"
 
+// `note(body)` is a no-op in slide mode; in notes mode (--input
+// notes=true) it renders the body as a faint italic block at the
+// bottom of the slide. We deliberately don't emit pdfpc metadata
+// here because polylux's speaker-note accepts only strings or raw
+// blocks, and our notes carry rich content (#emph, links, code).
+// If pdfpc presenter view is wanted later, add a separate raw-only
+// helper.
 #let note(body) = {
-  // Always emit a pdfpc metadata note so pdfpc presenter view picks
-  // it up regardless of the build mode.
-  toolbox.pdfpc.speaker-note[#body]
   if notes-mode {
     place(
       bottom + left,
@@ -319,24 +323,28 @@
 // Try-it slide: poses a thought-experiment and asks the audience to
 // pause before the answer lands on the next slide. The prompt is the
 // content; `hint` is an optional faint nudge under it.
+//
+// Both the "answer on the next slide" banner and the chrome footer
+// are anchored with #place so a long prompt can't push them onto a
+// new page (polylux auto-paginates content that overflows).
 #let try-it-slide(prompt, hint: none, kicker-text: "Try it") = slide[
   #slide-title("Pause and think.", kicker-text: kicker-text)
-  #v(0.6em)
-  #box(width: 100%, fill: bg-tint, inset: 24pt, radius: 6pt)[
-    #text(font: font-serif, size: 22pt, fill: ink)[#prompt]
+  #v(0.4em)
+  #box(width: 100%, fill: bg-tint, inset: 18pt, radius: 6pt)[
+    #text(font: font-serif, size: 20pt, fill: ink)[#prompt]
     #if hint != none [
-      #v(0.8em)
-      #text(font: font-serif, size: 14pt, style: "italic", fill: muted)[
+      #v(0.6em)
+      #text(font: font-serif, size: 13pt, style: "italic", fill: muted)[
         Hint: #hint
       ]
     ]
   ]
-  #v(0.8em)
-  #align(center)[
-    #text(font: font-sans, size: 12pt, fill: muted-light, tracking: 3pt)[
+  #place(
+    bottom + center, dy: -36pt,
+    text(font: font-sans, size: 12pt, fill: muted-light, tracking: 3pt)[
       #upper("answer on the next slide")
-    ]
-  ]
+    ],
+  )
   #chrome()
 ]
 

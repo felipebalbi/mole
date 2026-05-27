@@ -27,14 +27,11 @@
   text(fill: ink, it),
 )
 
-#include "chapters/00-cover.typ"
-#include "chapters/01-problem.typ"
+#include "chapters/00-promise.typ"
+#include "chapters/01-the-problem.typ"
 #include "chapters/02-architecture.typ"
-#include "chapters/03-quarter-bits.typ"
-#include "chapters/04-isa-tour.typ"
-#include "chapters/05-moleasm-syntax.typ"
-#include "chapters/06-worked-example-i2c.typ"
-#include "chapters/07-worked-example-glitch.typ"
-#include "chapters/08-results-ring.typ"
-#include "chapters/09-tooling.typ"
-#include "chapters/10-roadmap.typ"
+#include "chapters/03-timing.typ"
+#include "chapters/04-isa-and-moleasm.typ"
+#include "chapters/05-first-test.typ"
+#include "chapters/06-breaking-it.typ"
+#include "chapters/07-where-this-goes.typ"
