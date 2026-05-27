@@ -57,12 +57,23 @@ tools vs. `no_std` Pico firmware); they will stay separate.
 
 ## Status
 
-Phase 0 complete --- foundational SpinalHDL blocks under
-[`fpga/Mole/`](./fpga/Mole/): `MoleConfig`, `MoleBus`, UART
-(`UartConfig` / `BaudGenerator` / `RxSync` / `UartTx` / `UartRx`),
-and `SpramController`. Phase 1 in progress: the 16-bit
-instruction encoding (`Instruction.scala` + `InstructionSim`) is
-stable. The `BitCycleEngineCore` FSM lands next. See
+Phase 1 complete --- the `BitCycleEngineCore` FSM under
+[`fpga/Mole/`](./fpga/Mole/) decodes the full controller-side ISA
+(`EMIT_BIT` / `EMIT_QUARTER` / `STRETCH_SCL` / `WAIT_ON` / `JMP` /
+`BRANCH_ON` / `SET_BUS_MODE` / `LOAD_TIMING` / `MARK` / `HALT`)
+with quarter-bit pacing, four `LOAD_TIMING`-addressable divider
+slots, sticky flag set (MISMATCH / TIMEOUT / START / STOP), a
+sync'd bus observer, and a result-ring writer (`Revision` + record
+stream + reserved `HALT` slot at `resultLimit`). The
+target-role opcodes (`SAMPLE_BIT_ON_SCL` / `DRIVE_BIT_ON_SCL`)
+and the four v0.5-reserved opcode slots all trap to `HALT` status
+`0xF`. Coverage: `sim-config`, `sim-opendrain`, eight UART block
+sims + `sim-uart` loopback, `sim-spram`, `sim-isa`,
+`sim-engine-smoke` (per-cycle bus-driver trace under `i3c-OD` vs
+`i3c-PP`), and `sim-engine-full` (17 named tests covering every
+opcode + the trap paths + ring overflow). Phase 0 (`MoleConfig`,
+`MoleBus`, UART, `SpramController`) and Phase 1 are landed; Phase
+2 is `MoleTop` integration + Verilog generation. See
 **ROADMAP.md §Phased plan** and
 [`fpga/Mole/TODO.md`](./fpga/Mole/TODO.md) for current
 bring-up state.
