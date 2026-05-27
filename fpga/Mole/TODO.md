@@ -47,6 +47,8 @@ visible contract. See `../../ROADMAP.md` §"Layer 0" and
 - [x] **Step 14 --- `MoleTopSim`.** End-to-end Verilator sim under one `MoleTopSimDut` compile (sim-side `UartTx` / `UartRx` so the host pushes / pops bytes via Spinal Streams instead of bit-banging the wire). 4 cases: short-halt round-trip (HALT word + Revision asserts), bus-toggle (SDA driveLow + release observed during execution), bad-CRC recovery (loaderLoaded never pulses, engineDone never goes low, fault LED lights; then a good frame loads cleanly after the resync gap), back-to-back frames (phase FSM cycles cleanly twice). Small test config (`programWordCount=16`, `resultRingByteCount=32`) keeps each case under ~50 K cycles.
 - [x] **Step 15 --- `MoleTopVerilog`.** Canonical Verilog generation entrypoint. `useBlackBox = true` so yosys infers SB_PLL40_PAD + SB_IO as hard cells; `defaultClockDomainFrequency = 24 MHz` so derived dividers infer the right size. Output at `gen/MoleTop.v`; gitignored via `.gitignore`'s per-project rule.
 - [x] **Step 16 --- Flashable bitstream + synth chain.** `make gen` / `make all` / `make flash` enabled end-to-end. `nextpnr --freq 12` bumped to `--freq 24` (the actual fabric clock after the PLL; originally `--freq 48`, retargeted to 24 MHz after the first real synth on UP5K SG48I came in at Fmax ~28 MHz --- see `MoleConfig.scala` and ROADMAP §"Clocks" for the rationale); timing now reports against the real budget. Bring-up procedure (build, flash, talk, three smoke programs) documented in `BRINGUP.md`.
+- [x] **Step 16 --- Flashable bitstream + synth chain.** `make gen` / `make all` / `make flash` enabled end-to-end. `nextpnr --freq 12` bumped to `--freq 24` (the actual fabric clock after the PLL; originally `--freq 48`, retargeted to 24 MHz after the first real synth on UP5K SG48I came in at Fmax ~28 MHz --- see `MoleConfig.scala` and ROADMAP §"Clocks" for the rationale); timing now reports against the real budget. Bring-up procedure (build, flash, talk, three smoke programs) documented in `BRINGUP.md`.
+- [x] **Step 19 --- `SAMPLE_BIT_ON_SCL` + `DRIVE_BIT_ON_SCL` (target role).** New `EngineRole` sealed trait + `MoleConfig.role` compile-time toggle (Controller default; Target opt-in). Engine FSM grows two Scala-gated states plus an external-SCL edge-detector factor-out (`BusObserver`). `EMIT_BIT` in target role releases SCL. New `BitCycleEngineTargetSim` covers six cases under two compiles; DAA arbitration uses two engines on a sim-side wired-AND bus.
 - [x] **Step 20 --- `LOAD_LOOP` + `DEC_BRANCH` (ISA ergonomics).** Two new v0 opcodes claim reserved slots 0xC / 0xD, displacing `WAIT_ADDRESSED` (lowest-priority of the v0.5 reservations) and `MISMATCH_CLEAR` (subsumed by the still-reserved `FLAG_CLEAR` at 0xE). Two 8-bit loop-counter registers (`LCR0`, `LCR1`) enable bounded loops with one level of nesting, no scratch-slot spill. Wire encoding `[15:12]op [11]reg [10:8]reserved=0 [7:0]imm-or-offset`; the 3-bit pad reserves room for a 16-LCR widening with no wire-format break. Out of declared phase order (lands ahead of Steps 17--19 which are hardware-bring-up gated). See Phase 5 below for the closeout block.
 
 ---
@@ -1097,18 +1099,65 @@ take over from hand-encoded programs.
 
 ---
 
-## 🔲 Phase 4 --- Target role
+## ✅ Phase 4 --- Target role
 
-### 🔲 Step 19 --- `SAMPLE_BIT_ON_SCL` + `DRIVE_BIT_ON_SCL`
+### ✅ Step 19 --- `SAMPLE_BIT_ON_SCL` + `DRIVE_BIT_ON_SCL`
 
-**Goal:** complete the target-role half of the ISA. After this
-step the engine can act as either I2C/I3C controller (using
-`EMIT_BIT` / `EMIT_QUARTER`) or target (using `SAMPLE_BIT_ON_SCL`
-/ `DRIVE_BIT_ON_SCL`), selected by a config bit. The two
-opcodes are deliberately placed in Phase 4 because they need a
-working external controller to test against --- the MCXA
-bring-up from Step 18 doubles as that controller for sim and
-silicon.
+**What landed:**
+
+- **Files:**
+  - `src/hw/EngineRole.scala` (new): sealed trait + Controller /
+    Target case objects.
+  - `src/hw/MoleConfig.scala`: new `role` field defaulting to
+    Controller.
+  - `src/hw/BusObserver.scala` (new): the existing two-FF
+    synchroniser + edge detectors factored out of the engine
+    body into a reusable Area. Adds `sclFalling` / `sclRising`
+    that the target-role states pace off.
+  - `src/hw/BitCycleEngineCore.scala`: Scala-gated SCL release
+    on `EMIT_BIT` in target role; two new FSM states
+    (`sampleBitOnSclState`, `driveBitOnSclState`) wired in
+    behind `if (cfg.role == EngineRole.Target)` so
+    controller-role builds elaborate bit-identically.
+  - `src/sim/BitCycleEngineTargetDut.scala` (new):
+    role=Target sim DUT.
+  - `src/sim/BitCycleEngineTwoTargetDut.scala` (new):
+    two-engine DUT for the DAA arbitration test.
+  - `src/sim/BitCycleEngineTargetSim.scala` (new): six tests.
+  - `Makefile`: `sim-engine-target` target added.
+  - `mole-asm/book/src/target-role.md` (new): tutorial chapter.
+
+- **Divergence from the hint:**
+  - Used a Scala sealed trait `EngineRole` instead of a runtime
+    config bit. Per AGENTS' compile-time-toggle idiom, a runtime
+    register would keep both halves of the FSM present and only
+    gate them.
+  - The hint suggested driving the sim bus from a second engine
+    configured as controller. Used a sim-side external-
+    controller stim (controllerBit / sclLow / sclHigh) for the
+    first five tests instead; simpler, no extra DUT compile.
+    Test six (DAA) still uses two engines on a wired-AND.
+  - Did not add a clock-stretching cross-test (target stretches
+    SCL while controller waits). Covered structurally by
+    `target-stretch-drives-scl-low`. A full stretch-acknowledge
+    handshake belongs in the eventual cross-engine sim and is
+    deferred.
+
+- **Sim notes:** `BitCycleEngineTargetSim` has six tests run
+  under two compiles. First five share `BitCycleEngineTargetDut`
+  (single engine, sim-side controller stim). Sixth uses
+  `BitCycleEngineTwoTargetDut` and resolves wired-AND each
+  cycle via `OpenDrainBusSim.wiredAnd`.
+
+- **Makefile:** `sim-engine-target` target added (parallel to
+  `sim-engine-full`); listed in `sim:` aggregate and `.PHONY`.
+
+- **Bring-up gate (still open):** real silicon target-role
+  bring-up against the MCXA controller from Step 18. Deferred
+  to PR2 in the post-RTS/CTS plan, which is gated on a separate
+  hardware-bench session.
+
+**Original hint preserved below.**
 
 **Files:** extend `BitCycleEngineCore.scala`, add
 `src/sim/TargetRoleSim.scala`.

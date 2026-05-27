@@ -9,6 +9,7 @@
 - [Syntax](./syntax.md)
 - [Opcodes](./opcodes.md)
 - [Bounded Loops](./bounded-loops.md)
+- [Target Role](./target-role.md)
 - [Worked Examples](./worked-examples.md)
 - [Patterns](./patterns.md)
 
