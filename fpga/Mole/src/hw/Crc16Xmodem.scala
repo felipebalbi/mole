@@ -15,8 +15,8 @@ import spinal.lib._
   * The Component absorbs at most one byte per fabric cycle and holds the
   * running CRC in a registered output. The combinational byte-update step
   * unrolls all eight bit iterations at elaboration time --- about eight levels
-  * of cascaded XOR/MUX, which fits comfortably under the 24 MHz fabric
-  * timing budget on the iCE40 UP5K (Mole Verde).
+  * of cascaded XOR/MUX, which fits comfortably under the 24 MHz fabric timing
+  * budget on the iCE40 UP5K (Mole Verde).
   *
   * `MoleLoaderFsm` instantiates exactly one of these. The loader asserts
   * `io.init` during `Idle` and `Resync` (clearing the register to 0x0000) and

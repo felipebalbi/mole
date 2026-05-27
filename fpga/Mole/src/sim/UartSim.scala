@@ -86,8 +86,8 @@ case class UartLoopbackDut(cfg: UartConfig) extends Component {
   *      which fits comfortably in the 24-bit DDS at 24 MHz fabric (`phaseInc ≈
   *      11_184_811 = 0xAAA_AAB`, well below the 2^24 ceiling). iCEBreaker's
   *      FT2232H supports up to 12 Mbaud, so 1 Mbaud has plenty of host-side
-  *      headroom; the engine is throttled by the fabric clock long before
-  *      UART becomes the bottleneck.
+  *      headroom; the engine is throttled by the fabric clock long before UART
+  *      becomes the bottleneck.
   *
   * Coverage at each config:
   *   - Single-byte round trip across a representative pattern set (`0x00`,

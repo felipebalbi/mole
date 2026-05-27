@@ -21,8 +21,8 @@ import spinal.core._
   * For 12 MHz -> 24 MHz the values below give F_pllout = 12 * 32 / (1 * 16) =
   * 24 MHz, F_pfd = 12 MHz. FILTER_RANGE = 1 follows the datasheet's loop-filter
   * table for F_pfd in (7, 17] MHz. The VCO ladder (DIVF = 31) is unchanged from
-  * the original 48 MHz recipe — only the post-divider DIVQ moves from 3 (÷8)
-  * to 4 (÷16), so the loop-filter geometry stays valid.
+  * the original 48 MHz recipe — only the post-divider DIVQ moves from 3 (÷8) to
+  * 4 (÷16), so the loop-filter geometry stays valid.
   *
   *   - DIVR = 0 reference divider; F_pfd = F_ref / (DIVR + 1)
   *   - DIVF = 31 feedback divider; multiplies up by 32 (VCO at 384 MHz)
@@ -62,14 +62,14 @@ import spinal.core._
   *
   * Why 24 MHz and not 48 MHz: first real synth on the UP5K SG48I missed timing
   * at 48 MHz (Fmax ~28.4 MHz after two rounds of register retiming on the
-  * loader FSM critical path). Closing 48 MHz on this part would take a
-  * multi-PR refactor of the result-ring drainer and the UART RX baud chain
-  * with no guaranteed win on UP5K's modest fabric. Mole Verde is the
-  * pocket / per-dev tier; 24 MHz fabric still supports I2C all modes and I3C
-  * up to ~6 MHz SCL (quarter-bit-clock math: 24 MHz / 4 = 6 MHz max bit
-  * rate), which covers the bulk of compliance tests Verde is positioned for.
-  * Full-rate I3C SDR (12.5 MHz SCL) and HDR-DDR are Mole Rojo (ECP5) territory
-  * by design — see ROADMAP §"Hardware tiers".
+  * loader FSM critical path). Closing 48 MHz on this part would take a multi-PR
+  * refactor of the result-ring drainer and the UART RX baud chain with no
+  * guaranteed win on UP5K's modest fabric. Mole Verde is the pocket / per-dev
+  * tier; 24 MHz fabric still supports I2C all modes and I3C up to ~6 MHz SCL
+  * (quarter-bit-clock math: 24 MHz / 4 = 6 MHz max bit rate), which covers the
+  * bulk of compliance tests Verde is positioned for. Full-rate I3C SDR (12.5
+  * MHz SCL) and HDR-DDR are Mole Rojo (ECP5) territory by design — see ROADMAP
+  * §"Hardware tiers".
   *
   * @param useBlackBox
   *   When true (default), instantiate the SB_PLL40_PAD primitive. When false,

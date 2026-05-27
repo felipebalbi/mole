@@ -44,12 +44,15 @@ object MoleConfigSim extends App {
     * target — for example I3C OD 4 MHz at 24 MHz fabric truncates the 1.5-
     * cycle divider to 1 and overshoots to 6 MHz (+50 %). The Phase-0 buses we
     * actually need on Mole Verde (I2C SM/FM/FM+, I3C OD up to 2 MHz) all fall
-    * inside the band; the asserter is what catches a future fabric change
-    * (or a new bus target) that silently warps a bus speed.
-    * Returns the divider for the `println` log line.
+    * inside the band; the asserter is what catches a future fabric change (or a
+    * new bus target) that silently warps a bus speed. Returns the divider for
+    * the `println` log line.
     */
-  def auditBus(label: String, bitHz: HertzNumber, errTolPct: Double = 5.0)
-      : Int = {
+  def auditBus(
+      label: String,
+      bitHz: HertzNumber,
+      errTolPct: Double = 5.0
+  ): Int = {
     val qHz = quarterRate(bitHz)
     val div = cfg.quarterPeriodCyclesFor(qHz)
     val achieved = cfg.fabricFreqHz.toBigDecimal / div

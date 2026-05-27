@@ -18,17 +18,17 @@ import spinal.core._
   *
   * @param fabricFreqHz
   *   Post-PLL fabric clock. v0 default is 24 MHz on the iCE40 UP5K (Mole
-  *   Verde). The original 48 MHz target was abandoned after first synth on
-  *   the UP5K SG48I came in at Fmax ~28.4 MHz even after two rounds of
-  *   register-retiming the loader FSM critical path; closing 48 MHz would be
-  *   a multi-PR refactor with no guarantee on the part. Mole Verde's
-  *   positioning (pocket / per-dev, I2C all modes + I3C OD up to ~6 MHz SCL)
-  *   makes 24 MHz comfortable; full-rate I3C SDR (12.5 MHz SCL) and HDR-DDR
-  *   are Mole Rojo territory by design — see ROADMAP §"Hardware tiers" and
-  *   §"Clocks". ROADMAP §"Quarter-bit timing" notes the fabric clock IS the
-  *   quarter-bit clock — every state in the bit FSM advances on a
-  *   quarter-bit boundary, never sub-quarter. Type is `HertzNumber` (not
-  *   `Int`) so the type system catches Hz vs MHz mismatches at elaboration.
+  *   Verde). The original 48 MHz target was abandoned after first synth on the
+  *   UP5K SG48I came in at Fmax ~28.4 MHz even after two rounds of
+  *   register-retiming the loader FSM critical path; closing 48 MHz would be a
+  *   multi-PR refactor with no guarantee on the part. Mole Verde's positioning
+  *   (pocket / per-dev, I2C all modes + I3C OD up to ~6 MHz SCL) makes 24 MHz
+  *   comfortable; full-rate I3C SDR (12.5 MHz SCL) and HDR-DDR are Mole Rojo
+  *   territory by design — see ROADMAP §"Hardware tiers" and §"Clocks". ROADMAP
+  *   §"Quarter-bit timing" notes the fabric clock IS the quarter-bit clock —
+  *   every state in the bit FSM advances on a quarter-bit boundary, never
+  *   sub-quarter. Type is `HertzNumber` (not `Int`) so the type system catches
+  *   Hz vs MHz mismatches at elaboration.
   *
   * @param quarterPeriodCyclesReset
   *   Power-on default for the quarter-bit divider, in fabric cycles.
@@ -72,9 +72,9 @@ import spinal.core._
   *   at 16× would overflow it outright — both are rejected by the
   *   `baudRate * oversample < clkFreqHz` guard in [[UartConfig]]. 1 Mbaud
   *   easily streams ring-buffer drain traffic without throttling the engine
-  *   (worst-case 8 KiB program load at 1 Mbaud × 10 bits/byte = ~80 ms).
-  *   Mole Rojo (ECP5, faster fabric) will revisit the production baud
-  *   default; the engine itself imposes no upper bound here.
+  *   (worst-case 8 KiB program load at 1 Mbaud × 10 bits/byte = ~80 ms). Mole
+  *   Rojo (ECP5, faster fabric) will revisit the production baud default; the
+  *   engine itself imposes no upper bound here.
   */
 case class MoleConfig(
     fabricFreqHz: HertzNumber =
