@@ -67,9 +67,8 @@ python mole-asm.py [-h] [--frame] [-o OUT] INPUT.moleasm
 - JMP, SET_BUS_MODE, STRETCH_SCL: single positional arg.
 - BRANCH_ON / JMP targets: label name OR raw number.
 - `expect=X` (default) cannot be combined with `mask=1` (contradictory).
-- Reserved-v0.5 mnemonics (WAIT_ADDRESSED, MISMATCH_CLEAR,
-  FLAG_CLEAR, CAPTURE_RUN) are refused --- use `.dw` to inject the
-  raw 16-bit word.
+- Reserved-v0.5 mnemonics (FLAG_CLEAR, CAPTURE_RUN) are refused
+  --- use `.dw` to inject the raw 16-bit word.
 
 ## Directives
 

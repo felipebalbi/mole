@@ -119,25 +119,40 @@ Three rules that make this pattern bullet-proof:
 
 ## Bounded retry loops
 
+The loop counter pair (`lcr0` and `lcr1`) gives you a real
+hardware iteration counter. Prime it with `LOAD_LOOP`, do the
+work, end with `DEC_BRANCH` back to the start:
+
 ```text
 .equ retry_limit, 3
-.equ slot_idx,    0       ; placeholder; you would track this off-chip
-; ...
-loop:
-    ; ... do one attempt ...
-    EMIT_BIT      tx=hiz expect=0 mask=1 capture=1
-    BRANCH_ON     NOT_MISMATCH, done
-    ; NB: there is no counter in the engine; retry counts are encoded
-    ; by laying out the attempts in the source.
-    BRANCH_ON     ALWAYS, loop
+
+        LOAD_LOOP     lcr0, retry_limit
+attempt:
+        ; ... do one attempt ...
+        EMIT_BIT      tx=hiz expect=0 mask=1 capture=1
+        BRANCH_ON     NOT_MISMATCH, done    ; success: skip the back-edge
+        DEC_BRANCH    lcr0, attempt          ; failure: count down, retry
+        ; fall through here when retries are exhausted
+        HALT          status=1
 done:
-    HALT
+        HALT          status=0
 ```
 
-The engine has **no general-purpose registers**, so a counted retry
-loop is genuinely impossible at the engine level: you express it by
-unrolling. For larger counts, lean on `JMP` and on layering above
-moleasm.
+Two notes:
+
+1. `DEC_BRANCH` decrements *before* the comparison and back-edges
+   while the result is non-zero, so `LOAD_LOOP r, N` runs the
+   loop body exactly `N` times before falling through.
+2. `DEC_BRANCH` does not touch any sticky flag, so a
+   `BRANCH_ON MISMATCH` *inside* the loop still observes the
+   most recent capture's mismatch (not a stale one from an
+   earlier iteration's `DEC_BRANCH`).
+
+For nested loops, use both registers: outer on `lcr1`, inner on
+`lcr0`. The [Bounded loops](./bounded-loops.md) chapter walks
+through a worked nested example. Beyond two levels of nesting, or
+when you need more than 255 iterations, fall back to manual
+unrolling or layer above moleasm.
 
 ## Capture-only reads
 

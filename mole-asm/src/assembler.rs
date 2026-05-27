@@ -837,12 +837,7 @@ mod tests {
 
     #[test]
     fn reserved_v05_mnemonic_rejected() {
-        for m in [
-            "WAIT_ADDRESSED",
-            "MISMATCH_CLEAR",
-            "FLAG_CLEAR",
-            "CAPTURE_RUN",
-        ] {
+        for m in ["FLAG_CLEAR", "CAPTURE_RUN"] {
             let err = assemble(&format!("{m}\n"), "<t>").unwrap_err();
             assert_eq!(err_kind(&err), Some(Kind::Lex), "mnemonic {m}");
         }

@@ -17,13 +17,14 @@ Status: **Phase 2 done** --- end-to-end UART loader -> bit engine
 ## What this is
 
 A SpinalHDL implementation of Layer 0 of the Mole architecture: a
-small, register-mapped engine that executes a **12-opcode ISA**
+small, register-mapped engine that executes a **14-opcode ISA**
 (`EMIT_BIT`, `EMIT_QUARTER`, `STRETCH_SCL`, `WAIT_ON`,
 `SET_BUS_MODE`, `SAMPLE_BIT_ON_SCL`, `DRIVE_BIT_ON_SCL`, `JMP`,
-`BRANCH_ON`, `HALT`, `MARK`, `LOAD_TIMING`; four reserved opcode
-slots) and drives SDA / SCL with quarter-bit-resolution timing.
-Per-bit / per-quarter drive is a bus-agnostic 2-bit `tx_symbol`
-(`dominant` / `recessive` / `hiz` / reserved) decoded against the
+`BRANCH_ON`, `HALT`, `MARK`, `LOAD_TIMING`, `LOAD_LOOP`,
+`DEC_BRANCH`; two reserved opcode slots) and drives SDA / SCL
+with quarter-bit-resolution timing. Per-bit / per-quarter drive
+is a bus-agnostic 2-bit `tx_symbol` (`dominant` / `recessive` /
+`hiz` / reserved) decoded against the
 active `BUS_MODE` register --- the engine has zero protocol
 knowledge. The same engine plays controller (engine drives SCL)
 or target (engine slaves to external SCL via `SAMPLE_BIT_ON_SCL`
