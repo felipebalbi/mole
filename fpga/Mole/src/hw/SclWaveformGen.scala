@@ -13,7 +13,7 @@ import spinal.core._
   * actively driven under PP class) --- the actual electrical
   * realization is the symbol decoder's problem, not this block's.
   *
-  * Returning a `TxSymbol.E` (and not a `(driveLow, driveHigh)` pair)
+  * Returning a `TxSymbol` craft (and not a `(driveLow, driveHigh)` pair)
   * is deliberate: the engine routes this output through the shared
   * `SymbolDecoder` against the current `BUS_MODE`, so the Q2/Q3
   * high-half automatically becomes OD-release under `i2c` / `i3c-OD`
@@ -40,7 +40,7 @@ object SclWaveformGen {
     * Returns a fresh `TxSymbol` craft on every call --- consumers wire
     * it directly into the `SymbolDecoder`.
     */
-  def apply(quarterIndex: UInt): TxSymbol.E = {
+  def apply(quarterIndex: UInt): SpinalEnumCraft[TxSymbol.type] = {
     require(
       quarterIndex.getWidth >= 2,
       s"SclWaveformGen quarterIndex must be >= 2 bits wide " +

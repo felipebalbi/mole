@@ -34,7 +34,7 @@ object BusModeOps {
     * future re-ordering of the enum declaration (the wire encoding
     * stays locked, but the SpinalEnumElement `.position` does not).
     */
-  def isPpClass(busMode: BusMode.E): Bool =
+  def isPpClass(busMode: SpinalEnumCraft[BusMode.type]): Bool =
     (busMode === BusMode.i3cPp) || (busMode === BusMode.hdrDdr)
 }
 
@@ -92,7 +92,10 @@ object SymbolDecoder {
     * `Bool`s; the caller is expected to `:=` them into registered pad
     * drivers per `fpga/Mole/AGENTS.md` §"Bus-shaped FSM idiom".
     */
-  def apply(txSymbol: TxSymbol.E, busMode: BusMode.E): SymbolDrive = {
+  def apply(
+      txSymbol: SpinalEnumCraft[TxSymbol.type],
+      busMode: SpinalEnumCraft[BusMode.type]
+  ): SymbolDrive = {
     val driveLow = Bool()
     val driveHigh = Bool()
 
