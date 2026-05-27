@@ -265,23 +265,26 @@ case class MoleLoaderFsm(
     }
 
     // ---------------- writeWord ----------------------------------------------
-    // Offer the assembled word to SPRAM. abortNow short-circuits to resync
-    // without driving programWrite, so a UART error during the stall does
-    // not let one corrupt word land in SPRAM.
+    // Offer the assembled word to SPRAM. The current word's bytes have
+    // already been validated (any rxErr on lenLo/Hi/wordLo/Hi aborted us
+    // before we got here), so we always complete the write. If a NEW byte
+    // arrives during the SPRAM stall with rxErr set, it sits on the bus
+    // unread (rx.ready=False here) and errorLatch picks up the pulse; the
+    // next consuming state (wordLoState or crcLoState) sees errorLatch and
+    // aborts cleanly. This guarantees a clean word that's already mid-write
+    // lands in SPRAM and only the *next* word is rejected.
+    //
+    // The acceptRx-drop catch-all in `always {...}` still fires here, so an
+    // external phase change does interrupt the stall.
     val writeWordState: State = new State {
       whenIsActive {
-        when(abortNow) {
-          io.fault := True
-          goto(resyncState)
-        } otherwise {
-          io.programWrite.valid := True
-          when(io.programWrite.fire) {
-            when(wordIndex + 1 === frameLen.resize(wordIndexWidth bits)) {
-              goto(crcLoState)
-            } otherwise {
-              wordIndex := wordIndex + 1
-              goto(wordLoState)
-            }
+        io.programWrite.valid := True
+        when(io.programWrite.fire) {
+          when(wordIndex + 1 === frameLen.resize(wordIndexWidth bits)) {
+            goto(crcLoState)
+          } otherwise {
+            wordIndex := wordIndex + 1
+            goto(wordLoState)
           }
         }
       }
