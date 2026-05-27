@@ -4,9 +4,10 @@ import spinal.core._
 import spinal.core.sim._
 import spinal.lib._
 
-/** Target-role coverage for [[BitCycleEngineCore]]. Five tests run
-  * against a single [[BitCycleEngineTargetDut]]; the DAA arbitration
-  * test (sixth) lands in a follow-up commit.
+/** Target-role coverage for [[BitCycleEngineCore]]. Six tests.
+  * Five share one [[BitCycleEngineTargetDut]] compile; the DAA
+  * arbitration test uses [[BitCycleEngineTwoTargetDut]] with a
+  * sim-side wired-AND model.
   *
   * Run: sbt "runMain mole.BitCycleEngineTargetSim"
   */
@@ -387,6 +388,146 @@ object BitCycleEngineTargetSim {
       )
     }
 
+  /** I3C DAA arbitration: two target engines on one wired-AND bus
+    * drive competing PID bits. The "lower-PID" target drives
+    * dominant, the "higher-PID" drives recessive. Wired-AND reads
+    * low; the recessive-driving target sees mismatch.
+    */
+  private def testTargetDaaArbitration(): Unit = {
+    val compiled2 = SimConfig.withWave
+      .addSimulatorFlag("--x-assign")
+      .addSimulatorFlag("0")
+      .addSimulatorFlag("--x-initial")
+      .addSimulatorFlag("0")
+      .compile(BitCycleEngineTwoTargetDut(cfg))
+
+    println("--- BitCycleEngineTargetSim: target-daa-arbitration ---")
+    compiled2.doSim("target-daa-arbitration") { dut =>
+      val progLow = Seq(
+        setMode(BusMode.i2c),
+        driveBit(
+          TxSymbol.dominant,
+          expect = false,
+          mask = true,
+          capture = false
+        ),
+        halt(0)
+      )
+      val progHigh = Seq(
+        setMode(BusMode.i2c),
+        driveBit(
+          TxSymbol.recessive,
+          expect = true,
+          mask = true,
+          capture = false
+        ),
+        halt(0)
+      )
+      dut.clockDomain.forkStimulus(period = 10)
+      dut.io.startA #= false
+      dut.io.startB #= false
+      dut.io.loaderWriteA.valid #= false
+      dut.io.loaderWriteB.valid #= false
+      dut.io.debugReadCmdA.valid #= false
+      dut.io.debugReadCmdB.valid #= false
+      dut.io.busA.sda.read #= true
+      dut.io.busB.sda.read #= true
+      dut.io.busA.scl.read #= true
+      dut.io.busB.scl.read #= true
+      dut.clockDomain.waitSampling(5)
+
+      def writeLoader(
+          stream: Stream[SpramWriteCmd],
+          program: Seq[Int]
+      ): Unit = {
+        for ((word, idx) <- program.zipWithIndex) {
+          stream.valid #= true
+          stream.payload.addr #= idx
+          stream.payload.data #= word
+          dut.clockDomain.waitSamplingWhere(stream.ready.toBoolean)
+          stream.valid #= false
+        }
+      }
+      writeLoader(dut.io.loaderWriteA, progLow)
+      writeLoader(dut.io.loaderWriteB, progHigh)
+      dut.clockDomain.waitSampling(2)
+
+      import OpenDrainBusSim._
+      val done = scala.collection.mutable.Set[String]()
+      val monitor = fork {
+        while (done.size < 2) {
+          val a = Drive(
+            dut.io.busA.sda.driveLow.toBoolean,
+            dut.io.busA.sda.driveHigh.toBoolean
+          )
+          val b = Drive(
+            dut.io.busB.sda.driveLow.toBoolean,
+            dut.io.busB.sda.driveHigh.toBoolean
+          )
+          val sdaLevel = wiredAnd(Seq(a, b)).getOrElse(true)
+          dut.io.busA.sda.read #= sdaLevel
+          dut.io.busB.sda.read #= sdaLevel
+          if (dut.io.doneA.toBoolean) done += "A"
+          if (dut.io.doneB.toBoolean) done += "B"
+          dut.clockDomain.waitSampling()
+        }
+      }
+
+      dut.io.startA #= true
+      dut.io.startB #= true
+      dut.clockDomain.waitSamplingWhere(!dut.io.doneA.toBoolean)
+      dut.clockDomain.waitSamplingWhere(!dut.io.doneB.toBoolean)
+      dut.io.startA #= false
+      dut.io.startB #= false
+
+      def sclPulse(): Unit = {
+        dut.io.busA.scl.read #= false
+        dut.io.busB.scl.read #= false
+        dut.clockDomain.waitSampling(halfPeriodCycles)
+        dut.io.busA.scl.read #= true
+        dut.io.busB.scl.read #= true
+        dut.clockDomain.waitSampling(halfPeriodCycles)
+      }
+      sclPulse() // phase 0 falling + phase 1 rising
+      sclPulse() // phase 2 falling
+      dut.io.busA.scl.read #= true
+      dut.io.busB.scl.read #= true
+
+      var c = 0
+      while (done.size < 2 && c < 100000) {
+        dut.clockDomain.waitSampling(); c += 1
+      }
+      monitor.join()
+      assert(done.size == 2, s"engines did not halt (done=$done c=$c)")
+
+      def readHalt(
+          cmd: Stream[UInt],
+          resp: Flow[Bits]
+      ): (Boolean, Int) = {
+        cmd.valid #= true
+        cmd.payload #= resultLimit
+        dut.clockDomain.waitSamplingWhere(cmd.ready.toBoolean)
+        cmd.valid #= false
+        dut.clockDomain.waitSamplingWhere(resp.valid.toBoolean)
+        val w = resp.payload.toInt
+        (((w >> 12) & 1) != 0, (w >> 8) & 0xf)
+      }
+      val (mismatchA, _) =
+        readHalt(dut.io.debugReadCmdA, dut.io.debugReadRespA)
+      val (mismatchB, _) =
+        readHalt(dut.io.debugReadCmdB, dut.io.debugReadRespB)
+      assert(
+        !mismatchA,
+        "low-PID target (A) should not see mismatch (drove dominant, read dominant)"
+      )
+      assert(
+        mismatchB,
+        "high-PID target (B) should see mismatch (drove recessive, read dominant on wired-AND)"
+      )
+      println("  target-daa-arbitration OK")
+    }
+  }
+
   // --------------------------------------------------------------
   // Entry point (extended as tests land)
   // --------------------------------------------------------------
@@ -397,6 +538,7 @@ object BitCycleEngineTargetSim {
     testTargetMismatchOnDrive()
     testTargetNoSclDriveFromEmit()
     testTargetStretchDrivesSclLow()
+    testTargetDaaArbitration()
     println("BitCycleEngineTargetSim OK")
   }
 }
