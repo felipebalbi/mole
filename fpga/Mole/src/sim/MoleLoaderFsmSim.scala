@@ -10,33 +10,32 @@ import scala.collection.mutable
   * Covers the cases the plan calls out and a few extra edge cases the
   * rubber-duck pass flagged:
   *
-  *   1. **happy path** --- 2-word program loads cleanly. SPRAM writes at
-  *      addr 0 and 1; `loaded` pulses once on the final byte.
-  *   2. **single-word program** --- minimum-size frame (`len = 1`) still
-  *      lands one SPRAM write and pulses `loaded`.
-  *   3. **`len = 0`** --- rejected at `lenHi`; `fault` pulses, no SPRAM
-  *      writes, parser enters `resync`.
-  *   4. **`len > programWordCount`** --- rejected at `lenHi`; same
-  *      observable behaviour as case 3.
-  *   5. **CRC mismatch** --- corrupted payload, `fault` pulses on the
-  *      final byte (the bad CRC trailer), parser enters `resync`.
-  *   6. **UART error on first byte** --- exercises the `idle` error
-  *      branch added during the rubber-duck pass: the corrupt byte never
-  *      enters the frame; `fault` pulses, parser is in `resync`.
-  *   7. **UART error mid-frame** --- a framing error pulses alongside a
-  *      payload byte; the FSM must abort without latching or CRC-feeding
-  *      that byte, and must NOT later accept the rest of the frame.
-  *   8. **idle-gap recovery** --- after a fault, hold the RX line high
-  *      for the configured idle gap and verify the parser returns to
-  *      `idle` and accepts a follow-up good frame.
-  *   9. **acceptRx drop mid-frame** --- the external gate drops while a
-  *      frame is in flight; the FSM must fault and head to resync rather
-  *      than resuming a stale half-frame later.
+  *   1. **happy path** --- 2-word program loads cleanly. SPRAM writes at addr 0
+  *      and 1; `loaded` pulses once on the final byte.
+  *   2. **single-word program** --- minimum-size frame (`len = 1`) still lands
+  *      one SPRAM write and pulses `loaded`.
+  *   3. **`len = 0`** --- rejected at `lenHi`; `fault` pulses, no SPRAM writes,
+  *      parser enters `resync`.
+  *   4. **`len > programWordCount`** --- rejected at `lenHi`; same observable
+  *      behaviour as case 3.
+  *   5. **CRC mismatch** --- corrupted payload, `fault` pulses on the final
+  *      byte (the bad CRC trailer), parser enters `resync`.
+  *   6. **UART error on first byte** --- exercises the `idle` error branch
+  *      added during the rubber-duck pass: the corrupt byte never enters the
+  *      frame; `fault` pulses, parser is in `resync`.
+  *   7. **UART error mid-frame** --- a framing error pulses alongside a payload
+  *      byte; the FSM must abort without latching or CRC-feeding that byte, and
+  *      must NOT later accept the rest of the frame.
+  *   8. **idle-gap recovery** --- after a fault, hold the RX line high for the
+  *      configured idle gap and verify the parser returns to `idle` and accepts
+  *      a follow-up good frame.
+  *   9. **acceptRx drop mid-frame** --- the external gate drops while a frame
+  *      is in flight; the FSM must fault and head to resync rather than
+  *      resuming a stale half-frame later.
   *
-  * The sim uses small parameters (programWordCount = 16, idleGapCycles =
-  * 8) so each case finishes quickly. The DUT is the same regardless of
-  * parameters --- nothing in `MoleLoaderFsm` short-circuits on small
-  * inputs.
+  * The sim uses small parameters (programWordCount = 16, idleGapCycles = 8) so
+  * each case finishes quickly. The DUT is the same regardless of parameters ---
+  * nothing in `MoleLoaderFsm` short-circuits on small inputs.
   */
 object MoleLoaderFsmSim extends App {
 
@@ -135,7 +134,9 @@ object MoleLoaderFsmSim extends App {
     fork {
       while (true) {
         dut.clockDomain.waitSampling()
-        if (dut.io.programWrite.valid.toBoolean && dut.io.programWrite.ready.toBoolean) {
+        if (
+          dut.io.programWrite.valid.toBoolean && dut.io.programWrite.ready.toBoolean
+        ) {
           writes += ((
             dut.io.programWrite.payload.addr.toBigInt,
             dut.io.programWrite.payload.data.toBigInt
@@ -191,11 +192,26 @@ object MoleLoaderFsmSim extends App {
     // Give a few cycles for state to settle back to idle.
     dut.clockDomain.waitSampling(4)
 
-    assert(mon.writes.size == 2, s"expected 2 SPRAM writes, got ${mon.writes.size}")
-    assert(mon.writes(0) == (BigInt(0), BigInt(words(0))), s"word 0: ${mon.writes(0)}")
-    assert(mon.writes(1) == (BigInt(1), BigInt(words(1))), s"word 1: ${mon.writes(1)}")
-    assert(mon.loadedCount() == 1, s"expected 1 loaded pulse, got ${mon.loadedCount()}")
-    assert(mon.faultCount() == 0, s"expected 0 fault pulses, got ${mon.faultCount()}")
+    assert(
+      mon.writes.size == 2,
+      s"expected 2 SPRAM writes, got ${mon.writes.size}"
+    )
+    assert(
+      mon.writes(0) == (BigInt(0), BigInt(words(0))),
+      s"word 0: ${mon.writes(0)}"
+    )
+    assert(
+      mon.writes(1) == (BigInt(1), BigInt(words(1))),
+      s"word 1: ${mon.writes(1)}"
+    )
+    assert(
+      mon.loadedCount() == 1,
+      s"expected 1 loaded pulse, got ${mon.loadedCount()}"
+    )
+    assert(
+      mon.faultCount() == 0,
+      s"expected 0 fault pulses, got ${mon.faultCount()}"
+    )
     assert(!dut.io.inResync.toBoolean, "expected to end in idle, not resync")
 
     println("[happy-2-word] OK")
@@ -216,8 +232,14 @@ object MoleLoaderFsmSim extends App {
     for (b <- frame) driveByte(dut, b)
     dut.clockDomain.waitSampling(4)
 
-    assert(mon.writes.size == 1, s"expected 1 SPRAM write, got ${mon.writes.size}")
-    assert(mon.writes(0) == (BigInt(0), BigInt(0xdead)), s"word 0: ${mon.writes(0)}")
+    assert(
+      mon.writes.size == 1,
+      s"expected 1 SPRAM write, got ${mon.writes.size}"
+    )
+    assert(
+      mon.writes(0) == (BigInt(0), BigInt(0xdead)),
+      s"word 0: ${mon.writes(0)}"
+    )
     assert(mon.loadedCount() == 1, "expected 1 loaded pulse")
     assert(mon.faultCount() == 0, "expected 0 fault pulses")
 
@@ -244,7 +266,10 @@ object MoleLoaderFsmSim extends App {
     for (b <- frame) driveByte(dut, b)
     dut.clockDomain.waitSampling(4)
 
-    assert(mon.writes.isEmpty, s"expected no SPRAM writes, got ${mon.writes.size}")
+    assert(
+      mon.writes.isEmpty,
+      s"expected no SPRAM writes, got ${mon.writes.size}"
+    )
     assert(mon.loadedCount() == 0, "expected 0 loaded pulses")
     assert(mon.faultCount() >= 1, "expected at least one fault pulse")
     assert(dut.io.inResync.toBoolean, "expected loader to be in resync")
@@ -271,7 +296,10 @@ object MoleLoaderFsmSim extends App {
     for (b <- frame) driveByte(dut, b)
     dut.clockDomain.waitSampling(4)
 
-    assert(mon.writes.isEmpty, s"expected no SPRAM writes, got ${mon.writes.size}")
+    assert(
+      mon.writes.isEmpty,
+      s"expected no SPRAM writes, got ${mon.writes.size}"
+    )
     assert(mon.loadedCount() == 0, "expected 0 loaded pulses")
     assert(mon.faultCount() >= 1, "expected at least one fault pulse")
     assert(dut.io.inResync.toBoolean, "expected loader to be in resync")
@@ -303,7 +331,10 @@ object MoleLoaderFsmSim extends App {
     // a fault must.
     assert(mon.writes.size == 2, s"writes during bad frame: ${mon.writes.size}")
     assert(mon.loadedCount() == 0, "expected 0 loaded pulses on bad CRC")
-    assert(mon.faultCount() == 1, s"expected 1 fault pulse, got ${mon.faultCount()}")
+    assert(
+      mon.faultCount() == 1,
+      s"expected 1 fault pulse, got ${mon.faultCount()}"
+    )
     assert(dut.io.inResync.toBoolean, "expected loader to be in resync")
 
     waitForIdle(dut)
@@ -367,8 +398,14 @@ object MoleLoaderFsmSim extends App {
 
     // Word 0 should have made it to SPRAM (clean writeWord cycle before
     // the error). Word 1 must NOT (abort fires before writeWord).
-    assert(mon.writes.size == 1, s"expected exactly 1 SPRAM write before abort, got ${mon.writes.size}")
-    assert(mon.writes(0) == (BigInt(0), BigInt(words(0))), "expected word 0 to land cleanly")
+    assert(
+      mon.writes.size == 1,
+      s"expected exactly 1 SPRAM write before abort, got ${mon.writes.size}"
+    )
+    assert(
+      mon.writes(0) == (BigInt(0), BigInt(words(0))),
+      "expected word 0 to land cleanly"
+    )
     assert(mon.loadedCount() == 0, "expected 0 loaded pulses")
     assert(mon.faultCount() >= 1, "expected at least one fault pulse")
     assert(dut.io.inResync.toBoolean, "expected loader to be in resync")
@@ -401,7 +438,10 @@ object MoleLoaderFsmSim extends App {
     // no way to know the CRC is bad until the trailer arrives). Snapshot
     // and clear so the post-recovery write count is unambiguous.
     val writesBeforeRecover = mon.writes.size
-    assert(writesBeforeRecover == 1, s"expected 1 stale write from bad frame, got $writesBeforeRecover")
+    assert(
+      writesBeforeRecover == 1,
+      s"expected 1 stale write from bad frame, got $writesBeforeRecover"
+    )
     mon.writes.clear()
 
     // Wait out the idle gap.
@@ -413,7 +453,10 @@ object MoleLoaderFsmSim extends App {
     dut.clockDomain.waitSampling(4)
 
     assert(mon.loadedCount() == 1, "expected 1 loaded pulse after recovery")
-    assert(mon.writes.size == 2, s"expected 2 fresh writes, got ${mon.writes.size}")
+    assert(
+      mon.writes.size == 2,
+      s"expected 2 fresh writes, got ${mon.writes.size}"
+    )
     assert(mon.writes(0) == (BigInt(0), BigInt(0xbeef)))
     assert(mon.writes(1) == (BigInt(1), BigInt(0xcafe)))
     println("[recover-after-fault] OK")

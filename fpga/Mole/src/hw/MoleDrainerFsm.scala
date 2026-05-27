@@ -6,67 +6,64 @@ import spinal.lib.fsm._
 
 /** Post-halt result-ring sweeper.
   *
-  * Streams the engine's `resultWordCount`-word result ring out of SPRAM
-  * onto a byte `Stream` (low byte first), one full ring per
-  * `triggerDrain` pulse from the top-level phase FSM.
+  * Streams the engine's `resultWordCount`-word result ring out of SPRAM onto a
+  * byte `Stream` (low byte first), one full ring per `triggerDrain` pulse from
+  * the top-level phase FSM.
   *
-  * == Layering ==
+  * ==Layering==
   *
-  *   - The drainer does NOT watch `engine.done` directly. The top-level
-  *     phase FSM owns the `Running -> Draining` transition and pulses
-  *     `triggerDrain` exactly once per real halt. This eliminates the
-  *     edge/level race that the plan calls out --- crucially, on
-  *     first-power-up `engine.done` is high but no program has ever
-  *     run, and the phase FSM (in `AcceptLoad`) never trips the drainer.
+  *   - The drainer does NOT watch `engine.done` directly. The top-level phase
+  *     FSM owns the `Running -> Draining` transition and pulses `triggerDrain`
+  *     exactly once per real halt. This eliminates the edge/level race that the
+  *     plan calls out --- crucially, on first-power-up `engine.done` is high
+  *     but no program has ever run, and the phase FSM (in `AcceptLoad`) never
+  *     trips the drainer.
+  *   - The drainer owns the SPRAM read port (`readCmd` / `readResp`) only while
+  *     it is active. While idle, the engine has the read port to itself.
   *
-  *   - The drainer owns the SPRAM read port (`readCmd` / `readResp`)
-  *     only while it is active. While idle, the engine has the read
-  *     port to itself.
+  * ==SPRAM read timing==
   *
-  * == SPRAM read timing ==
+  * The SPRAM controller services `readCmd` at priority 1 (always `ready`) and
+  * the corresponding `readResp.valid` arrives EXACTLY one cycle after
+  * `readCmd.fire`. The FSM exploits this: `issueRead` drives `valid` until
+  * fire, `waitResp` lands one cycle later and the response is guaranteed to be
+  * on the wire.
   *
-  * The SPRAM controller services `readCmd` at priority 1 (always
-  * `ready`) and the corresponding `readResp.valid` arrives EXACTLY one
-  * cycle after `readCmd.fire`. The FSM exploits this: `issueRead`
-  * drives `valid` until fire, `waitResp` lands one cycle later and the
-  * response is guaranteed to be on the wire.
+  * ==UART back-pressure==
   *
-  * == UART back-pressure ==
+  * `UartTx.data.ready` drops while a byte is on the wire (~10 fabric cycles per
+  * UART bit at the default 48 MHz / 2 Mbaud). The FSM holds `txData.valid` and
+  * `txData.payload` stable in `sendLo` / `sendHi` until the handshake fires ---
+  * never advances state or address on `valid && !ready`. The
+  * `MoleDrainerFsmSim` random-throttle and long-stall cases verify byte order
+  * survives arbitrary back-pressure.
   *
-  * `UartTx.data.ready` drops while a byte is on the wire (~10 fabric
-  * cycles per UART bit at the default 48 MHz / 2 Mbaud). The FSM holds
-  * `txData.valid` and `txData.payload` stable in `sendLo` / `sendHi`
-  * until the handshake fires --- never advances state or address on
-  * `valid && !ready`. The `MoleDrainerFsmSim` random-throttle and
-  * long-stall cases verify byte order survives arbitrary back-pressure.
+  * ==drainComplete pulse contract==
   *
-  * == drainComplete pulse contract ==
+  * `drainComplete` pulses for exactly one cycle the SAME cycle the final byte
+  * (high byte of the last ring word) fires on `txData`. The phase FSM
+  * transitions `Draining -> AcceptLoad` on that pulse. Earlier drafts of this
+  * file used a separate `done` state and pulsed two cycles late, which violated
+  * the spec and made the phase-FSM handoff window unnecessarily lossy.
   *
-  * `drainComplete` pulses for exactly one cycle the SAME cycle the
-  * final byte (high byte of the last ring word) fires on `txData`.
-  * The phase FSM transitions `Draining -> AcceptLoad` on that pulse.
-  * Earlier drafts of this file used a separate `done` state and
-  * pulsed two cycles late, which violated the spec and made the
-  * phase-FSM handoff window unnecessarily lossy.
+  * ==State list==
   *
-  * == State list ==
-  *
-  *   - `idleState`: waits for `triggerDrain`; resets `addrReg` to
-  *     `resultBase` on trigger; transitions to `issueRead`.
+  *   - `idleState`: waits for `triggerDrain`; resets `addrReg` to `resultBase`
+  *     on trigger; transitions to `issueRead`.
   *   - `issueReadState`: drives `readCmd.valid := True` until fire.
-  *   - `waitRespState`: waits for `readResp.valid` (1 cycle); latches
-  *     into `wordReg`.
+  *   - `waitRespState`: waits for `readResp.valid` (1 cycle); latches into
+  *     `wordReg`.
   *   - `sendLoState` / `sendHiState`: byte stream out, with proper
-  *     back-pressure. The final fire in `sendHi` pulses
-  *     `drainComplete` and returns to `idleState` in one step.
+  *     back-pressure. The final fire in `sendHi` pulses `drainComplete` and
+  *     returns to `idleState` in one step.
   *
-  * Five states total --- the plan called out seven (`Advance` / `Done`
-  * as separate stages); we collapsed the increment and completion
-  * into `sendHi`'s fire branch to honour the "pulse on fire" spec.
+  * Five states total --- the plan called out seven (`Advance` / `Done` as
+  * separate stages); we collapsed the increment and completion into `sendHi`'s
+  * fire branch to honour the "pulse on fire" spec.
   *
   * @param resultBase
-  *   SPRAM word address of the first ring word (= `programWordCount`
-  *   in the standard layout).
+  *   SPRAM word address of the first ring word (= `programWordCount` in the
+  *   standard layout).
   * @param resultWordCount
   *   number of 16-bit words in the ring.
   * @param addrWidth
@@ -79,7 +76,10 @@ case class MoleDrainerFsm(
 ) extends Component {
 
   require(resultBase >= 0, s"resultBase=$resultBase must be >= 0")
-  require(resultWordCount >= 1, s"resultWordCount=$resultWordCount must be >= 1")
+  require(
+    resultWordCount >= 1,
+    s"resultWordCount=$resultWordCount must be >= 1"
+  )
   require(addrWidth >= 1, s"addrWidth=$addrWidth must be >= 1")
   require(
     resultBase + resultWordCount <= (1 << addrWidth),
@@ -88,37 +88,34 @@ case class MoleDrainerFsm(
 
   val io = new Bundle {
 
-    /** One-cycle pulse from the top-level phase FSM on `Running ->
-      * Draining`. The drainer latches the trigger as a goto from
-      * `idleState` to `issueReadState`; a pulse while busy is ignored.
+    /** One-cycle pulse from the top-level phase FSM on `Running -> Draining`.
+      * The drainer latches the trigger as a goto from `idleState` to
+      * `issueReadState`; a pulse while busy is ignored.
       */
     val triggerDrain = in Bool ()
 
-    /** SPRAM read command port (priority 1 in the controller; always
-      * ready). `valid` is asserted in `issueReadState` until the
-      * handshake fires.
+    /** SPRAM read command port (priority 1 in the controller; always ready).
+      * `valid` is asserted in `issueReadState` until the handshake fires.
       */
     val readCmd = master Stream UInt(addrWidth bits)
 
-    /** SPRAM read response port. `valid` arrives exactly one cycle
-      * after `readCmd.fire`; `payload` is the 16-bit word at the
-      * requested address.
+    /** SPRAM read response port. `valid` arrives exactly one cycle after
+      * `readCmd.fire`; `payload` is the 16-bit word at the requested address.
       */
     val readResp = slave Flow Bits(16 bits)
 
-    /** Byte stream sink. Drives the controller's `UartTx.data` port.
-      * Low byte of each word goes first, then high byte.
+    /** Byte stream sink. Drives the controller's `UartTx.data` port. Low byte
+      * of each word goes first, then high byte.
       */
     val txData = master Stream Bits(8 bits)
 
-    /** Single-cycle pulse the SAME cycle the final byte (high byte of
-      * the last ring word) fires on `txData`.
+    /** Single-cycle pulse the SAME cycle the final byte (high byte of the last
+      * ring word) fires on `txData`.
       */
     val drainComplete = out Bool ()
 
-    /** Status: high whenever the drainer is not in `idleState`. The
-      * top-level phase FSM uses this to gate ownership of the SPRAM
-      * read port.
+    /** Status: high whenever the drainer is not in `idleState`. The top-level
+      * phase FSM uses this to gate ownership of the SPRAM read port.
       */
     val active = out Bool ()
   }

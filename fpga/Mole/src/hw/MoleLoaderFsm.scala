@@ -22,52 +22,51 @@ import spinal.lib.fsm._
   * State sketch:
   *
   *   - `idle` --- waiting for any byte; CRC register held at 0. Asserts
-  *     `rx.ready = False` and watches `rx.valid` so the first byte of the
-  *     frame is consumed by `lenLo`, not lost to a stale CRC init. A UART
-  *     error on the very first byte triggers an immediate fault + resync
-  *     here, before the byte is consumed.
+  *     `rx.ready = False` and watches `rx.valid` so the first byte of the frame
+  *     is consumed by `lenLo`, not lost to a stale CRC init. A UART error on
+  *     the very first byte triggers an immediate fault + resync here, before
+  *     the byte is consumed.
   *   - `lenLo` / `lenHi` --- latch the two length bytes; feed each into CRC.
   *     `lenHi` rejects `len == 0` or `len > programWordCount`.
   *   - `wordLo` / `wordHi` --- latch the two bytes of one instruction word;
   *     feed each into CRC.
   *   - `writeWord` --- present the assembled word on `programWrite`. Holds
   *     until SPRAM accepts.
-  *   - `crcLo` / `crcHi` --- latch the two trailer bytes. **Not fed into
-  *     CRC.** `crcHi` compares `(crcHi ## crcLo)` against `crc.io.value`. On
-  *     match: `loaded` pulses, return to `idle`. On mismatch: `fault` pulses,
-  *     go to `resync`.
+  *   - `crcLo` / `crcHi` --- latch the two trailer bytes. **Not fed into CRC.**
+  *     `crcHi` compares `(crcHi ## crcLo)` against `crc.io.value`. On match:
+  *     `loaded` pulses, return to `idle`. On mismatch: `fault` pulses, go to
+  *     `resync`.
   *   - `resync` --- drop every incoming byte until `uRxRaw` has been
-  *     continuously high for `idleGapCycles` fabric cycles. CRC register
-  *     held at 0 throughout. Then return to `idle`.
+  *     continuously high for `idleGapCycles` fabric cycles. CRC register held
+  *     at 0 throughout. Then return to `idle`.
   *
-  * Error handling: `rxFramingError` / `rxParityError` / `rxOverrun` pulse
-  * for one cycle alongside `rx.valid` (per UartRx). Every consuming state
-  * checks `abortNow = errorLatch || (rxErr && rx.valid)` BEFORE doing any
-  * byte work, so an erroring byte is never latched, never CRC-fed, never
-  * acted on; we always fault and head to resync directly. The latch covers
-  * the writeWord stall window where the error pulse may already have
-  * disappeared by the time we leave the stall.
+  * Error handling: `rxFramingError` / `rxParityError` / `rxOverrun` pulse for
+  * one cycle alongside `rx.valid` (per UartRx). Every consuming state checks
+  * `abortNow = errorLatch || (rxErr && rx.valid)` BEFORE doing any byte work,
+  * so an erroring byte is never latched, never CRC-fed, never acted on; we
+  * always fault and head to resync directly. The latch covers the writeWord
+  * stall window where the error pulse may already have disappeared by the time
+  * we leave the stall.
   *
-  * `uRxRaw` is an asynchronous chip pin. The loader synchronises it
-  * internally with a 2-FF chain so resync's idle-gap counter sees a clean
-  * domain-local signal.
+  * `uRxRaw` is an asynchronous chip pin. The loader synchronises it internally
+  * with a 2-FF chain so resync's idle-gap counter sees a clean domain-local
+  * signal.
   *
-  * Back-pressure / gating: `acceptRx` is the gate from the top-level phase
-  * FSM. While `acceptRx = False` the loader holds `rx.ready` low and, if
-  * `acceptRx` drops mid-frame, faults + heads to resync to keep parser
-  * state from drifting across externally-driven phase changes.
+  * Back-pressure / gating: `acceptRx` is the gate from the top-level phase FSM.
+  * While `acceptRx = False` the loader holds `rx.ready` low and, if `acceptRx`
+  * drops mid-frame, faults + heads to resync to keep parser state from drifting
+  * across externally-driven phase changes.
   *
   * @param programWordCount
-  *   maximum frame length, in 16-bit words. Frames with `len` strictly
-  *   greater than this are rejected.
+  *   maximum frame length, in 16-bit words. Frames with `len` strictly greater
+  *   than this are rejected.
   * @param addrWidth
   *   width of `programWrite.payload.addr`. Matches `SpramController.addrWidth`.
   *   Must be wide enough for `programWordCount - 1`.
   * @param idleGapCycles
-  *   number of consecutive fabric cycles `uRxRaw` (synchronised) must
-  *   remain high before `resync` returns to `idle`. The plan's
-  *   recommendation is `20 * fabricCyclesPerUartBit` (= 2 UART byte times
-  *   of clean idle).
+  *   number of consecutive fabric cycles `uRxRaw` (synchronised) must remain
+  *   high before `resync` returns to `idle`. The plan's recommendation is
+  *   `20 * fabricCyclesPerUartBit` (= 2 UART byte times of clean idle).
   */
 case class MoleLoaderFsm(
     programWordCount: Int,
@@ -75,7 +74,10 @@ case class MoleLoaderFsm(
     idleGapCycles: Int
 ) extends Component {
 
-  require(programWordCount >= 1, s"programWordCount=$programWordCount must be >= 1")
+  require(
+    programWordCount >= 1,
+    s"programWordCount=$programWordCount must be >= 1"
+  )
   require(
     addrWidth >= log2Up(programWordCount),
     s"addrWidth=$addrWidth too narrow for programWordCount=$programWordCount"
@@ -109,9 +111,9 @@ case class MoleLoaderFsm(
       */
     val uRxRaw = in Bool ()
 
-    /** Gate from the top-level phase FSM. False = the loader is closed
-      * (e.g. the engine is running or draining); `rx.ready` stays low. A
-      * drop to False mid-frame triggers a fault + resync.
+    /** Gate from the top-level phase FSM. False = the loader is closed (e.g.
+      * the engine is running or draining); `rx.ready` stays low. A drop to
+      * False mid-frame triggers a fault + resync.
       */
     val acceptRx = in Bool ()
 
@@ -155,7 +157,8 @@ case class MoleLoaderFsm(
   val crcLoReg = Reg(Bits(8 bits)) init B(0, 8 bits)
   val frameLen = Reg(UInt(lenWidth bits)) init U(0, lenWidth bits)
   val wordIndex = Reg(UInt(wordIndexWidth bits)) init U(0, wordIndexWidth bits)
-  val idleCounter = Reg(UInt(idleCounterWidth bits)) init U(0, idleCounterWidth bits)
+  val idleCounter =
+    Reg(UInt(idleCounterWidth bits)) init U(0, idleCounterWidth bits)
 
   // CRC accumulator instance. Defaults are overridden inside the FSM.
   val crc = Crc16Xmodem()

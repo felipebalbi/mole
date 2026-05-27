@@ -6,109 +6,101 @@ import spinal.lib.fsm._
 
 /** Top-level wiring for the Mole iCEbreaker bring-up.
   *
-  * Wires the host-link loader, the SPRAM, the [[BitCycleEngineCore]],
-  * the result-ring drainer and the UART together, and exposes the
-  * iCEbreaker pinout from `icebreaker.pcf`.
+  * Wires the host-link loader, the SPRAM, the [[BitCycleEngineCore]], the
+  * result-ring drainer and the UART together, and exposes the iCEbreaker pinout
+  * from `icebreaker.pcf`.
   *
-  * == Clocking and reset ==
+  * ==Clocking and reset==
   *
-  *   - The 12 MHz package pin `io_clk` feeds a [[MolePllUp5k]] that
-  *     produces a 48 MHz fabric clock.
+  *   - The 12 MHz package pin `io_clk` feeds a [[MolePllUp5k]] that produces a
+  *     48 MHz fabric clock.
   *   - The external `io_reset` button is active-low. The reset bridge
-  *     async-asserts the fabric reset on either `!pll.locked` or
-  *     `!io_reset`, and sync-deasserts it through a 2-FF chain in the
-  *     fabric clock domain. The boot domain (the one that hosts the
-  *     2-FF chain) has its own async reset wired straight to
-  *     `resetAsync`, so any fresh assertion of either source pulls the
-  *     fabric back into reset immediately.
-  *   - All synchronous logic lives in `fabricCd`. The outer Component
-  *     never instantiates a flop in its own clock domain, so the
-  *     generated Verilog only has the listed package-pin ports --- no
-  *     spurious `clk` / `reset` top-level.
+  *     async-asserts the fabric reset on either `!pll.locked` or `!io_reset`,
+  *     and sync-deasserts it through a 2-FF chain in the fabric clock domain.
+  *     The boot domain (the one that hosts the 2-FF chain) has its own async
+  *     reset wired straight to `resetAsync`, so any fresh assertion of either
+  *     source pulls the fabric back into reset immediately.
+  *   - All synchronous logic lives in `fabricCd`. The outer Component never
+  *     instantiates a flop in its own clock domain, so the generated Verilog
+  *     only has the listed package-pin ports --- no spurious `clk` / `reset`
+  *     top-level.
   *
-  * == Top-level phase FSM ==
+  * ==Top-level phase FSM==
   *
-  *   - `acceptLoadState` --- loader owns `loaderWrite`; engine is held
-  *     off (`start := False`); drainer is idle; UART RX is gated open
-  *     for the loader. Transitions to `runningState` on
-  *     `loader.io.loaded`.
-  *   - `runningState` --- engine owns the SPRAM read port and
-  *     `resultWrite`. The wrapper drives `engine.start := True` until
-  *     the engine actually leaves idle (tracked by `engineStarted`),
-  *     then drops it so the engine cannot self-restart on the cycle it
-  *     reports `done` again. Transitions to `drainingState` the cycle
-  *     `engine.done` rises (i.e. `engineStarted && engine.done`) and
-  *     pulses `drainer.triggerDrain` in the same cycle.
-  *   - `drainingState` --- drainer owns the SPRAM read port and the
-  *     UART TX stream. Transitions back to `acceptLoadState` the cycle
+  *   - `acceptLoadState` --- loader owns `loaderWrite`; engine is held off
+  *     (`start := False`); drainer is idle; UART RX is gated open for the
+  *     loader. Transitions to `runningState` on `loader.io.loaded`.
+  *   - `runningState` --- engine owns the SPRAM read port and `resultWrite`.
+  *     The wrapper drives `engine.start := True` until the engine actually
+  *     leaves idle (tracked by `engineStarted`), then drops it so the engine
+  *     cannot self-restart on the cycle it reports `done` again. Transitions to
+  *     `drainingState` the cycle `engine.done` rises (i.e.
+  *     `engineStarted && engine.done`) and pulses `drainer.triggerDrain` in the
+  *     same cycle.
+  *   - `drainingState` --- drainer owns the SPRAM read port and the UART TX
+  *     stream. Transitions back to `acceptLoadState` the cycle
   *     `drainer.drainComplete` pulses.
   *
-  * The loader's `acceptRx` gate is high only in `acceptLoadState`. A
-  * mid-frame phase change (e.g. the engine halts and we move to
-  * `drainingState` while the host is still streaming) faults the
-  * loader's partial state via the gate-drop, which is what we want
-  * --- the host MUST honour the resync gap between frames, as
-  * documented in `WIRE_FORMAT.md` and the bring-up doc.
+  * The loader's `acceptRx` gate is high only in `acceptLoadState`. A mid-frame
+  * phase change (e.g. the engine halts and we move to `drainingState` while the
+  * host is still streaming) faults the loader's partial state via the
+  * gate-drop, which is what we want --- the host MUST honour the resync gap
+  * between frames, as documented in `WIRE_FORMAT.md` and the bring-up doc.
   *
-  * == Closed-phase RX drain ==
+  * ==Closed-phase RX drain==
   *
-  * When `acceptRx = False`, MoleTop drives `uartRx.payload.ready :=
-  * True` so any bytes that arrive during `runningState` or
-  * `drainingState` are consumed and discarded at the UART boundary.
-  * Without this, `UartRx.payload.valid` stays sticky on the last
-  * received byte until the consumer asserts `ready`, and the loader
-  * would happily latch that stale value as the first byte of a new
-  * frame the cycle `acceptRx` re-opens. The loader's own `rx.valid`
-  * input is also gated by `acceptRx` here so its idleState peek
-  * cannot see the stale byte either.
+  * When `acceptRx = False`, MoleTop drives `uartRx.payload.ready := True` so
+  * any bytes that arrive during `runningState` or `drainingState` are consumed
+  * and discarded at the UART boundary. Without this, `UartRx.payload.valid`
+  * stays sticky on the last received byte until the consumer asserts `ready`,
+  * and the loader would happily latch that stale value as the first byte of a
+  * new frame the cycle `acceptRx` re-opens. The loader's own `rx.valid` input
+  * is also gated by `acceptRx` here so its idleState peek cannot see the stale
+  * byte either.
   *
   * The phase FSM directly implements the spec's `runInFlight` latch:
-  * `drainingState` is reachable only from `runningState`, which is
-  * reachable only from a `loader.io.loaded` pulse. The very first
-  * power-up therefore enters `acceptLoadState` (not `drainingState`)
-  * even though the engine reports `done` from the start.
+  * `drainingState` is reachable only from `runningState`, which is reachable
+  * only from a `loader.io.loaded` pulse. The very first power-up therefore
+  * enters `acceptLoadState` (not `drainingState`) even though the engine
+  * reports `done` from the start.
   *
-  * == SPRAM port arbitration ==
+  * ==SPRAM port arbitration==
   *
   *   - Reads: muxed by phase between `engine.programReadCmd` (during
-  *     `runningState`) and `drainer.readCmd` (during `drainingState`).
-  *     During `acceptLoadState` no consumer issues a read, so the
-  *     SPRAM controller idles. The 1-cycle SPRAM read latency is fine
-  *     across the running -> draining edge because the engine has
-  *     halted before we transition, so no `programReadCmd.fire` from
-  *     the engine is ever in flight at the boundary; symmetrically,
-  *     the drainer is in `idleState` at the draining -> acceptLoad
-  *     boundary so no `readCmd.fire` from the drainer is in flight
+  *     `runningState`) and `drainer.readCmd` (during `drainingState`). During
+  *     `acceptLoadState` no consumer issues a read, so the SPRAM controller
+  *     idles. The 1-cycle SPRAM read latency is fine across the running ->
+  *     draining edge because the engine has halted before we transition, so no
+  *     `programReadCmd.fire` from the engine is ever in flight at the boundary;
+  *     symmetrically, the drainer is in `idleState` at the draining ->
+  *     acceptLoad boundary so no `readCmd.fire` from the drainer is in flight
   *     either.
   *   - Writes: `loaderWrite` is fed unconditionally from the loader's
-  *     `programWrite` (the loader only writes during acceptLoad
-  *     anyway, because its `acceptRx` gate is closed otherwise);
-  *     `resultWrite` is fed unconditionally from the engine's
-  *     `resultWrite` (the engine only writes during a real run).
+  *     `programWrite` (the loader only writes during acceptLoad anyway, because
+  *     its `acceptRx` gate is closed otherwise); `resultWrite` is fed
+  *     unconditionally from the engine's `resultWrite` (the engine only writes
+  *     during a real run).
   *
-  * == LED state ==
+  * ==LED state==
   *
-  *   - `io_ledR` --- pulse-stretched loader fault. When `loader.fault`
-  *     fires, a 22-bit downcounter is loaded; the LED stays lit until
-  *     it decays (~87 ms at 48 MHz, comfortably visible).
-  *   - `io_ledG` --- `!engine.done`, i.e. high whenever the engine is
-  *     not in its idle state. Direct visual indication of "the engine
-  *     is busy".
-  *   - `io_ledB` --- heartbeat. A 26-bit counter that only increments
-  *     while the engine is idle; the LED follows the counter's top
-  *     bit AND `engine.done`. While running, the LED is off; while
-  *     idle, it blinks at about 0.7 Hz so a freshly-flashed board
-  *     announces itself.
+  *   - `io_ledR` --- pulse-stretched loader fault. When `loader.fault` fires, a
+  *     22-bit downcounter is loaded; the LED stays lit until it decays (~87 ms
+  *     at 48 MHz, comfortably visible).
+  *   - `io_ledG` --- `!engine.done`, i.e. high whenever the engine is not in
+  *     its idle state. Direct visual indication of "the engine is busy".
+  *   - `io_ledB` --- heartbeat. A 26-bit counter that only increments while the
+  *     engine is idle; the LED follows the counter's top bit AND `engine.done`.
+  *     While running, the LED is off; while idle, it blinks at about 0.7 Hz so
+  *     a freshly-flashed board announces itself.
   *
   * @param cfg
-  *   Mole compile-time configuration. Pin and clock topology come
-  *   straight from the iCEbreaker; only the UART baud, ring sizes and
-  *   program word count are configurable here.
+  *   Mole compile-time configuration. Pin and clock topology come straight from
+  *   the iCEbreaker; only the UART baud, ring sizes and program word count are
+  *   configurable here.
   * @param useBlackBox
   *   When true (default), instantiate the synth-only primitives
-  *   (`SB_PLL40_PAD`, `SB_IO`, `SB_SPRAM256KA`). When false, swap each
-  *   for the sim-only bypass model so MoleTopSim can run under
-  *   Verilator.
+  *   (`SB_PLL40_PAD`, `SB_IO`, `SB_SPRAM256KA`). When false, swap each for the
+  *   sim-only bypass model so MoleTopSim can run under Verilator.
   */
 case class MoleTop(
     cfg: MoleConfig = MoleConfig(),
@@ -136,19 +128,18 @@ case class MoleTop(
 
   val io = new Bundle {
 
-    /** 12 MHz package-pin clock from the iCEbreaker oscillator. Feeds
-      * the PLL only; no fabric flop is in this domain.
+    /** 12 MHz package-pin clock from the iCEbreaker oscillator. Feeds the PLL
+      * only; no fabric flop is in this domain.
       */
     val io_clk = in Bool ()
 
-    /** Active-low external reset button (iCEbreaker user button,
-      * pulled high externally).
+    /** Active-low external reset button (iCEbreaker user button, pulled high
+      * externally).
       */
     val io_reset = in Bool ()
 
-    /** USB-UART RX line (host to FPGA). Asynchronous; the loader and
-      * the UART receiver each cross it into the fabric domain
-      * themselves.
+    /** USB-UART RX line (host to FPGA). Asynchronous; the loader and the UART
+      * receiver each cross it into the fabric domain themselves.
       */
     val io_uRx = in Bool ()
 

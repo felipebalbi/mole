@@ -8,21 +8,19 @@ import scala.collection.mutable
 
 /** Sim-side DUT wrapper for MoleTop.
   *
-  * Instantiates [[MoleTop]] with `useBlackBox = false` (PLL bypass +
-  * SB_IO bypass + SPRAM behavioural model) and adds a sim-side
-  * [[UartTx]] / [[UartRx]] pair so the test harness can push frame
-  * bytes and pop ring bytes through Spinal Streams instead of
-  * bit-banging the UART wire. The sim-side UART runs at the same
-  * (clock, baud) as MoleTop's internal UART, so the bits on `io_uRx`
-  * and `io_uTx` look exactly like what a real host adapter would
+  * Instantiates [[MoleTop]] with `useBlackBox = false` (PLL bypass + SB_IO
+  * bypass + SPRAM behavioural model) and adds a sim-side [[UartTx]] /
+  * [[UartRx]] pair so the test harness can push frame bytes and pop ring bytes
+  * through Spinal Streams instead of bit-banging the UART wire. The sim-side
+  * UART runs at the same (clock, baud) as MoleTop's internal UART, so the bits
+  * on `io_uRx` and `io_uTx` look exactly like what a real host adapter would
   * drive.
   *
   * Internal MoleTop signals are exposed through wrapper-level outputs
-  * (`sda/sclDriveLow/High`, `engineDone`, `loaderLoaded`,
-  * `loaderFault`) so the sim can monitor the engine's bus drivers
-  * without bit-banging the analog pads. Both clock domains are
-  * electrically the same wall-clock under PLL bypass, so the
-  * cross-domain taps are race-free for sim purposes.
+  * (`sda/sclDriveLow/High`, `engineDone`, `loaderLoaded`, `loaderFault`) so the
+  * sim can monitor the engine's bus drivers without bit-banging the analog
+  * pads. Both clock domains are electrically the same wall-clock under PLL
+  * bypass, so the cross-domain taps are race-free for sim purposes.
   */
 case class MoleTopSimDut(cfg: MoleConfig) extends Component {
 
@@ -43,14 +41,13 @@ case class MoleTopSimDut(cfg: MoleConfig) extends Component {
     /** Active-low external reset; tied to the user button in production. */
     val externalReset = in Bool ()
 
-    /** Sim-side byte injection. Bytes pushed here are serialised by the
-      * sim UART TX onto MoleTop's `io_uRx`.
+    /** Sim-side byte injection. Bytes pushed here are serialised by the sim
+      * UART TX onto MoleTop's `io_uRx`.
       */
     val txData = slave Stream (Bits(8 bits))
 
-    /** Sim-side byte capture. Bytes that come back from MoleTop's
-      * `io_uTx` are deserialised by the sim UART RX and presented
-      * here.
+    /** Sim-side byte capture. Bytes that come back from MoleTop's `io_uTx` are
+      * deserialised by the sim UART RX and presented here.
       */
     val rxData = master Stream (Bits(8 bits))
 
@@ -59,10 +56,9 @@ case class MoleTopSimDut(cfg: MoleConfig) extends Component {
     val ledG = out Bool ()
     val ledB = out Bool ()
 
-    /** Engine's bus drive signals, tapped from inside MoleTop's
-      * fabric area. SB_IO bypass leaves the analog pads
-      * unconnected; this lets the sim observe what the engine
-      * would have driven onto the pad.
+    /** Engine's bus drive signals, tapped from inside MoleTop's fabric area.
+      * SB_IO bypass leaves the analog pads unconnected; this lets the sim
+      * observe what the engine would have driven onto the pad.
       */
     val sdaDriveLow = out Bool ()
     val sdaDriveHigh = out Bool ()
@@ -131,30 +127,29 @@ case class MoleTopSimDut(cfg: MoleConfig) extends Component {
   *
   * Cases:
   *
-  *   1. **short halt** --- `[SetBusMode(i2c), Halt(0)]` loads, runs,
-  *      drains. Verifies the result ring carries Revision lo/hi at
-  *      the first two words and the HALT word at the last word.
+  *   1. **short halt** --- `[SetBusMode(i2c), Halt(0)]` loads, runs, drains.
+  *      Verifies the result ring carries Revision lo/hi at the first two words
+  *      and the HALT word at the last word.
   *   2. **bus toggle** --- `[SetBusMode(i2c), EmitBit(sda=dom),
-  *      EmitBit(sda=hiz), Halt(0)]`. Verifies the engine actually
-  *      transitions SDA's drive signals through the quarter-bit
-  *      sequence (the bus-toggle smoke from the plan).
-  *   3. **bad CRC recovery** --- a frame with a corrupted CRC byte
-  *      is sent first; the engine MUST NOT start and the loader
-  *      fault LED must pulse. After the resync idle gap, a good
-  *      frame is sent and the system completes normally.
-  *   4. **two back-to-back frames** --- a frame loads, runs, drains;
-  *      another frame loads, runs, drains. Verifies the phase FSM
-  *      cycles cleanly through `acceptLoad -> running -> draining
-  *      -> acceptLoad` and that the second run sees a fresh result
-  *      ring.
+  *      EmitBit(sda=hiz), Halt(0)]`. Verifies the engine actually transitions
+  *      SDA's drive signals through the quarter-bit sequence (the bus-toggle
+  *      smoke from the plan).
+  *   3. **bad CRC recovery** --- a frame with a corrupted CRC byte is sent
+  *      first; the engine MUST NOT start and the loader fault LED must pulse.
+  *      After the resync idle gap, a good frame is sent and the system
+  *      completes normally.
+  *   4. **two back-to-back frames** --- a frame loads, runs, drains; another
+  *      frame loads, runs, drains. Verifies the phase FSM cycles cleanly
+  *      through `acceptLoad -> running -> draining -> acceptLoad` and that the
+  *      second run sees a fresh result ring.
   *
   * Small test config:
   *
   *   - `programWordCount = 16`
   *   - `resultRingByteCount = 32` (so `resultWordCount = 16`)
   *
-  * Default-cfg drains would be ~2 M cycles each; the small config
-  * keeps each case under ~50 K cycles.
+  * Default-cfg drains would be ~2 M cycles each; the small config keeps each
+  * case under ~50 K cycles.
   */
 object MoleTopSim extends App {
 
@@ -208,8 +203,7 @@ object MoleTopSim extends App {
   // Common helpers.
   // ----------------------------------------------------------------
 
-  /** Push one byte through the sim UART TX stream and wait for the
-    * handshake.
+  /** Push one byte through the sim UART TX stream and wait for the handshake.
     */
   def sendByte(dut: MoleTopSimDut, byte: Int): Unit = {
     dut.io.txData.payload #= byte
@@ -223,8 +217,8 @@ object MoleTopSim extends App {
     for (b <- frame) sendByte(dut, b)
   }
 
-  /** Pop one byte from the sim UART RX stream, with a generous
-    * timeout to keep the sim from hanging if the drainer misbehaves.
+  /** Pop one byte from the sim UART RX stream, with a generous timeout to keep
+    * the sim from hanging if the drainer misbehaves.
     */
   def recvByte(dut: MoleTopSimDut, maxCycles: Int = 500_000): Int = {
     dut.io.rxData.ready #= true
@@ -249,9 +243,8 @@ object MoleTopSim extends App {
     out.toSeq
   }
 
-  /** Hold reset for a few cycles then release. The MoleTop reset
-    * bridge takes a couple of edges to deassert through the 2-FF
-    * sync chain.
+  /** Hold reset for a few cycles then release. The MoleTop reset bridge takes a
+    * couple of edges to deassert through the 2-FF sync chain.
     */
   def doReset(dut: MoleTopSimDut): Unit = {
     dut.io.externalReset #= false
@@ -317,7 +310,9 @@ object MoleTopSim extends App {
       s"short-halt: HALT expected 0x${cleanHaltWord.toHexString} got 0x${gotHalt.toHexString}"
     )
 
-    println(s"   ok: drained $expected bytes, HALT word 0x${gotHalt.toHexString}")
+    println(
+      s"   ok: drained $expected bytes, HALT word 0x${gotHalt.toHexString}"
+    )
   }
 
   // ----------------------------------------------------------------
@@ -336,10 +331,16 @@ object MoleTopSim extends App {
     val program = Seq(
       Instruction.encode(Instruction.SetBusMode(BusMode.i2c)),
       Instruction.encode(
-        Instruction.EmitBit(TxSymbol.dominant, expect = false, mask = false, capture = false)
+        Instruction.EmitBit(
+          TxSymbol.dominant,
+          expect = false,
+          mask = false,
+          capture = false
+        )
       ),
       Instruction.encode(
-        Instruction.EmitBit(TxSymbol.hiz, expect = false, mask = false, capture = false)
+        Instruction
+          .EmitBit(TxSymbol.hiz, expect = false, mask = false, capture = false)
       ),
       Instruction.encode(Instruction.Halt(0))
     )
@@ -477,7 +478,9 @@ object MoleTopSim extends App {
       s"bad-crc: after recovery HALT expected 0x${cleanHaltWord.toHexString} got 0x${gotHalt.toHexString}"
     )
 
-    println(s"   ok: bad CRC rejected (fault LED lit), recovery frame drained $n bytes")
+    println(
+      s"   ok: bad CRC rejected (fault LED lit), recovery frame drained $n bytes"
+    )
   }
 
   // ----------------------------------------------------------------
@@ -511,7 +514,9 @@ object MoleTopSim extends App {
         gotHalt == cleanHaltWord,
         s"back-to-back run $runIdx: HALT expected 0x${cleanHaltWord.toHexString} got 0x${gotHalt.toHexString}"
       )
-      println(s"   ok: run $runIdx drained $n bytes, HALT 0x${gotHalt.toHexString}")
+      println(
+        s"   ok: run $runIdx drained $n bytes, HALT 0x${gotHalt.toHexString}"
+      )
     }
   }
 

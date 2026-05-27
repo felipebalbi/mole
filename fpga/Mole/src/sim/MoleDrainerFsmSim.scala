@@ -9,35 +9,33 @@ import scala.util.Random
 
 /** Audit for [[MoleDrainerFsm]].
   *
-  * The drainer is purely a SPRAM-read + UART-byte-push pipeline, so the
-  * sim wraps the DUT with a Mem-backed mock SPRAM (one-cycle synchronous
-  * read latency, matching the real `SpramController` contract) and a
-  * sim-only write port for pre-loading the ring. Each case writes a
-  * known pattern into the ring, pulses `triggerDrain`, and asserts the
-  * resulting byte stream matches.
+  * The drainer is purely a SPRAM-read + UART-byte-push pipeline, so the sim
+  * wraps the DUT with a Mem-backed mock SPRAM (one-cycle synchronous read
+  * latency, matching the real `SpramController` contract) and a sim-only write
+  * port for pre-loading the ring. Each case writes a known pattern into the
+  * ring, pulses `triggerDrain`, and asserts the resulting byte stream matches.
   *
   * Cases:
   *
-  *   1. **happy 4-word** --- pre-load four distinct words; verify the
-  *      byte stream is `[w0_lo, w0_hi, w1_lo, w1_hi, ...]` in the
-  *      correct order; `drainComplete` pulses on the SAME cycle the
-  *      final byte fires; `active` falls back to low; SPRAM read
-  *      addresses are exactly `[base, base+1, ..., limit]`.
-  *   2. **single-word ring** --- minimum-size sweep (`resultWordCount =
-  *      1`) still pulses `drainComplete` and emits exactly two bytes.
-  *   3. **random throttle** --- ready fires ~30 % of cycles; verify
-  *      byte order survives, no bytes lost, no Stream-protocol
-  *      violations. Throttle is driven from the same fork as the
-  *      monitor to eliminate fork/delta-cycle race ambiguity flagged
-  *      in the loader-FSM rubber-duck pattern.
-  *   4. **long deterministic stalls** --- ready forced low for 50
-  *      cycles at the front of each `send` state; covers stalls the
-  *      random throttle may not exercise on a given seed.
-  *   5. **re-arm** --- after one full drain, re-pulse `triggerDrain`
-  *      and verify a second drain starts from `resultBase`. Catches
-  *      "did we forget to reset addrReg?" bugs.
-  *   6. **trigger-while-busy** --- pulse `triggerDrain` mid-drain.
-  *      Verify the second pulse is ignored.
+  *   1. **happy 4-word** --- pre-load four distinct words; verify the byte
+  *      stream is `[w0_lo, w0_hi, w1_lo, w1_hi, ...]` in the correct order;
+  *      `drainComplete` pulses on the SAME cycle the final byte fires; `active`
+  *      falls back to low; SPRAM read addresses are exactly
+  *      `[base, base+1, ..., limit]`.
+  *   2. **single-word ring** --- minimum-size sweep (`resultWordCount = 1`)
+  *      still pulses `drainComplete` and emits exactly two bytes.
+  *   3. **random throttle** --- ready fires ~30 % of cycles; verify byte order
+  *      survives, no bytes lost, no Stream-protocol violations. Throttle is
+  *      driven from the same fork as the monitor to eliminate fork/delta-cycle
+  *      race ambiguity flagged in the loader-FSM rubber-duck pattern.
+  *   4. **long deterministic stalls** --- ready forced low for 50 cycles at the
+  *      front of each `send` state; covers stalls the random throttle may not
+  *      exercise on a given seed.
+  *   5. **re-arm** --- after one full drain, re-pulse `triggerDrain` and verify
+  *      a second drain starts from `resultBase`. Catches "did we forget to
+  *      reset addrReg?" bugs.
+  *   6. **trigger-while-busy** --- pulse `triggerDrain` mid-drain. Verify the
+  *      second pulse is ignored.
   */
 object MoleDrainerFsmSim extends App {
 
@@ -47,10 +45,9 @@ object MoleDrainerFsmSim extends App {
   val RESULT_WORD_COUNT = 4
   val ADDR_WIDTH = 4 // covers 0..15, enough for base+count = 8
 
-  /** Sim DUT wrapper: drainer plus a Mem-backed mock SPRAM with a
-    * sim-only write port. Mirrors the real `SpramController`
-    * single-port read/write semantics (one-cycle synchronous read
-    * latency).
+  /** Sim DUT wrapper: drainer plus a Mem-backed mock SPRAM with a sim-only
+    * write port. Mirrors the real `SpramController` single-port read/write
+    * semantics (one-cycle synchronous read latency).
     */
   case class DrainerSimDut(
       resultBase: Int,
@@ -138,9 +135,9 @@ object MoleDrainerFsmSim extends App {
   def expectedBytes(words: Seq[Int]): Seq[Int] =
     words.flatMap(w => Seq(w & 0xff, (w >> 8) & 0xff))
 
-  /** Aggregated monitor state. Cycles are simulation cycle counts
-    * (each `waitSampling` ticks the counter by 1) so we can assert
-    * cycle alignment between events.
+  /** Aggregated monitor state. Cycles are simulation cycle counts (each
+    * `waitSampling` ticks the counter by 1) so we can assert cycle alignment
+    * between events.
     */
   case class Monitors(
       bytes: mutable.Buffer[Int],
@@ -150,14 +147,13 @@ object MoleDrainerFsmSim extends App {
       protocolViolations: () => Int
   )
 
-  /** Start a single fork that owns BOTH the ready driver (if a
-    * throttle function is provided) and all sampling. Doing both in
-    * one fork eliminates the fork/delta-cycle race the loader-FSM
-    * rubber-duck pass flagged: ready and the sampled `fire` always
-    * come from the same edge.
+  /** Start a single fork that owns BOTH the ready driver (if a throttle
+    * function is provided) and all sampling. Doing both in one fork eliminates
+    * the fork/delta-cycle race the loader-FSM rubber-duck pass flagged: ready
+    * and the sampled `fire` always come from the same edge.
     *
-    * Pass `readyDriver = None` to leave the test in control of
-    * `txData.ready` (e.g. when it just stays high).
+    * Pass `readyDriver = None` to leave the test in control of `txData.ready`
+    * (e.g. when it just stays high).
     */
   def startMonitors(
       dut: DrainerSimDut,
@@ -208,11 +204,22 @@ object MoleDrainerFsmSim extends App {
       }
     }
 
-    Monitors(bytes, byteFireCycles, drainCompleteCycles, readAddrs, () => violations)
+    Monitors(
+      bytes,
+      byteFireCycles,
+      drainCompleteCycles,
+      readAddrs,
+      () => violations
+    )
   }
 
   // Wait for a condition with a timeout; throws on timeout.
-  def waitUntil(dut: DrainerSimDut, cond: () => Boolean, maxCycles: Int, what: String): Unit = {
+  def waitUntil(
+      dut: DrainerSimDut,
+      cond: () => Boolean,
+      maxCycles: Int,
+      what: String
+  ): Unit = {
     var c = 0
     while (!cond() && c < maxCycles) {
       dut.clockDomain.waitSampling()
@@ -259,7 +266,10 @@ object MoleDrainerFsmSim extends App {
       mon.bytes.toSeq == expected,
       s"byte stream mismatch:\n  got      ${mon.bytes.toSeq.map(b => f"$b%02x").mkString(" ")}\n  expected ${expected.map(b => f"$b%02x").mkString(" ")}"
     )
-    assert(mon.drainCompleteCycles.size == 1, s"expected 1 drainComplete pulse, got ${mon.drainCompleteCycles.size}")
+    assert(
+      mon.drainCompleteCycles.size == 1,
+      s"expected 1 drainComplete pulse, got ${mon.drainCompleteCycles.size}"
+    )
 
     // Cycle alignment: drainComplete must fire on the SAME cycle as
     // the final byte. This is what the rubber-duck pass flagged: the
@@ -281,7 +291,10 @@ object MoleDrainerFsmSim extends App {
       s"address sweep wrong:\n  got      $uniqueAddrs\n  expected $expectedAddrs"
     )
 
-    assert(mon.protocolViolations() == 0, s"Stream protocol violations: ${mon.protocolViolations()}")
+    assert(
+      mon.protocolViolations() == 0,
+      s"Stream protocol violations: ${mon.protocolViolations()}"
+    )
     assert(!dut.io.active.toBoolean, "expected active low after drain")
     println("[happy-4-word] OK")
   }
@@ -318,7 +331,10 @@ object MoleDrainerFsmSim extends App {
     )
     dut.clockDomain.waitSampling(4)
 
-    assert(mon.bytes.toSeq == expectedBytes(words), s"single-word byte mismatch: ${mon.bytes.toSeq}")
+    assert(
+      mon.bytes.toSeq == expectedBytes(words),
+      s"single-word byte mismatch: ${mon.bytes.toSeq}"
+    )
     assert(mon.drainCompleteCycles.size == 1, "expected 1 drainComplete pulse")
     assert(
       mon.drainCompleteCycles.head == mon.byteFireCycles.last,
@@ -342,7 +358,8 @@ object MoleDrainerFsmSim extends App {
     preloadRing(dut, RESULT_BASE, words)
 
     val rng = new Random(0xc0ffee)
-    val mon = startMonitors(dut, readyDriver = Some(() => rng.nextInt(100) < 30))
+    val mon =
+      startMonitors(dut, readyDriver = Some(() => rng.nextInt(100) < 30))
     pulseTrigger(dut)
 
     // 8 bytes * ~4 cycles average between fires + SPRAM 1-cycle
@@ -361,12 +378,18 @@ object MoleDrainerFsmSim extends App {
       mon.bytes.toSeq == expected,
       s"throttled byte stream mismatch:\n  got      ${mon.bytes.toSeq.map(b => f"$b%02x").mkString(" ")}\n  expected ${expected.map(b => f"$b%02x").mkString(" ")}"
     )
-    assert(mon.drainCompleteCycles.size == 1, "expected 1 drainComplete under throttle")
+    assert(
+      mon.drainCompleteCycles.size == 1,
+      "expected 1 drainComplete under throttle"
+    )
     assert(
       mon.drainCompleteCycles.head == mon.byteFireCycles.last,
       "throttled drainComplete cycle mismatch"
     )
-    assert(mon.protocolViolations() == 0, s"Stream violations under throttle: ${mon.protocolViolations()}")
+    assert(
+      mon.protocolViolations() == 0,
+      s"Stream violations under throttle: ${mon.protocolViolations()}"
+    )
     println("[backpressure-throttle] OK")
   }
 
@@ -420,12 +443,18 @@ object MoleDrainerFsmSim extends App {
       mon.bytes.toSeq == expected,
       s"long-stall byte stream mismatch: ${mon.bytes.toSeq}"
     )
-    assert(mon.drainCompleteCycles.size == 1, "exactly one drainComplete after stalls")
+    assert(
+      mon.drainCompleteCycles.size == 1,
+      "exactly one drainComplete after stalls"
+    )
     assert(
       mon.drainCompleteCycles.head == mon.byteFireCycles.last,
       "long-stall drainComplete cycle mismatch"
     )
-    assert(mon.protocolViolations() == 0, s"Stream violations under stall: ${mon.protocolViolations()}")
+    assert(
+      mon.protocolViolations() == 0,
+      s"Stream violations under stall: ${mon.protocolViolations()}"
+    )
     println("[long-stall] OK")
   }
 
@@ -444,7 +473,12 @@ object MoleDrainerFsmSim extends App {
     val mon = startMonitors(dut)
 
     pulseTrigger(dut)
-    waitUntil(dut, () => mon.drainCompleteCycles.size >= 1, 200, "first drainComplete")
+    waitUntil(
+      dut,
+      () => mon.drainCompleteCycles.size >= 1,
+      200,
+      "first drainComplete"
+    )
     dut.clockDomain.waitSampling(4)
     val firstByteCount = mon.bytes.size
 
@@ -452,18 +486,32 @@ object MoleDrainerFsmSim extends App {
     preloadRing(dut, RESULT_BASE, words2)
 
     pulseTrigger(dut)
-    waitUntil(dut, () => mon.drainCompleteCycles.size >= 2, 200, "second drainComplete")
+    waitUntil(
+      dut,
+      () => mon.drainCompleteCycles.size >= 2,
+      200,
+      "second drainComplete"
+    )
     dut.clockDomain.waitSampling(4)
 
     val bytesFirst = mon.bytes.toSeq.take(firstByteCount)
     val bytesSecond = mon.bytes.toSeq.drop(firstByteCount)
-    assert(bytesFirst == expectedBytes(words1), s"first drain bytes wrong: $bytesFirst")
+    assert(
+      bytesFirst == expectedBytes(words1),
+      s"first drain bytes wrong: $bytesFirst"
+    )
     assert(
       bytesSecond == expectedBytes(words2),
       s"second drain bytes wrong:\n  got      ${bytesSecond.map(b => f"$b%02x").mkString(" ")}\n  expected ${expectedBytes(words2).map(b => f"$b%02x").mkString(" ")}"
     )
-    assert(mon.drainCompleteCycles.size == 2, s"expected 2 drainComplete pulses, got ${mon.drainCompleteCycles.size}")
-    assert(mon.protocolViolations() == 0, "no Stream violations across two drains")
+    assert(
+      mon.drainCompleteCycles.size == 2,
+      s"expected 2 drainComplete pulses, got ${mon.drainCompleteCycles.size}"
+    )
+    assert(
+      mon.protocolViolations() == 0,
+      "no Stream violations across two drains"
+    )
     println("[re-arm-two-drains] OK")
   }
 
@@ -482,7 +530,12 @@ object MoleDrainerFsmSim extends App {
     val mon = startMonitors(dut)
     pulseTrigger(dut)
 
-    waitUntil(dut, () => dut.io.active.toBoolean, 20, "active high after trigger")
+    waitUntil(
+      dut,
+      () => dut.io.active.toBoolean,
+      20,
+      "active high after trigger"
+    )
 
     // Mid-drain re-trigger; should be ignored.
     for (_ <- 0 until 2) {
@@ -490,7 +543,12 @@ object MoleDrainerFsmSim extends App {
       dut.clockDomain.waitSampling(3)
     }
 
-    waitUntil(dut, () => mon.drainCompleteCycles.size >= 1, 300, "drainComplete despite mid-drain triggers")
+    waitUntil(
+      dut,
+      () => mon.drainCompleteCycles.size >= 1,
+      300,
+      "drainComplete despite mid-drain triggers"
+    )
     dut.clockDomain.waitSampling(4)
 
     val expected = expectedBytes(words)
@@ -498,7 +556,10 @@ object MoleDrainerFsmSim extends App {
       mon.bytes.toSeq == expected,
       s"mid-trigger byte stream mismatch:\n  got      ${mon.bytes.toSeq.map(b => f"$b%02x").mkString(" ")}\n  expected ${expected.map(b => f"$b%02x").mkString(" ")}"
     )
-    assert(mon.drainCompleteCycles.size == 1, s"expected exactly 1 drainComplete despite re-triggers, got ${mon.drainCompleteCycles.size}")
+    assert(
+      mon.drainCompleteCycles.size == 1,
+      s"expected exactly 1 drainComplete despite re-triggers, got ${mon.drainCompleteCycles.size}"
+    )
     assert(mon.protocolViolations() == 0, "no Stream violations")
     assert(!dut.io.active.toBoolean, "expected active low after drain")
     println("[trigger-while-busy] OK")
