@@ -157,6 +157,24 @@ case class MoleLoaderFsm(
   val crcLoReg = Reg(Bits(8 bits)) init B(0, 8 bits)
   val frameLen = Reg(UInt(lenWidth bits)) init U(0, lenWidth bits)
   val wordIndex = Reg(UInt(wordIndexWidth bits)) init U(0, wordIndexWidth bits)
+  // Pre-registered "the word about to be written is the last word of the
+  // frame" predicate. Spelt out as a Reg, not a combinational
+  // `wordIndex + 1 === frameLen`, because the latter is a 13-bit add +
+  // 13-bit equality chain (for the default programWordCount=4096), and at
+  // 48 MHz on the iCE40 UP5K that chain plus the FSM next-state mesh that
+  // consumes it caps the loader at ~28 MHz --- nextpnr's worst path lands
+  // at `idleCounter.SR` with the wordIndex carry chain dominating.
+  // Pre-registering moves the wide comparator out of the FSM's same-cycle
+  // decision and into a 1-bit Reg read.
+  //
+  // Updated in `wordHiState` on the high-byte UART fire (one byte per
+  // ~10 baud-cycles --- comparator has plenty of time to settle on its
+  // own D-input net), so the SPRAM-paced `programWrite.fire` in
+  // `writeWordState` only reads the registered bit.
+  //
+  // `resyncState.onEntry` does NOT clear this Reg; it's always overwritten
+  // on the next `wordHi` fire before being read by writeWordState.
+  val isLastWord = Reg(Bool()) init (False)
   val idleCounter =
     Reg(UInt(idleCounterWidth bits)) init U(0, idleCounterWidth bits)
 
@@ -259,6 +277,14 @@ case class MoleLoaderFsm(
         } elsewhen (io.rx.fire) {
           wordHiReg := io.rx.payload
           crc.io.update.valid := True
+          // Pre-register the "this word is the last of the frame"
+          // predicate now, paced by the slow UART byte arrival, so
+          // writeWordState's same-cycle SPRAM-fire decision is a
+          // 1-bit Reg read instead of a 13-bit add+equality chain.
+          // See the Reg declaration for the timing rationale.
+          isLastWord := (wordIndex + 1) === frameLen.resize(
+            wordIndexWidth bits
+          )
           goto(writeWordState)
         }
       }
@@ -280,7 +306,7 @@ case class MoleLoaderFsm(
       whenIsActive {
         io.programWrite.valid := True
         when(io.programWrite.fire) {
-          when(wordIndex + 1 === frameLen.resize(wordIndexWidth bits)) {
+          when(isLastWord) {
             goto(crcLoState)
           } otherwise {
             wordIndex := wordIndex + 1
