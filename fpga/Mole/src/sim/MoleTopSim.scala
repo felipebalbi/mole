@@ -69,6 +69,11 @@ case class MoleTopSimDut(cfg: MoleConfig) extends Component {
     val engineDone = out Bool ()
     val loaderLoaded = out Bool ()
     val loaderFault = out Bool ()
+    val engineStart = out Bool ()
+    val engineResultWriteFire = out Bool ()
+    val drainTrigger = out Bool ()
+    val phaseRunning = out Bool ()
+    val phaseDraining = out Bool ()
 
     /** Pad ports passed straight through to MoleTop's `io_sda` / `io_scl` inout
       * pads. Verilator otherwise rejects MoleTop's instantiation with
@@ -137,6 +142,11 @@ case class MoleTopSimDut(cfg: MoleConfig) extends Component {
   io.engineDone := mole.io.sim_engineDone
   io.loaderLoaded := mole.io.sim_loaderLoaded
   io.loaderFault := mole.io.sim_loaderFault
+  io.engineStart := mole.io.sim_engineStart
+  io.engineResultWriteFire := mole.io.sim_engineResultWriteFire
+  io.drainTrigger := mole.io.sim_drainTrigger
+  io.phaseRunning := mole.io.sim_phaseRunning
+  io.phaseDraining := mole.io.sim_phaseDraining
 }
 
 /** End-to-end audit for [[MoleTop]].
@@ -293,12 +303,22 @@ object MoleTopSim extends App {
     var loadedPulses = 0
     var faultPulses = 0
     var engineDoneFalseSeen = false
+    var engineStartHighCycles = 0
+    var resultWriteFires = 0
+    var drainTriggerPulses = 0
+    var phaseRunningCycles = 0
+    var phaseDrainingCycles = 0
     val watcherFork = fork {
       while (true) {
         dut.clockDomain.waitSampling()
         if (dut.io.loaderLoaded.toBoolean) loadedPulses += 1
         if (dut.io.loaderFault.toBoolean) faultPulses += 1
         if (!dut.io.engineDone.toBoolean) engineDoneFalseSeen = true
+        if (dut.io.engineStart.toBoolean) engineStartHighCycles += 1
+        if (dut.io.engineResultWriteFire.toBoolean) resultWriteFires += 1
+        if (dut.io.drainTrigger.toBoolean) drainTriggerPulses += 1
+        if (dut.io.phaseRunning.toBoolean) phaseRunningCycles += 1
+        if (dut.io.phaseDraining.toBoolean) phaseDrainingCycles += 1
       }
     }
 
@@ -326,6 +346,15 @@ object MoleTopSim extends App {
     println(
       s"   counters: loadedPulses=$loadedPulses faultPulses=$faultPulses " +
         s"engineDoneFalseSeen=$engineDoneFalseSeen"
+    )
+    println(
+      s"   engine: startHighCycles=$engineStartHighCycles " +
+        s"resultWriteFires=$resultWriteFires " +
+        s"drainTriggerPulses=$drainTriggerPulses"
+    )
+    println(
+      s"   phase: runningCycles=$phaseRunningCycles " +
+        s"drainingCycles=$phaseDrainingCycles"
     )
     assert(
       expected == cfg.resultRingByteCount,

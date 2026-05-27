@@ -178,6 +178,11 @@ case class MoleTop(
     val sim_engineDone = (!useBlackBox) generate (out Bool ())
     val sim_loaderLoaded = (!useBlackBox) generate (out Bool ())
     val sim_loaderFault = (!useBlackBox) generate (out Bool ())
+    val sim_engineStart = (!useBlackBox) generate (out Bool ())
+    val sim_engineResultWriteFire = (!useBlackBox) generate (out Bool ())
+    val sim_drainTrigger = (!useBlackBox) generate (out Bool ())
+    val sim_phaseRunning = (!useBlackBox) generate (out Bool ())
+    val sim_phaseDraining = (!useBlackBox) generate (out Bool ())
   }
   noIoPrefix()
 
@@ -464,6 +469,11 @@ case class MoleTop(
       io.sim_engineDone := engine.io.done
       io.sim_loaderLoaded := loader.io.loaded
       io.sim_loaderFault := loader.io.fault
+      io.sim_engineStart := engineStartDrv
+      io.sim_engineResultWriteFire := engine.io.resultWrite.fire
+      io.sim_drainTrigger := drainTriggerComb
+      io.sim_phaseRunning := phase.isActive(phase.runningState)
+      io.sim_phaseDraining := phase.isActive(phase.drainingState)
     }
   }
 }
