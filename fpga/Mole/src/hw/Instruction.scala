@@ -64,9 +64,9 @@ import spinal.core._
   * lower-priority than ergonomic bounded loops: the SDK-level expansion for
   * `WAIT_ADDRESSED` (Start + 8 SAMPLE_BIT_ON_SCL + host compare + conditional
   * DRIVE_BIT_ON_SCL) has not yet shown the I3C-rate timing pressure that would
-  * justify reserving a slot, and `MISMATCH_CLEAR`'s use case is fully served
-  * by the broader `FLAG_CLEAR` still reserved at `0xE`. See ROADMAP
-  * §"Reserved for v0.5" for the full deferral note.
+  * justify reserving a slot, and `MISMATCH_CLEAR`'s use case is fully served by
+  * the broader `FLAG_CLEAR` still reserved at `0xE`. See ROADMAP §"Reserved for
+  * v0.5" for the full deferral note.
   *
   * The remaining two reserved slots are claimed by v0.5 candidates per ROADMAP
   * §"Reserved for v0.5". `CALL` / `RET` were considered and deliberately
@@ -422,19 +422,19 @@ object Instruction {
     * }}}
     *
     * Bits `[10:8]` are reserved (= 0) in the v1 two-LCR build; widening to a
-    * future 16-LCR file uses those three bits as additional reg-id bits with
-    * no wire-format break. The encoder pins `reg` to `{0, 1}`.
+    * future 16-LCR file uses those three bits as additional reg-id bits with no
+    * wire-format break. The encoder pins `reg` to `{0, 1}`.
     *
     * Paired with [[DecBranch]] for bounded loops: `LOAD_LOOP reg=0, imm=N`
     * primes LCR0 to `N`, then `DEC_BRANCH reg=0, back_offset` decrements LCR0
     * each pass and back-edges while LCR0 != 0. `imm = 0` is legal but unusual
-    * --- the SDK warns since the matching `DEC_BRANCH` wraps to `0xFF` and
-    * runs a full 256 iterations. Documented in the moleasm book.
+    * --- the SDK warns since the matching `DEC_BRANCH` wraps to `0xFF` and runs
+    * a full 256 iterations. Documented in the moleasm book.
     */
   case class LoadLoop(reg: Int, imm: Int) extends Instruction
 
-  /** `DEC_BRANCH reg, offset` --- decrement `LCR[reg]` and conditionally
-    * branch by a signed 8-bit PC-relative offset (±128 instructions) if the
+  /** `DEC_BRANCH reg, offset` --- decrement `LCR[reg]` and conditionally branch
+    * by a signed 8-bit PC-relative offset (±128 instructions) if the
     * post-decrement value is non-zero. Layout:
     *
     * {{{
@@ -447,8 +447,8 @@ object Instruction {
     *   2. `if (LCR[reg] != 0) PC <- PC + offset`.
     *
     * Same reserved-bit shape as [[LoadLoop]] --- `[10:8]` reserved for the
-    * eventual wider reg field. Same 8-bit signed offset shape as
-    * [[BranchOn]] --- the encoder shares the validation. Sticky engine flags
+    * eventual wider reg field. Same 8-bit signed offset shape as [[BranchOn]]
+    * --- the encoder shares the validation. Sticky engine flags
     * (`MISMATCH_FLAG`, `TIMEOUT_FLAG`, `START_FLAG`, `STOP_FLAG`) are NOT
     * touched by `DEC_BRANCH` per AGENTS §3.15.
     */

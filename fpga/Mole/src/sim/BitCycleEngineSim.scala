@@ -642,8 +642,8 @@ object BitCycleEngineSim {
     }
 
   /** Reserved opcode trap: 0xE / 0xF lead to HALT status 0xF. Use 0xE
-    * (FLAG_CLEAR, reserved v0.5, not implemented). Slots 0xC and 0xD
-    * are now LOAD_LOOP / DEC_BRANCH.
+    * (FLAG_CLEAR, reserved v0.5, not implemented). Slots 0xC and 0xD are now
+    * LOAD_LOOP / DEC_BRANCH.
     */
   private def testReservedOpcodeTrap(): Unit =
     runTest("reserved-opcode-trap") { dut =>
@@ -784,85 +784,85 @@ object BitCycleEngineSim {
       assert(!h.overflow, "nested loop unexpectedly overflowed")
     }
 
-    /** DEC_BRANCH boundary: LCR=1 going in must NOT branch (post-decrement = 0);
-      * LCR=2 going in must branch exactly once. Both segments share one MARK
-      * label per arm so we can count records per segment.
-      */
-    private def testLoopBoundary(): Unit =
-      runTest("loop-boundary") { dut =>
-        val program = Seq(
-          loadLoop(0, 1), // pc 0
-          decBranch(0, -1), // pc 1: lcr0 1 -> 0, fall through
-          mark(0x33), // pc 2: segment A, exactly 1 MARK
-          loadLoop(0, 2), // pc 3
-          mark(0x44), // pc 4: segment B body
-          decBranch(0, -2), // pc 5: lcr0 2 -> 1, back-edge; 1 -> 0, fall
-          halt(0) // pc 6
-        )
-        runProgram(dut, program)
-        val ring = drainRing(dut)
-        val countA = (2 until ring.length).count { i =>
-          val w = ring(i)
-          (w >>> 14) == 0x2 && (w & 0xff) == 0x33
-        }
-        val countB = (2 until ring.length).count { i =>
-          val w = ring(i)
-          (w >>> 14) == 0x2 && (w & 0xff) == 0x44
-        }
-        assert(countA == 1, s"segment A (lcr0=1, no branch) saw $countA MARKs")
-        assert(countB == 2, s"segment B (lcr0=2, 1 branch) saw $countB MARKs")
-        val h = haltAt(ring, resultLimit)
-        assert(h.status == 0, "boundary loop halt status non-zero")
-        assert(!h.overflow, "boundary loop unexpectedly overflowed")
+  /** DEC_BRANCH boundary: LCR=1 going in must NOT branch (post-decrement = 0);
+    * LCR=2 going in must branch exactly once. Both segments share one MARK
+    * label per arm so we can count records per segment.
+    */
+  private def testLoopBoundary(): Unit =
+    runTest("loop-boundary") { dut =>
+      val program = Seq(
+        loadLoop(0, 1), // pc 0
+        decBranch(0, -1), // pc 1: lcr0 1 -> 0, fall through
+        mark(0x33), // pc 2: segment A, exactly 1 MARK
+        loadLoop(0, 2), // pc 3
+        mark(0x44), // pc 4: segment B body
+        decBranch(0, -2), // pc 5: lcr0 2 -> 1, back-edge; 1 -> 0, fall
+        halt(0) // pc 6
+      )
+      runProgram(dut, program)
+      val ring = drainRing(dut)
+      val countA = (2 until ring.length).count { i =>
+        val w = ring(i)
+        (w >>> 14) == 0x2 && (w & 0xff) == 0x33
       }
-
-    /** DEC_BRANCH is flag-neutral (AGENTS section 3.15). Setup: a mismatching
-      * EMIT_BIT sets MISMATCH_FLAG. Then DEC_BRANCH runs in a small loop; the
-      * trailing BRANCH_ON MISMATCH must still take, proving DEC_BRANCH did not
-      * clobber the flag.
-      */
-    private def testLoopFlagNeutral(): Unit =
-      runTest("loop-flag-neutral") { dut =>
-        val program = Seq(
-          setMode(BusMode.i2c), // pc 0
-          emitBit(TxSymbol.hiz, expect = false, mask = true), // pc 1: mismatch
-          loadLoop(0, 3), // pc 2
-          decBranch(0, -1), // pc 3: loop 3 times, flag-neutral
-          branchOn(CondCode.mismatch, 1), // pc 4: take if flag survived
-          halt(0x1), // pc 5: would mean flag was cleared
-          halt(0x6) // pc 6: branch target; flag survived
-        )
-        dut.clockDomain.forkStimulus(period = 10)
-        quiet(dut)
-        dut.io.bus.sda.read #= true // SDA high -> expect=0 mismatches
-        dut.clockDomain.waitSampling(5)
-        load(dut, program)
-        dut.io.start #= true
-        dut.clockDomain.waitSamplingWhere(!dut.io.done.toBoolean)
-        dut.io.start #= false
-        var c = 0
-        while (!dut.io.done.toBoolean && c < 50000) {
-          dut.clockDomain.waitSampling()
-          c += 1
-        }
-        assert(dut.io.done.toBoolean, "engine never halted")
-        val ring = drainRing(dut)
-        val h = haltAt(ring, resultLimit)
-        assert(
-          h.status == 0x6,
-          s"DEC_BRANCH clobbered MISMATCH_FLAG: status 0x${h.status.toHexString} (expected 0x6)"
-        )
-        assert(
-          h.mismatch,
-          "HALT word should record sticky mismatch from EMIT_BIT"
-        )
+      val countB = (2 until ring.length).count { i =>
+        val w = ring(i)
+        (w >>> 14) == 0x2 && (w & 0xff) == 0x44
       }
+      assert(countA == 1, s"segment A (lcr0=1, no branch) saw $countA MARKs")
+      assert(countB == 2, s"segment B (lcr0=2, 1 branch) saw $countB MARKs")
+      val h = haltAt(ring, resultLimit)
+      assert(h.status == 0, "boundary loop halt status non-zero")
+      assert(!h.overflow, "boundary loop unexpectedly overflowed")
+    }
 
-    // --------------------------------------------------------------
-    // Entry point
-    // --------------------------------------------------------------
+  /** DEC_BRANCH is flag-neutral (AGENTS section 3.15). Setup: a mismatching
+    * EMIT_BIT sets MISMATCH_FLAG. Then DEC_BRANCH runs in a small loop; the
+    * trailing BRANCH_ON MISMATCH must still take, proving DEC_BRANCH did not
+    * clobber the flag.
+    */
+  private def testLoopFlagNeutral(): Unit =
+    runTest("loop-flag-neutral") { dut =>
+      val program = Seq(
+        setMode(BusMode.i2c), // pc 0
+        emitBit(TxSymbol.hiz, expect = false, mask = true), // pc 1: mismatch
+        loadLoop(0, 3), // pc 2
+        decBranch(0, -1), // pc 3: loop 3 times, flag-neutral
+        branchOn(CondCode.mismatch, 1), // pc 4: take if flag survived
+        halt(0x1), // pc 5: would mean flag was cleared
+        halt(0x6) // pc 6: branch target; flag survived
+      )
+      dut.clockDomain.forkStimulus(period = 10)
+      quiet(dut)
+      dut.io.bus.sda.read #= true // SDA high -> expect=0 mismatches
+      dut.clockDomain.waitSampling(5)
+      load(dut, program)
+      dut.io.start #= true
+      dut.clockDomain.waitSamplingWhere(!dut.io.done.toBoolean)
+      dut.io.start #= false
+      var c = 0
+      while (!dut.io.done.toBoolean && c < 50000) {
+        dut.clockDomain.waitSampling()
+        c += 1
+      }
+      assert(dut.io.done.toBoolean, "engine never halted")
+      val ring = drainRing(dut)
+      val h = haltAt(ring, resultLimit)
+      assert(
+        h.status == 0x6,
+        s"DEC_BRANCH clobbered MISMATCH_FLAG: status 0x${h.status.toHexString} (expected 0x6)"
+      )
+      assert(
+        h.mismatch,
+        "HALT word should record sticky mismatch from EMIT_BIT"
+      )
+    }
 
-    def main(args: Array[String]): Unit = {
+  // --------------------------------------------------------------
+  // Entry point
+  // --------------------------------------------------------------
+
+  def main(args: Array[String]): Unit = {
     testRevisionWritten()
     testHaltStatusPassthrough()
     testJmp()
