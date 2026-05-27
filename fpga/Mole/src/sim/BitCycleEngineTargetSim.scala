@@ -251,6 +251,12 @@ object BitCycleEngineTargetSim {
         }
       }
       for (_ <- 0 until 8) controllerBit(dut, bitValue = true)
+      // DRIVE_BIT_ON_SCL phase 2 closes on the NEXT falling edge
+      // after the rising-edge sample. Provide one extra falling
+      // edge so the 8th bit can advance past phase 2 and the
+      // engine can refetch the HALT. The matching rising edge is
+      // not required (no more drive ops after).
+      sclLow(dut)
       dut.io.bus.sda.read #= true
       dut.io.bus.scl.read #= true
       var c = 0
@@ -279,7 +285,11 @@ object BitCycleEngineTargetSim {
         setMode(BusMode.i2c),
         driveBit(
           TxSymbol.recessive,
-          expect = false,
+          // Target drove recessive (released SDA, expects to see
+          // the wired-AND read high). Harness forces SDA low to
+          // simulate another target winning the wire; sample
+          // reads 0 vs expected 1 -> MISMATCH_FLAG fires.
+          expect = true,
           mask = true,
           capture = false
         ),
