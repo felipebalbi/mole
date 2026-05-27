@@ -176,7 +176,7 @@ explicitly:
 
 ```text
 SET_BUS_MODE  i2c         ; recessive = Hi-Z
-LOAD_TIMING   i2c_freq, 250
+LOAD_TIMING   i2c_freq, 60
 ; ... I2C transaction ...
 
 SET_BUS_MODE  i3c-od      ; recessive = Hi-Z (different timing reg)

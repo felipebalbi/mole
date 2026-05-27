@@ -48,10 +48,11 @@ that shares the FT2232H's USB device with the JTAG side.
 
 ## 3. Talk to the engine
 
-Open the UART at **1 000 000 baud, 8N1, no flow control** and
-send a frame in the format from [`WIRE_FORMAT.md`](WIRE_FORMAT.md).
-The engine auto-runs on a CRC-valid frame and streams the result
-ring back. Total round-trip:
+Open the UART at **1 000 000 baud, 8N1, RTS/CTS hardware flow
+control** (active-low, FT2232H convention) and send a frame in the
+format from [`WIRE_FORMAT.md`](WIRE_FORMAT.md). The engine
+auto-runs on a CRC-valid frame and streams the result ring back.
+Total round-trip:
 
 ```
 frame_size  = 4 + 2 * len     bytes   (host -> engine)
@@ -63,6 +64,34 @@ halt drains 8 192 bytes regardless of how many records the engine
 actually wrote, since the wire format does not signal
 end-of-record. The host decodes records by their high-2-bit tag
 until it hits the HALT word at the last two bytes of the drain.
+
+A working `stty` line on Linux:
+
+```sh
+stty -F /dev/ttyUSB0 1000000 cs8 -cstopb -parenb \
+    crtscts -ixon -ixoff -ixany raw
+```
+
+`crtscts` enables the HW flow control; `-ixon -ixoff -ixany`
+explicitly disables any software (XON/XOFF) flow control --- Mole
+does not speak it and accidentally enabling it on the host turns
+arbitrary frame bytes into XON/XOFF and breaks the link.
+
+The pinout, named from the **FT2232H's** perspective (active-low):
+
+- **PMOD1A pin 19 / FT2232H channel A `RTS#`** -> Mole's
+  `io_uRts` input. The FT asserts RTS# (line LOW) when its USB
+  pipe has room; Mole's drainer pushes bytes only while this
+  line is LOW. Internal pull-up enabled on the FPGA pin, so an
+  unwired board reads HIGH = RTS#-deasserted = drainer halted
+  (a visible failure mode, not silent corruption).
+- **PMOD1A pin 18 / FT2232H channel A `CTS#`** -> Mole's
+  `io_uCts` output. Mole asserts CTS# (line LOW) only while the
+  top-level phase FSM is in `acceptLoadState` (no program
+  running, no drain in progress). A host with `crtscts`
+  enabled holds its TX off whenever CTS# is HIGH, which
+  enforces the spec invariant *"while program is not HALTED,
+  don't accept data"*.
 
 ## 4. Three smoke programs
 
@@ -161,6 +190,8 @@ external pull-ups against the I2C edge rates.
 | No LEDs change, no drain               | PLL never locked, or the bitstream did not flash. Power-cycle, re-flash via `make flash`, and check `dmesg` for FT2232H enumeration. The PLL-locked deassertion is what releases the fabric reset --- without it the engine sits in reset forever and `io_ledG` stays low.                                                                                                                                |
 | Drain comes back but the HALT word looks wrong | Read the last two bytes (low byte first) of the drain. Bit `[13]` set in the assembled 16-bit word means **overflow**: the engine tried to write more records than the result ring could hold. Bit `[12]` set means **MISMATCH_FLAG was high at HALT entry** (a sampled bit failed an `expect` compare). Bits `[11:8]` are the program-provided status code; `0xF` is the engine's reserved-opcode trap. |
 | Bus edges look glitchy or droop slowly | Pull-up too weak (or missing). For I2C use 4.7 kohm to 3.3 V; for I3C-OD windows use 1 kohm. PMOD1A doesn't have on-board pull-ups; you have to wire them externally. The engine drives PP-high only under `i3c-PP` / `hdr-ddr` modes; in I2C / I3C-OD modes the rising edge is RC-limited.                                                                                                               |
+| Frame sent but nothing drains back     | RTS#/CTS# is mis-wired or the host driver has `crtscts` disabled. The drainer halts whenever `io_uRts` reads HIGH (= RTS#-deasserted). With pin 19 internally pulled up, an unwired board reads HIGH and the drainer never sends. Verify the wiring (PMOD1A pins 18+19 -> FT2232H channel A CTS#+RTS#) and re-run the `stty` line from §3 (`crtscts -ixon -ixoff -ixany`).                                |
+| Host driver drops bytes mid-frame      | The host did **not** enable `crtscts` and ignored Mole's CTS# deassertion. Mole holds CTS# HIGH while a program is running or the result is draining; a host that doesn't honour it will pump bytes into the FT2232H's USB pipe that the FPGA loader will never accept (CTS# is checked at the FT, not at the FPGA UART RX). Re-run the `stty` line from §3.                                              |
 
 ## 6. Next steps
 

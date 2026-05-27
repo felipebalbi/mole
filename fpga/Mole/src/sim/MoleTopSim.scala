@@ -56,6 +56,19 @@ case class MoleTopSimDut(cfg: MoleConfig) extends Component {
     val ledG = out Bool ()
     val ledB = out Bool ()
 
+    /** MoleTop's CTS# output (active-low). Asserted (`0`) only while the loader
+      * is open for a new frame. Surfaced here so MoleTopFlowControlSim can
+      * sample it directly without reaching into `mole.io`.
+      */
+    val ctsOut = out Bool ()
+
+    /** Sim-side drive for MoleTop's RTS# input (active-low). Asserted (`0`)
+      * = "host ready, drainer may TX"; deasserted (`1`) = drainer halts.
+      * Defaulted to `0` in tests that do not exercise TX back-pressure so
+      * existing MoleTopSim cases keep streaming.
+      */
+    val rtsIn = in Bool ()
+
     /** Engine's bus drive signals, tapped from inside MoleTop's fabric area.
       * SB_IO bypass leaves the analog pads unconnected; this lets the sim
       * observe what the engine would have driven onto the pad.
@@ -101,6 +114,13 @@ case class MoleTopSimDut(cfg: MoleConfig) extends Component {
   io.ledR := mole.io.io_ledR
   io.ledG := mole.io.io_ledG
   io.ledB := mole.io.io_ledB
+
+  // Hardware flow control. CTS# is an output the test bench can sample;
+  // RTS# is an input the test bench drives. Defaulting `rtsIn := 0` at
+  // the testbench-side (in MoleTopSim's bench) keeps every existing
+  // MoleTopSim case TX-unblocked.
+  io.ctsOut := mole.io.io_uCts
+  mole.io.io_uRts := io.rtsIn
 
   // Sim-side UART. Same cfg as MoleTop's so the bit timing matches.
   val simTx = UartTx(uartCfg)
@@ -215,6 +235,18 @@ object MoleTopSim extends App {
   // reserved=0 = 0xC000.
   val cleanHaltWord = 0xc000
 
+  // See `MoleTopFlowControlSim.simConfig` for the rationale. Without
+  // these flags Verilator randomises every uninitialised Reg, and on
+  // unlucky seeds MoleTop's reset bridge synchroniser starts low,
+  // letting fabric-domain Regs (engine FSM, drive enables, busModeReg)
+  // skip their sync-reset clear and trip the iobuf bus-contention
+  // assert at the first post-reset posedge.
+  val simConfig = SimConfig
+    .addSimulatorFlag("--x-assign")
+    .addSimulatorFlag("0")
+    .addSimulatorFlag("--x-initial")
+    .addSimulatorFlag("0")
+
   // ----------------------------------------------------------------
   // Common helpers.
   // ----------------------------------------------------------------
@@ -271,6 +303,12 @@ object MoleTopSim extends App {
     dut.io.externalReset #= false
     dut.io.txData.valid #= false
     dut.io.rxData.ready #= false
+    // Default RTS# to asserted (LOW = host ready) so the drainer
+    // can stream freely in the existing MoleTopSim cases that
+    // don't exercise TX back-pressure. MoleTopFlowControlSim
+    // overrides this per-case to drive RTS# high and verify the
+    // drainer halts.
+    dut.io.rtsIn #= false
     dut.clockDomain.waitSampling(10)
     dut.io.externalReset #= true
     dut.clockDomain.waitSampling(10)
@@ -280,7 +318,7 @@ object MoleTopSim extends App {
   // Case 1: short-halt round-trip.
   // ----------------------------------------------------------------
   println("--- MoleTopSim: short halt round-trip ---")
-  SimConfig.compile(MoleTopSimDut(cfg)).doSim("short-halt") { dut =>
+  simConfig.compile(MoleTopSimDut(cfg)).doSim("short-halt") { dut =>
     dut.clockDomain.forkStimulus(period = 10)
     doReset(dut)
 
@@ -345,7 +383,7 @@ object MoleTopSim extends App {
   // it completes).
   // ----------------------------------------------------------------
   println("--- MoleTopSim: bus toggle ---")
-  SimConfig.compile(MoleTopSimDut(cfg)).doSim("bus-toggle") { dut =>
+  simConfig.compile(MoleTopSimDut(cfg)).doSim("bus-toggle") { dut =>
     dut.clockDomain.forkStimulus(period = 10)
     doReset(dut)
 
@@ -432,7 +470,7 @@ object MoleTopSim extends App {
   // normally.
   // ----------------------------------------------------------------
   println("--- MoleTopSim: bad CRC + recovery ---")
-  SimConfig.compile(MoleTopSimDut(cfg)).doSim("bad-crc") { dut =>
+  simConfig.compile(MoleTopSimDut(cfg)).doSim("bad-crc") { dut =>
     dut.clockDomain.forkStimulus(period = 10)
     doReset(dut)
 
@@ -508,7 +546,7 @@ object MoleTopSim extends App {
   // Case 4: back-to-back frames.
   // ----------------------------------------------------------------
   println("--- MoleTopSim: back-to-back frames ---")
-  SimConfig.compile(MoleTopSimDut(cfg)).doSim("back-to-back") { dut =>
+  simConfig.compile(MoleTopSimDut(cfg)).doSim("back-to-back") { dut =>
     dut.clockDomain.forkStimulus(period = 10)
     doReset(dut)
 

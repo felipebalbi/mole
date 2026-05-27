@@ -914,7 +914,7 @@ _ROADMAP_EXAMPLE_SRC = """
 ; 8-bit numeric label and the assembler doesn't auto-allocate IDs.
 ; Encoded bytes are byte-for-byte verifiable.
 
-        LOAD_TIMING   i2c_freq, 250         ; ~100 kHz @ 100 MHz fabric
+        LOAD_TIMING   i2c_freq, 60          ; ~100 kHz @ 24 MHz Verde fabric
         SET_BUS_MODE  i2c
 
         ; -- Start condition --
@@ -972,7 +972,7 @@ def _selfcheck_roadmap_example() -> None:
     §1118). Doc fix needed; the assembler emits the literal count."""
     words = assemble(_ROADMAP_EXAMPLE_SRC, filename="roadmap-example")
     expected = [
-        0x80FA,  # LOAD_TIMING i2c_freq=0, 250
+        0x803C,  # LOAD_TIMING i2c_freq=0, 60
         0x7000,  # SET_BUS_MODE i2c
         0x2500,  # Q0: sda=rec scl=rec
         0x2100,  # Q1: sda=dom scl=rec

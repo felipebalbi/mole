@@ -146,6 +146,27 @@ case class MoleTop(
     /** USB-UART TX line (FPGA to host). Idles high. */
     val io_uTx = out Bool ()
 
+    /** USB-UART CTS# output (FPGA -> FT2232H). Active-low. Asserted (`0`) only
+      * while the top-level phase FSM is in `acceptLoadState`, so a host driver
+      * with `crtscts` enabled holds its TX off whenever Mole is running a
+      * program or draining the result ring. Implements the spec invariant
+      * "while program is not HALTED, don't accept data."
+      */
+    val io_uCts = out Bool ()
+
+    /** USB-UART RTS# input (FT2232H -> FPGA). Active-low. Asynchronous to the
+      * fabric clock; the wrapper crosses it via a 2-FF `RxSync`. When
+      * deasserted (line HIGH = host's USB pipe full), the drainer's TX stream
+      * is halted via `Stream.haltWhen`. Standard hardware-flow-control
+      * semantics: deassertion does not abort an in-flight UART frame, only the
+      * start of the next one.
+      *
+      * The PCF enables an internal pull-up on this pin (see `icebreaker.pcf`),
+      * so an unwired board reads HIGH = RTS#-deasserted = drainer halted -- a
+      * clean, visible failure mode rather than metastable garbage.
+      */
+    val io_uRts = in Bool ()
+
     /** I3C / I2C SCL pad. */
     val io_scl = inout(Analog(Bool()))
 
@@ -418,10 +439,52 @@ case class MoleTop(
     drainer.io.readResp.payload := spram.io.readResp.payload
 
     // ----------------------------------------------------------------
-    // Drainer -> UART TX
+    // UART hardware flow control
+    //
+    // io_uCts (out, active-low): asserted only while the phase FSM
+    // is in acceptLoadState. Driven from the same `acceptRxComb`
+    // wire the loader uses, inverted at the pin to match the
+    // FT2232H's active-low CTS# convention. A host driver with
+    // `crtscts` enabled holds its TX off whenever this line is
+    // HIGH (Mole running or draining).
+    //
+    // io_uRts (in, active-low): the FT2232H's RTS# output, which
+    // tells us whether the host's USB pipe has room. Async to the
+    // fabric clock -- crossed through the same `RxSync` 2-FF
+    // chain we already use for io_uRx. RxSync's `init = True`
+    // means the synced value reads HIGH = "deasserted = don't TX"
+    // during reset, which is the safe default before the host has
+    // had a chance to assert RTS.
+    //
+    // The drainer's TX stream is gated with `haltWhen(rtsDeasserted)`
+    // so the in-flight byte inside UartTx completes even if RTS
+    // deasserts mid-frame -- only the *start* of the next frame
+    // is gated. This matches the standard hardware-flow-control
+    // contract (FT232/2232 datasheet, "modem control" section).
     // ----------------------------------------------------------------
 
-    uartTx.io.data << drainer.io.txData
+    io.io_uCts := !acceptRxComb
+
+    val rtsSync = RxSync()
+    rtsSync.io.asyncIn := io.io_uRts
+    val rtsDeasserted = rtsSync.io.syncOut
+
+    // ----------------------------------------------------------------
+    // Drainer -> UART TX
+    //
+    // Gated by `rtsDeasserted` so the drainer holds bytes when the
+    // host's RTS# goes high (USB pipe full). `Stream.haltWhen` is
+    // the right primitive here: it forces both `valid` and `ready`
+    // to False while the predicate holds, so the drainer keeps the
+    // byte and the UART TX stays idle on the wire. Crucially this
+    // gates only the *start* of new UART frames; a frame already
+    // in progress inside UartTx (sreg has loaded, fsm is busy)
+    // runs to completion regardless. Mid-byte RTS deassertion does
+    // not corrupt the wire format. See MoleTopFlowControlSim
+    // `txResumesMidByte` for the regression test.
+    // ----------------------------------------------------------------
+
+    uartTx.io.data << drainer.io.txData.haltWhen(rtsDeasserted)
 
     // ----------------------------------------------------------------
     // LEDs

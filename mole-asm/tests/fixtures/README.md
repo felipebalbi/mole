@@ -106,9 +106,16 @@ print(f"got {len(data)} bytes; revision = {data[:4].hex()}")
 Or for a no-Python first-light send (one-shot, drop and watch):
 
 ```sh
-stty -F /dev/ttyUSB0 1000000 cs8 -cstopb -parenb -crtscts -ixon -ixoff raw
+stty -F /dev/ttyUSB0 1000000 cs8 -cstopb -parenb \
+    crtscts -ixon -ixoff -ixany raw
 cat first-light.mole.bin > /dev/ttyUSB0
 ```
+
+`crtscts` enables the HW flow control Mole speaks on the FT2232H
+RTS#/CTS# pair (see `fpga/Mole/BRINGUP.md` §3); `-ixon -ixoff
+-ixany` explicitly disables software (XON/XOFF) flow control,
+which Mole does not understand and which would otherwise turn
+arbitrary frame bytes into flow-control codes.
 
 ## What you should see
 

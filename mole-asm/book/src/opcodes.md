@@ -222,14 +222,18 @@ named aliases:
 | `hdr_ddr_freq`     | 3   | `hdr-ddr`      |
 
 ```text
-LOAD_TIMING i2c_freq,   250    ; 250-quarter bit period
-LOAD_TIMING i3c_od_freq, 24    ; ~1 MHz at Verde 24 MHz fabric
+LOAD_TIMING i2c_freq,    60    ; ~100 kHz @ Verde 24 MHz fabric (~98.4 kHz exact)
+LOAD_TIMING i3c_od_freq,  5    ; ~1 MHz at Verde 24 MHz fabric (= reset default)
 ```
 
 Recompute the divider when you change board / clock. The Verde
-default is 24 MHz, so a 100 kHz I2C bit period is `24_000_000 /
-(100_000 * 4) ≈ 60` --- but `250` empirically lands at the right
-shape on hardware (see the `first-light` fixture commentary).
+default is 24 MHz, so a 100 kHz I2C bit rate wants `N = 24_000_000
+/ (4 * 100_000) - 1 = 59` (or `60` as the round-number figure the
+rest of the book uses; the resulting ~98.4 kHz is well within I2C
+Standard-mode tolerance). For a full table including 400 kHz, 1
+MHz, and a note on why 3.4 MHz is not reachable at 24 MHz, see
+the [Picking a divider](./mental-model.md#picking-a-divider)
+section in the Mental Model chapter.
 
 ## `MARK`
 

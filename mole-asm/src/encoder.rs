@@ -257,9 +257,9 @@ mod tests {
     }
 
     #[test]
-    fn load_timing_i2c_freq_250() {
-        // LOAD_TIMING i2c_freq=0, 250 -> 0x80FA.
-        assert_eq!(enc_load_timing(0, 250).unwrap(), 0x80FA);
+    fn load_timing_i2c_freq_60() {
+        // LOAD_TIMING i2c_freq=0, 60 -> 0x803C.
+        assert_eq!(enc_load_timing(0, 60).unwrap(), 0x803C);
     }
 
     #[test]
