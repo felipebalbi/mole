@@ -34,7 +34,7 @@
     ..isa-row("DRIVE_BIT_ON_SCL",  "target: drive SDA"),
     ..isa-row("DEC_BRANCH",        "decrement + branch"),
     ..isa-row("SET_BUS_MODE",      "switch electrical class"),
-    ..isa-row("CAPTURE",           "push sample to ring"),
+    ..isa-row("JMP",               "unconditional branch"),
     ..isa-row("LOAD_TIMING",       "set quarter divider"),
     ..isa-row("MARK",              "push host breadcrumb"),
     ..isa-row("STRETCH_SCL",       "target: hold SCL low"),

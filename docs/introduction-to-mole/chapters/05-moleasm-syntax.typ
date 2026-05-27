@@ -1,6 +1,6 @@
 #import "../lib.typ": *
 
-// moleasm syntax.
+// moleasm syntax -- mirror the golden fixtures byte-for-byte.
 
 #section-slide("05", "moleasm")
 
@@ -11,8 +11,8 @@
   #v(0.2em)
   #code-panel(size: 18pt)[
 ```
-// Drive a recessive bit. Capture what we see.
-emit_bit tx=recessive capture=1
+; Drive a recessive bit. Capture what we see.
+EMIT_BIT  tx=recessive capture=1
 ```
   ]
   #v(0.5em)
@@ -30,7 +30,7 @@ emit_bit tx=recessive capture=1
   #v(0.2em)
   #code-panel(size: 18pt)[
 ```
-label:  mnemonic  field=value  field=value ...
+label:  MNEMONIC  field=value  field=value ...
 ```
   ]
   #v(0.6em)
@@ -42,22 +42,23 @@ label:  mnemonic  field=value  field=value ...
 ]
 
 #content-slide(
-  "Directives",
-  kicker-text: "Set the stage",
+  "Two directives",
+  kicker-text: "Everything else is an opcode",
 )[
   #v(0.2em)
   #code-panel(size: 16pt)[
 ```
-.bus_mode      i2c
-.timing        div=15        // 400 kHz on 24 MHz fabric
-.seed          0xdead_beef   // host-side PRNG
-.glitch_ratio  0             // exactly zero
+.equ slow_div, 59         ; ~100 kHz at 24 MHz fabric
+.dw  0xC000               ; raw word, escape hatch
+
+        LOAD_TIMING   i2c_freq, slow_div
+        SET_BUS_MODE  i2c
 ```
   ]
   #v(0.4em)
   #align(center)[
     #text(font: font-serif, size: 16pt, style: "italic", fill: muted)[
-      `seed` and `glitch_ratio` never reach the wire.
+      Bus mode and timing are opcodes -- they live on the wire.
     ]
   ]
 ]

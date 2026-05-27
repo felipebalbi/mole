@@ -1,6 +1,7 @@
 #import "../lib.typ": *
 
-// Worked example 2: glitch injection.
+// Worked example 2: glitch injection -- uppercase mnemonics + `;`
+// comments to match the golden fixture style.
 
 #section-slide("07", "Injecting a glitch")
 
@@ -22,14 +23,14 @@
 
 #code-slide(
   "The injection",
-  kicker-text: "Bit 4 of 0x90 --- normally `tx=rec`",
+  kicker-text: "Bit 4 of 0x90 -- normally tx=recessive",
 )[
 ```
-// Drive quarter-by-quarter to violate setup/hold.
-emit_quarter sda=rec scl=dom    // Q0: load SDA, SCL low
-emit_quarter sda=rec scl=hiz    // Q1: SCL rises
-emit_quarter sda=dom scl=hiz    // Q2: GLITCH -- SDA drops
-emit_quarter sda=rec scl=dom    // Q3: SCL falls
+        ; Drive quarter-by-quarter to violate setup / hold.
+        EMIT_QUARTER  sda=recessive scl=dominant    ; Q0: load, SCL low
+        EMIT_QUARTER  sda=recessive scl=recessive   ; Q1: SCL rises
+        EMIT_QUARTER  sda=dominant  scl=recessive   ; Q2: GLITCH
+        EMIT_QUARTER  sda=recessive scl=dominant    ; Q3: SCL falls
 ```
 ]
 
@@ -39,7 +40,7 @@ emit_quarter sda=rec scl=dom    // Q3: SCL falls
 )[
   #v(0.4em)
   #numbered(
-    [#tag("ACK", color: accent)  #h(0.4em) Target didn't enforce setup/hold. *Bug.*],
+    [#tag("ACK", color: accent)  #h(0.4em) Target didn't enforce setup / hold. *Bug.*],
     [#tag("NACK", color: secondary) #h(0.4em) Target rejected it. *Spec-correct.*],
     [#tag("START", color: muted) #h(0.4em) Read as a new START. *Brittle.*],
   )

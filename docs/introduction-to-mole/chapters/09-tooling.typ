@@ -1,6 +1,7 @@
 #import "../lib.typ": *
 
-// Tooling.
+// Tooling -- matches mole-asm-cli/src/main.rs (input, -o/--output,
+// --frame, --frame-output). No invented flags.
 
 #section-slide("09", "Tooling")
 
@@ -10,11 +11,11 @@
 )[
 ```
 $ mole-asm program.moleasm
-  -> program.mole.bin
+  -> program.molecode               ; packed 16-bit words
 
-$ mole-asm --listing program.moleasm
-  -> program.mole.bin
-  -> program.lst       (annotated)
+$ mole-asm --frame program.moleasm
+  -> program.molecode
+  -> program.mole.bin               ; length + words + CRC, UART-ready
 ```
 ]
 
@@ -24,10 +25,10 @@ $ mole-asm --listing program.moleasm
 )[
 ```
 $ cd fpga/Mole
-$ make sim-engine     # bit-cycle engine
-$ make sim-uart       # UART block
-$ make sim-spram      # result-ring controller
-$ make sim            # everything
+$ make sim-engine     ; bit-cycle engine
+$ make sim-uart       ; UART block
+$ make sim-spram      ; result-ring controller
+$ make sim            ; everything
 ```
 ]
 
@@ -38,8 +39,8 @@ $ make sim            # everything
   #v(0.2em)
   #code-panel(size: 16pt)[
 ```
-$ make bitstream    # yosys + nextpnr-ice40
-$ make program      # iceprog
+$ make bitstream    ; yosys + nextpnr-ice40
+$ make program      ; iceprog
 ```
   ]
   #v(0.5em)
