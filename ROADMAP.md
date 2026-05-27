@@ -1118,55 +1118,56 @@ the syntax down here keeps tooling honest.
 I2C write of byte `0xAB` to 7-bit address `0x50` (address byte
 on the wire = `(0x50 << 1) | 0 = 0xA0`, MSB first, R/W = 0):
 
-```moleasm
-;; I2C write-one-byte: addr 0x50, data 0xAB
+```asm
+	;; I2C write-one-byte: addr 0x50, data 0xAB
 
-        LOAD_TIMING   i2c_freq, 250          ; ~100 kHz @ 100 MHz fabric (illustrative)
-        SET_BUS_MODE  i2c                    ; SCL+SDA both OD-release on high half
+	LOAD_TIMING   i2c_freq, 250	     ; ~100 kHz @ 100 MHz fabric (illustrative)
+	SET_BUS_MODE  i2c		     ; SCL+SDA both OD-release on high half
 
-        ;; -- Start condition: SDA falling while SCL high --
-        EMIT_QUARTER  sda=recessive scl=recessive    ; Q0: idle bus
-        EMIT_QUARTER  sda=dominant  scl=recessive    ; Q1: SDA pulled low (Start edge)
-        EMIT_QUARTER  sda=dominant  scl=dominant     ; Q2: SCL goes low
+	;; -- Start condition: SDA falling while SCL high --
+	EMIT_QUARTER  sda=recessive scl=recessive    ; Q0: idle bus
+	EMIT_QUARTER  sda=dominant  scl=recessive    ; Q1: SDA pulled low (Start edge)
+	EMIT_QUARTER  sda=dominant  scl=dominant     ; Q2: SCL goes low
 
-        ;; -- Address byte 0xA0 = 1010_0000 (MSB first) + R/W=0 --
-        EMIT_BIT      tx=recessive          ; bit 7 = 1
-        EMIT_BIT      tx=dominant           ; bit 6 = 0
-        EMIT_BIT      tx=recessive          ; bit 5 = 1
-        EMIT_BIT      tx=dominant           ; bit 4 = 0
-        EMIT_BIT      tx=dominant           ; bit 3 = 0
-        EMIT_BIT      tx=dominant           ; bit 2 = 0
-        EMIT_BIT      tx=dominant           ; bit 1 = 0
-        EMIT_BIT      tx=dominant           ; bit 0 = R/W = 0 (write)
+	;; -- Address byte 0xA0 = 1010_0000 (MSB first) + R/W=0 --
+	EMIT_BIT      tx=recessive	    ; bit 7 = 1
+	EMIT_BIT      tx=dominant	    ; bit 6 = 0
+	EMIT_BIT      tx=recessive	    ; bit 5 = 1
+	EMIT_BIT      tx=dominant	    ; bit 4 = 0
+	EMIT_BIT      tx=dominant	    ; bit 3 = 0
+	EMIT_BIT      tx=dominant	    ; bit 2 = 0
+	EMIT_BIT      tx=dominant	    ; bit 1 = 0
+	EMIT_BIT      tx=dominant	    ; bit 0 = R/W = 0 (write)
 
-        ;; -- ACK slot: release SDA, expect target to pull low --
-        EMIT_BIT      tx=hiz expect=0 mask=1 capture=1
-        BRANCH_ON     MISMATCH, nak         ; PC-relative, ±128 insn
+	;; -- ACK slot: release SDA, expect target to pull low --
+	EMIT_BIT      tx=hiz expect=0 mask=1 capture=1
+	BRANCH_ON     MISMATCH, nak	    ; PC-relative, ±128 insn
 
-        ;; -- Data byte 0xAB = 1010_1011 --
-        EMIT_BIT      tx=recessive          ; bit 7 = 1
-        EMIT_BIT      tx=dominant           ; bit 6 = 0
-        EMIT_BIT      tx=recessive          ; bit 5 = 1
-        EMIT_BIT      tx=dominant           ; bit 4 = 0
-        EMIT_BIT      tx=recessive          ; bit 3 = 1
-        EMIT_BIT      tx=dominant           ; bit 2 = 0
-        EMIT_BIT      tx=recessive          ; bit 1 = 1
-        EMIT_BIT      tx=recessive          ; bit 0 = 1
+	;; -- Data byte 0xAB = 1010_1011 --
+	EMIT_BIT      tx=recessive	    ; bit 7 = 1
+	EMIT_BIT      tx=dominant	    ; bit 6 = 0
+	EMIT_BIT      tx=recessive	    ; bit 5 = 1
+	EMIT_BIT      tx=dominant	    ; bit 4 = 0
+	EMIT_BIT      tx=recessive	    ; bit 3 = 1
+	EMIT_BIT      tx=dominant	    ; bit 2 = 0
+	EMIT_BIT      tx=recessive	    ; bit 1 = 1
+	EMIT_BIT      tx=recessive	    ; bit 0 = 1
 
-        ;; -- ACK slot --
-        EMIT_BIT      tx=hiz expect=0 mask=1 capture=1
-        BRANCH_ON     MISMATCH, nak
+	;; -- ACK slot --
+	EMIT_BIT      tx=hiz expect=0 mask=1 capture=1
+	BRANCH_ON     MISMATCH, nak
 
-        ;; -- Stop condition: SDA rising while SCL high --
-        EMIT_QUARTER  sda=dominant  scl=dominant     ; Q0: both low
-        EMIT_QUARTER  sda=dominant  scl=recessive    ; Q1: SCL goes high
-        EMIT_QUARTER  sda=recessive scl=recessive    ; Q2: SDA goes high (Stop edge)
+	;; -- Stop condition: SDA rising while SCL high --
+	EMIT_QUARTER  sda=dominant  scl=dominant     ; Q0: both low
+	EMIT_QUARTER  sda=dominant  scl=recessive    ; Q1: SCL goes high
+	EMIT_QUARTER  sda=recessive scl=recessive    ; Q2: SDA goes high (Stop edge)
 
-        MARK          label=ok
-        HALT          status=0
+	MARK	      label=ok
+	HALT	      status=0
 
-nak:    MARK          label=nak
-        HALT          status=1
+nak:
+	MARK	      label=nak
+	HALT	      status=1
 ```
 
 Observations:
