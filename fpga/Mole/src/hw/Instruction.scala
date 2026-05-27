@@ -6,12 +6,13 @@ import spinal.core._
   *
   * This file is the Scala-side **reference implementation** of the bytecode
   * wire format. It is consumed by simulation (round-trip audits, engine tests)
-  * and by the engine's RTL fetch path (via [[InstructionWord]] at the bottom of
-  * this file). It is **not** the host's runtime encoder: the host compiler is
-  * the (future) Rust crate under `../../crates/`, which emits pre-assembled
-  * bytes that travel raw over UART into the engine's SPRAM. Once the Rust crate
-  * exists, the Scala `encode`/`decode` pair below doubles as a cross-validation
-  * oracle --- "every legal instruction encodes to the same 16-bit word in both
+  * and by the engine's RTL fetch path, which slices the 16-bit instruction
+  * word directly from the `instrReg` register. It is **not** the host's
+  * runtime encoder: the host compiler is the (future) Rust crate under
+  * `../../crates/`, which emits pre-assembled bytes that travel raw over UART
+  * into the engine's SPRAM. Once the Rust crate exists, the Scala
+  * `encode`/`decode` pair below doubles as a cross-validation oracle ---
+  * "every legal instruction encodes to the same 16-bit word in both
   * implementations" is the cheapest strong-signal correctness check for a
   * wire-format contract.
   *
@@ -39,8 +40,6 @@ import spinal.core._
   *      round-trip pair operating on the 16-bit wire word as a plain `Int`.
   *      Pure Scala. The future Rust encoder is the runtime authority; this pair
   *      is its sim-time twin.
-  *   4. [[InstructionWord]] --- the only HW-facing artefact: a thin
-  *      opcode-plus-payload Bundle that Step 8's fetch path consumes.
   *
   * Step 7 ships all four SpinalEnums, all twelve case classes, encode + decode
   * bodies for the entire ISA (12 v0 opcodes plus a `ReservedV05` carrier for
@@ -546,9 +545,10 @@ object Instruction {
     *
     * **Pure Scala, not RTL.** Same role as [[encode]] (which see): this is the
     * sim-time reference decoder, not the engine's RTL fetch decoder. The
-    * engine's decode happens combinationally on [[InstructionWord]]'s payload
-    * slice in the Step-8 fetch FSM and shares the SpinalEnum widths defined
-    * above but none of this Scala function's body.
+    * engine's decode happens combinationally on the 16-bit `instrReg` register
+    * sliced per-opcode against the layouts in this file's case-class doc
+    * comments, sharing the SpinalEnum widths defined above but none of this
+    * Scala function's body.
     *
     * `word` must fit in the lower 16 bits; the upper bits are required to be
     * zero so callers cannot accidentally pass a sign-extended `Int`.
@@ -696,23 +696,4 @@ object Instruction {
     * `Int` (`>>`) to sign-extend the top bit.
     */
   private def signExtend8(byte: Int): Int = (byte << 24) >> 24
-}
-
-/** Hardware-side instruction Bundle skeleton --- consumed by the engine fetch
-  * path in Step 8. The 16-bit instruction word splits at the opcode / payload
-  * boundary; per-opcode field decoding happens combinationally on the payload
-  * slice and is the engine FSM's responsibility, not this bundle's. Keeping the
-  * bundle this thin avoids baking per-opcode layout into the fetch path and
-  * lets each consumer slice `payload` against its own operand layout.
-  */
-case class InstructionWord() extends Bundle {
-
-  /** Opcode field at `[15:12]`. */
-  val opcode = Opcode()
-
-  /** Remaining 12 bits of the instruction word. The engine FSM slices this
-    * per-opcode against the layouts in [[Instruction]]'s case-class doc
-    * comments.
-    */
-  val payload = Bits(Instruction.WORD_WIDTH - Instruction.OPCODE_WIDTH bits)
 }

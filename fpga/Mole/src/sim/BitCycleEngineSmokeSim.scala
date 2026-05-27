@@ -327,6 +327,18 @@ object BitCycleEngineSmokeSim {
 
       // 3. Structural assertions.
       val intervals = findSclLowIntervals(trace.toSeq)
+      if (intervals.size != 9) {
+        // Diagnostic dump --- printed on failure so we can tell whether the
+        // engine trapped to halt, never reached EMIT_BIT, or just drove the
+        // wrong line. Without this, "got 0" gives us nothing to triage from.
+        println(s"$label: trace length ${trace.size} cycles, dumping first 40:")
+        for ((s, c) <- trace.zipWithIndex.take(40)) {
+          println(
+            f"  cycle $c%3d: sdaLow=${s.sdaLow}%5b sdaHigh=${s.sdaHigh}%5b " +
+              f"sclLow=${s.sclLow}%5b sclHigh=${s.sclHigh}%5b"
+          )
+        }
+      }
       assert(
         intervals.size == 9,
         s"$label: expected 9 SCL-low intervals (one per EMIT_BIT), got ${intervals.size}"
