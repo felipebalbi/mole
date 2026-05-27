@@ -69,6 +69,17 @@ case class MoleTopSimDut(cfg: MoleConfig) extends Component {
     val engineDone = out Bool ()
     val loaderLoaded = out Bool ()
     val loaderFault = out Bool ()
+
+    /** Pad ports passed straight through to MoleTop's `io_sda` / `io_scl` inout
+      * pads. Verilator otherwise rejects MoleTop's instantiation with
+      * PINMISSING because Analog inouts cannot be left unconnected at a
+      * Component boundary. Nothing in the sim drives or observes these pads
+      * directly --- the engine's bus drivers are tapped via the `sim_*` ports
+      * above --- but the pads must dangle through to the testbench top level so
+      * the elaborator can wire them out.
+      */
+    val io_sda = inout(Analog(Bool()))
+    val io_scl = inout(Analog(Bool()))
   }
   noIoPrefix()
 
@@ -80,6 +91,12 @@ case class MoleTopSimDut(cfg: MoleConfig) extends Component {
   // wrapper's clock.
   mole.io.io_clk := ClockDomain.current.readClockWire
   mole.io.io_reset := io.externalReset
+
+  // Pass MoleTop's analog pads straight through to the wrapper boundary.
+  // Required for Verilator: a Component with inout(Analog) ports MUST have
+  // those ports connected at every instantiation site.
+  mole.io.io_sda <> io.io_sda
+  mole.io.io_scl <> io.io_scl
 
   io.ledR := mole.io.io_ledR
   io.ledG := mole.io.io_ledG
