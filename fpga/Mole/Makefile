@@ -73,7 +73,7 @@ sim: sim-config sim-opendrain sim-baud-gen sim-rx-sync \
      sim-tx-shiftreg sim-rx-shiftreg sim-tx-fsm sim-rx-fsm \
      sim-uart-tx sim-uart-rx sim-uart sim-spram sim-isa \
      sim-engine-smoke sim-engine-full sim-pll sim-crc sim-iobuf \
-     sim-loader-fsm ## Run all simulations
+     sim-loader-fsm sim-drainer-fsm ## Run all simulations
 
 # Per-block sim / gen targets land here once their hint blocks in
 # TODO.md flip from 🔲 to ✅. The naming contract is fixed:
@@ -97,6 +97,7 @@ sim: sim-config sim-opendrain sim-baud-gen sim-rx-sync \
 #   sim-crc              src/sim/Crc16XmodemSim.scala        (Step 13)
 #   sim-iobuf            src/sim/MoleIoBufUp5kSim.scala      (Step 13)
 #   sim-loader-fsm       src/sim/MoleLoaderFsmSim.scala      (Step 13)
+#   sim-drainer-fsm      src/sim/MoleDrainerFsmSim.scala     (Step 13)
 #   sim-top              src/sim/MoleTopSim.scala            (Step 14)
 #
 # Declared here in advance so the build contract is visible from
@@ -160,6 +161,9 @@ sim-iobuf: ## Run MoleIoBufUp5k bypass + BlackBox elaboration sim (Step 13)
 sim-loader-fsm: ## Run MoleLoaderFsm frame-parser audit (Step 13)
 	$(SBT) -batch "runMain $(PACKAGE).MoleLoaderFsmSim"
 
+sim-drainer-fsm: ## Run MoleDrainerFsm result-ring sweep audit (Step 13)
+	$(SBT) -batch "runMain $(PACKAGE).MoleDrainerFsmSim"
+
 # sim-top: ## End-to-end MoleTop sim: UART load -> engine -> UART results (Step 14)
 # 	$(SBT) -batch "runMain $(PACKAGE).MoleTopSim"
 
@@ -197,4 +201,4 @@ help: ## Show this help (every target with a ## description)
         sim-tx-shiftreg sim-rx-shiftreg sim-tx-fsm sim-rx-fsm \
         sim-uart-tx sim-uart-rx sim-uart sim-spram sim-isa \
         sim-engine-smoke sim-engine-full sim-pll sim-crc sim-iobuf \
-        sim-loader-fsm waves flash clean distclean help
+        sim-loader-fsm sim-drainer-fsm waves flash clean distclean help
