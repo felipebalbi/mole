@@ -1,0 +1,17 @@
+[workspace]
+resolver = "3"
+members = ["mole-asm"]
+
+# Shared metadata for every workspace member. Per AGENTS §5, edition 2024
+# is fine now that rustc has stabilised it; bump `rust-version` only when
+# a member actually requires a newer compiler feature.
+[workspace.package]
+edition = "2024"
+rust-version = "1.85"
+authors = ["Felipe Balbi <felipe.balbi@microsoft.com>"]
+repository = "https://github.com/6mil-Labs/mole"
+license = "MIT OR Apache-2.0"
+
+# Shared deps. Members opt in with e.g. `thiserror.workspace = true`.
+[workspace.dependencies]
+thiserror = "2"

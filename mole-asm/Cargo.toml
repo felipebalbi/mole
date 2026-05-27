@@ -1,0 +1,17 @@
+[package]
+name = "mole-asm"
+version = "0.1.0"
+description = "moleasm assembler — the Layer-1 bytecode compiler for the Mole bit-cycle engine."
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+name = "mole_asm"
+path = "src/lib.rs"
+
+[dependencies]
+thiserror.workspace = true
