@@ -693,7 +693,7 @@ and result-ring wrap-around.
 
 **Sim run:** `make sim-engine-smoke`.
 
-### 🔲 Step 10 --- Async waits + stretch
+### ✅ Step 10 --- Async waits + stretch
 
 **Goal:** implement `EMIT_QUARTER`, `STRETCH_SCL`, and the
 unified `WAIT_ON cond, timeout` opcode. These are the
@@ -719,6 +719,50 @@ on external bus state.
   set by `WAIT_ON START_SEEN` / `STOP_SEEN`. See ROADMAP
   §"Engine flags --- unified condition codes" for the full
   flag and code list.
+
+**What landed:**
+- Three new `decodeState` arms (`emitQuarter`, `stretchScl`,
+  `waitOn`) and three matching execute states in
+  `BitCycleEngineCore.scala`.
+- Four sticky flag regs (`mismatchFlag`, `timeoutFlag`,
+  `startFlag`, `stopFlag`) cleared on `io.start` per ROADMAP
+  §"Engine flags". MISMATCH compare runs at the Q2 → Q3 sample
+  point in `emitBitState` (and on the lone tick of
+  `emitQuarterState`) gated by the `[2:0]` flag triple's
+  `mask` bit; `mask=0` leaves the flag sticky.
+- Two-FF synchronizer on `io.bus.{sda,scl}.read` plus 1-cycle
+  history regs (`sdaSampledPrev`, `sclSampledPrev` init `True`
+  to match the recessive idle bus) drive the combinational
+  `startEdge` / `stopEdge` pulses. Edges only ever update
+  `start/stopFlag` while `waitOnState` is armed for the
+  matching cond --- the re-arm-on-entry write in the WAIT_ON
+  decode arm clears stale state per ROADMAP §"START_FLAG and
+  STOP_FLAG".
+- `STRETCH_SCL`: `n = 0` is a no-op (skip the state, PC++);
+  otherwise drive SCL dominant for `n` quarter-bit ticks and
+  release SCL to recessive (decoded against `BUS_MODE`) on the
+  final tick so a following `WAIT_ON SCL_HIGH` does not
+  deadlock waiting for the engine itself to release.
+- `WAIT_ON`: 8-bit timeout in quarters with `timeout = 0` as
+  the "wait forever" sentinel (captured in
+  `waitTimeoutInfinite`); cond-first / timeout-second priority
+  on the cycle they both fire. Reserved cond codes `0xA..0xF`
+  (v0.5 slots) trap to `HALT` at decode time --- a forward-
+  deployed v0.5 program against a v0 engine surfaces as a
+  clean halt rather than an infinite wait.
+
+**Deferred to Step 11:** the `capture` bit (writes the sampled
+SDA value to the result ring --- needs the ring write pointer)
+and `BRANCH_ON cond` reading these flags.
+
+**Deferred to Step 19:** target-role helpers
+`SAMPLE_BIT_ON_SCL` / `DRIVE_BIT_ON_SCL` and the AGENTS §3.13
+"target never PP-drives SCL" lint (no role register yet).
+
+**Sim runs:** the Step 9 smoke sim still passes unchanged
+(EMIT_BIT path runs with `mask=0` in every test, so the new
+MISMATCH wiring is dormant); systematic per-opcode coverage
+including WAIT_ON paths lands in Step 12.
 
 ### 🔲 Step 11 --- Control flow + bookkeeping + timing override
 
