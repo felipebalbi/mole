@@ -11,6 +11,9 @@ looks like end-to-end.
 Requirements:
 
 - [Typst](https://typst.app) 0.14.2 or newer.
+- Polylux 0.4.0 (resolved automatically from the typst package
+  cache; pinned in `lib.typ`). Newer 0.4.x point releases should
+  work but are not verified.
 - The [Aporetic](https://github.com/SaschaSommer/aporetic) font
   family installed on the OS font path. The deck expects the
   family names `Aporetic Sans`, `Aporetic Serif`, and

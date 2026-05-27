@@ -48,7 +48,7 @@ label:  MNEMONIC  field=value  field=value ...
   #v(0.2em)
   #code-panel(size: 16pt)[
 ```
-.equ slow_div, 59         ; ~100 kHz at 24 MHz fabric
+.equ slow_div, 60         ; ~100 kHz at 24 MHz fabric
 .dw  0xC000               ; raw word, escape hatch
 
         LOAD_TIMING   i2c_freq, slow_div
