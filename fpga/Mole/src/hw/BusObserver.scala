@@ -4,24 +4,24 @@ import spinal.core._
 
 /** Two-FF bus observer + edge detectors.
   *
-  * Shared scaffolding for controller-role flag handling and
-  * target-role bit pacing. Constructed inside
-  * [[BitCycleEngineCore]] from the registered sample lines on the
-  * pads, so every consumer reads the same metastability-resolved
-  * values. Returns an [[Area]] (not a [[Component]]) so it does
-  * not add a hierarchy level and Verilator-printed signal names
-  * stay readable.
+  * Shared scaffolding for controller-role flag handling and target-role bit
+  * pacing. Constructed inside [[BitCycleEngineCore]] from the registered sample
+  * lines on the pads, so every consumer reads the same metastability-resolved
+  * values. Returns an [[Area]] (not a [[Component]]) so it does not add a
+  * hierarchy level and Verilator-printed signal names stay readable.
   *
-  * Init values: sync shifts come up all-ones (recessive idle) so
-  * the first two post-reset cycles do not synthesise a spurious
-  * falling-edge pulse. The `*SampledPrev` regs follow the same
-  * convention --- real-world buses come up recessive.
+  * Init values: sync shifts come up all-ones (recessive idle) so the first two
+  * post-reset cycles do not synthesise a spurious falling-edge pulse. The
+  * `*SampledPrev` regs follow the same convention --- real-world buses come up
+  * recessive.
   *
-  * Edge pulses are one fabric cycle wide on the sample-domain
-  * transition that produced them.
+  * Edge pulses are one fabric cycle wide on the sample-domain transition that
+  * produced them.
   *
-  * @param sdaRaw  The unsynchronized SDA `read` from the pad.
-  * @param sclRaw  The unsynchronized SCL `read` from the pad.
+  * @param sdaRaw
+  *   The unsynchronized SDA `read` from the pad.
+  * @param sclRaw
+  *   The unsynchronized SCL `read` from the pad.
   */
 case class BusObserver(sdaRaw: Bool, sclRaw: Bool) extends Area {
 

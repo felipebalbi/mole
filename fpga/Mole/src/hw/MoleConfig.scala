@@ -77,15 +77,14 @@ import spinal.core._
   *   engine itself imposes no upper bound here.
   *
   * @param role
-  *   Compile-time selection between controller-role and target-role
-  *   wire semantics. Defaults to [[EngineRole.Controller]] --- today's
-  *   shipping behaviour and the only role exercised by Steps 1..18.
-  *   Set to [[EngineRole.Target]] (Step 19) to get the engine that
-  *   slaves to an external SCL; see [[EngineRole]] for the per-role
-  *   wire-level contracts. A Scala `if` (not a Spinal `when`) reads
-  *   this field at elaboration so the unused half of the bit-cycle
-  *   FSM and the unused half of [[SclWaveformGen]] disappear from
-  *   synthesis. One bitstream per role; switching at runtime is
+  *   Compile-time selection between controller-role and target-role wire
+  *   semantics. Defaults to [[EngineRole.Controller]] --- today's shipping
+  *   behaviour and the only role exercised by Steps 1..18. Set to
+  *   [[EngineRole.Target]] (Step 19) to get the engine that slaves to an
+  *   external SCL; see [[EngineRole]] for the per-role wire-level contracts. A
+  *   Scala `if` (not a Spinal `when`) reads this field at elaboration so the
+  *   unused half of the bit-cycle FSM and the unused half of [[SclWaveformGen]]
+  *   disappear from synthesis. One bitstream per role; switching at runtime is
   *   intentionally not supported.
   */
 case class MoleConfig(

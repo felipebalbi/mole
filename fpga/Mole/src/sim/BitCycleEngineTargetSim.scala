@@ -4,10 +4,9 @@ import spinal.core._
 import spinal.core.sim._
 import spinal.lib._
 
-/** Target-role coverage for [[BitCycleEngineCore]]. Six tests.
-  * Five share one [[BitCycleEngineTargetDut]] compile; the DAA
-  * arbitration test uses [[BitCycleEngineTwoTargetDut]] with a
-  * sim-side wired-AND model.
+/** Target-role coverage for [[BitCycleEngineCore]]. Six tests. Five share one
+  * [[BitCycleEngineTargetDut]] compile; the DAA arbitration test uses
+  * [[BitCycleEngineTwoTargetDut]] with a sim-side wired-AND model.
   *
   * Run: sbt "runMain mole.BitCycleEngineTargetSim"
   */
@@ -121,13 +120,12 @@ object BitCycleEngineTargetSim {
     dut.clockDomain.waitSampling(halfPeriodCycles)
   }
 
-  /** Controller-side bit cell: set SDA at the falling edge (like a
-    * real I2C controller), pulse SCL low then high. For a
-    * controller-write bit the caller passes the SDA value the
-    * controller is driving; for a target-write bit the caller
-    * passes `true` (controller releases SDA so the target's drive
-    * wins via wired-AND on real silicon, or via the engine's own
-    * drive on the sim bus which the harness reads back from the
+  /** Controller-side bit cell: set SDA at the falling edge (like a real I2C
+    * controller), pulse SCL low then high. For a controller-write bit the
+    * caller passes the SDA value the controller is driving; for a target-write
+    * bit the caller passes `true` (controller releases SDA so the target's
+    * drive wins via wired-AND on real silicon, or via the engine's own drive on
+    * the sim bus which the harness reads back from the
     * `bus.sda.driveLow/driveHigh` outputs).
     */
   private def controllerBit(
@@ -171,11 +169,10 @@ object BitCycleEngineTargetSim {
   // Tests
   // --------------------------------------------------------------
 
-  /** Pure-read by the controller: target captures 8 SDA bits clocked
-    * by the external controller's SCL. After eight
-    * SAMPLE_BIT_ON_SCL with capture=1, the result ring should hold
-    * eight CAPTURE records reflecting the bits the controller drove
-    * (0x96 = 1001 0110 used as the witness pattern).
+  /** Pure-read by the controller: target captures 8 SDA bits clocked by the
+    * external controller's SCL. After eight SAMPLE_BIT_ON_SCL with capture=1,
+    * the result ring should hold eight CAPTURE records reflecting the bits the
+    * controller drove (0x96 = 1001 0110 used as the witness pattern).
     */
   private def testTargetSampleEightBits(): Unit =
     runTest("target-sample-eight-bits") { dut =>
@@ -216,10 +213,10 @@ object BitCycleEngineTargetSim {
       assert(h.status == 0, s"target sample halt status nonzero (${h.status})")
     }
 
-  /** Target drives 8 SDA bits via DRIVE_BIT_ON_SCL. The engine's
-    * sdaDriveLow output should pulse once per `dominant` bit
-    * (four times for the witness pattern 0x96 = 1001 0110, i2c
-    * BUS_MODE where dominant -> NMOS on and recessive -> release).
+  /** Target drives 8 SDA bits via DRIVE_BIT_ON_SCL. The engine's sdaDriveLow
+    * output should pulse once per `dominant` bit (four times for the witness
+    * pattern 0x96 = 1001 0110, i2c BUS_MODE where dominant -> NMOS on and
+    * recessive -> release).
     */
   private def testTargetDriveEightBits(): Unit =
     runTest("target-drive-eight-bits") { dut =>
@@ -263,10 +260,10 @@ object BitCycleEngineTargetSim {
       assert(h.status == 0, s"target drive halt status nonzero (${h.status})")
     }
 
-  /** Target drives recessive with expect=recessive mask=1, but the
-    * harness forces SDA low across the rising-edge sample (mimics
-    * another target on the wired-AND winning the bit). The
-    * MISMATCH_FLAG must fire; visible in the HALT word.
+  /** Target drives recessive with expect=recessive mask=1, but the harness
+    * forces SDA low across the rising-edge sample (mimics another target on the
+    * wired-AND winning the bit). The MISMATCH_FLAG must fire; visible in the
+    * HALT word.
     */
   private def testTargetMismatchOnDrive(): Unit =
     runTest("target-mismatch-on-drive") { dut =>
@@ -311,9 +308,8 @@ object BitCycleEngineTargetSim {
       )
     }
 
-  /** EMIT_BIT in target role must NOT drive SCL. Monitor sclDrive*
-    * through a one-bit EMIT_BIT program; both must stay False the
-    * entire run.
+  /** EMIT_BIT in target role must NOT drive SCL. Monitor sclDrive* through a
+    * one-bit EMIT_BIT program; both must stay False the entire run.
     */
   private def testTargetNoSclDriveFromEmit(): Unit =
     runTest("target-no-scl-drive-from-emit") { dut =>
@@ -351,9 +347,9 @@ object BitCycleEngineTargetSim {
       )
     }
 
-  /** STRETCH_SCL is the one path by which the target may actively
-    * drive SCL low (canonical clock-stretch). Confirm sclDriveLow
-    * goes high during a STRETCH_SCL execution.
+  /** STRETCH_SCL is the one path by which the target may actively drive SCL low
+    * (canonical clock-stretch). Confirm sclDriveLow goes high during a
+    * STRETCH_SCL execution.
     */
   private def testTargetStretchDrivesSclLow(): Unit =
     runTest("target-stretch-drives-scl-low") { dut =>
@@ -388,10 +384,10 @@ object BitCycleEngineTargetSim {
       )
     }
 
-  /** I3C DAA arbitration: two target engines on one wired-AND bus
-    * drive competing PID bits. The "lower-PID" target drives
-    * dominant, the "higher-PID" drives recessive. Wired-AND reads
-    * low; the recessive-driving target sees mismatch.
+  /** I3C DAA arbitration: two target engines on one wired-AND bus drive
+    * competing PID bits. The "lower-PID" target drives dominant, the
+    * "higher-PID" drives recessive. Wired-AND reads low; the recessive-driving
+    * target sees mismatch.
     */
   private def testTargetDaaArbitration(): Unit = {
     val compiled2 = SimConfig.withWave

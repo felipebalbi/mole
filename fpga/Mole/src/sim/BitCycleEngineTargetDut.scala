@@ -5,11 +5,10 @@ import spinal.core.sim._
 import spinal.lib._
 
 /** Sim DUT for [[BitCycleEngineTargetSim]]: one [[BitCycleEngineCore]]
-  * elaborated with `role = EngineRole.Target` plus the same loader +
-  * debug-read scaffolding [[BitCycleEngineFullDut]] uses. The test
-  * harness drives `bus.sda.read` and `bus.scl.read` directly to mimic
-  * an external controller; the engine's drivers are observable on the
-  * same bundle.
+  * elaborated with `role = EngineRole.Target` plus the same loader + debug-read
+  * scaffolding [[BitCycleEngineFullDut]] uses. The test harness drives
+  * `bus.sda.read` and `bus.scl.read` directly to mimic an external controller;
+  * the engine's drivers are observable on the same bundle.
   */
 case class BitCycleEngineTargetDut(cfg: MoleConfig) extends Component {
 
