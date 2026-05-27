@@ -215,12 +215,188 @@ object BitCycleEngineTargetSim {
       assert(h.status == 0, s"target sample halt status nonzero (${h.status})")
     }
 
+  /** Target drives 8 SDA bits via DRIVE_BIT_ON_SCL. The engine's
+    * sdaDriveLow output should pulse once per `dominant` bit
+    * (four times for the witness pattern 0x96 = 1001 0110, i2c
+    * BUS_MODE where dominant -> NMOS on and recessive -> release).
+    */
+  private def testTargetDriveEightBits(): Unit =
+    runTest("target-drive-eight-bits") { dut =>
+      val bits = Seq(true, false, false, true, false, true, true, false)
+      val program = Seq(setMode(BusMode.i2c)) ++
+        bits.map { b =>
+          driveBit(if (b) TxSymbol.recessive else TxSymbol.dominant)
+        } :+ halt(0)
+      dut.clockDomain.forkStimulus(period = 10)
+      quiet(dut)
+      dut.clockDomain.waitSampling(5)
+      load(dut, program)
+      dut.io.start #= true
+      dut.clockDomain.waitSamplingWhere(!dut.io.done.toBoolean)
+      dut.io.start #= false
+      var prevDriveLow = false
+      var driveLowPulses = 0
+      val monitor = fork {
+        while (!dut.io.done.toBoolean) {
+          val now = dut.io.bus.sda.driveLow.toBoolean
+          if (now && !prevDriveLow) driveLowPulses += 1
+          prevDriveLow = now
+          dut.clockDomain.waitSampling()
+        }
+      }
+      for (_ <- 0 until 8) controllerBit(dut, bitValue = true)
+      dut.io.bus.sda.read #= true
+      dut.io.bus.scl.read #= true
+      var c = 0
+      while (!dut.io.done.toBoolean && c < 50000) {
+        dut.clockDomain.waitSampling(); c += 1
+      }
+      monitor.join()
+      assert(dut.io.done.toBoolean, "target drive: engine never halted")
+      assert(
+        driveLowPulses == 4,
+        s"expected 4 dominant drives, saw $driveLowPulses sdaDriveLow pulses"
+      )
+      val ring = drainRing(dut)
+      val h = haltAt(ring, resultLimit)
+      assert(h.status == 0, s"target drive halt status nonzero (${h.status})")
+    }
+
+  /** Target drives recessive with expect=recessive mask=1, but the
+    * harness forces SDA low across the rising-edge sample (mimics
+    * another target on the wired-AND winning the bit). The
+    * MISMATCH_FLAG must fire; visible in the HALT word.
+    */
+  private def testTargetMismatchOnDrive(): Unit =
+    runTest("target-mismatch-on-drive") { dut =>
+      val program = Seq(
+        setMode(BusMode.i2c),
+        driveBit(
+          TxSymbol.recessive,
+          expect = false,
+          mask = true,
+          capture = false
+        ),
+        halt(0)
+      )
+      dut.clockDomain.forkStimulus(period = 10)
+      quiet(dut)
+      dut.clockDomain.waitSampling(5)
+      load(dut, program)
+      dut.io.start #= true
+      dut.clockDomain.waitSamplingWhere(!dut.io.done.toBoolean)
+      dut.io.start #= false
+      // Drive SDA low across the controller bit cell so the wired
+      // AND reads low even though the target is releasing.
+      dut.io.bus.scl.read #= false
+      dut.io.bus.sda.read #= false
+      dut.clockDomain.waitSampling(halfPeriodCycles)
+      dut.io.bus.scl.read #= true
+      dut.clockDomain.waitSampling(halfPeriodCycles)
+      dut.io.bus.scl.read #= false
+      dut.io.bus.sda.read #= true
+      dut.clockDomain.waitSampling(halfPeriodCycles)
+      dut.io.bus.scl.read #= true
+      var c = 0
+      while (!dut.io.done.toBoolean && c < 50000) {
+        dut.clockDomain.waitSampling(); c += 1
+      }
+      assert(dut.io.done.toBoolean, "target mismatch: engine never halted")
+      val ring = drainRing(dut)
+      val h = haltAt(ring, resultLimit)
+      assert(
+        h.mismatch,
+        "DRIVE_BIT_ON_SCL did not set MISMATCH_FLAG on wired-AND loss"
+      )
+    }
+
+  /** EMIT_BIT in target role must NOT drive SCL. Monitor sclDrive*
+    * through a one-bit EMIT_BIT program; both must stay False the
+    * entire run.
+    */
+  private def testTargetNoSclDriveFromEmit(): Unit =
+    runTest("target-no-scl-drive-from-emit") { dut =>
+      val program = Seq(
+        setMode(BusMode.i2c),
+        emitBit(TxSymbol.dominant),
+        halt(0)
+      )
+      dut.clockDomain.forkStimulus(period = 10)
+      quiet(dut)
+      dut.clockDomain.waitSampling(5)
+      load(dut, program)
+      var anySclDrive = false
+      val monitor = fork {
+        while (!dut.io.done.toBoolean) {
+          if (
+            dut.io.bus.scl.driveLow.toBoolean ||
+            dut.io.bus.scl.driveHigh.toBoolean
+          ) anySclDrive = true
+          dut.clockDomain.waitSampling()
+        }
+      }
+      dut.io.start #= true
+      dut.clockDomain.waitSamplingWhere(!dut.io.done.toBoolean)
+      dut.io.start #= false
+      var c = 0
+      while (!dut.io.done.toBoolean && c < 50000) {
+        dut.clockDomain.waitSampling(); c += 1
+      }
+      monitor.join()
+      assert(dut.io.done.toBoolean, "target no-scl-drive: engine never halted")
+      assert(
+        !anySclDrive,
+        "EMIT_BIT in target role drove SCL --- engine should release it"
+      )
+    }
+
+  /** STRETCH_SCL is the one path by which the target may actively
+    * drive SCL low (canonical clock-stretch). Confirm sclDriveLow
+    * goes high during a STRETCH_SCL execution.
+    */
+  private def testTargetStretchDrivesSclLow(): Unit =
+    runTest("target-stretch-drives-scl-low") { dut =>
+      val program = Seq(
+        setMode(BusMode.i2c),
+        stretch(8),
+        halt(0)
+      )
+      dut.clockDomain.forkStimulus(period = 10)
+      quiet(dut)
+      dut.clockDomain.waitSampling(5)
+      load(dut, program)
+      var sawSclLow = false
+      val monitor = fork {
+        while (!dut.io.done.toBoolean) {
+          if (dut.io.bus.scl.driveLow.toBoolean) sawSclLow = true
+          dut.clockDomain.waitSampling()
+        }
+      }
+      dut.io.start #= true
+      dut.clockDomain.waitSamplingWhere(!dut.io.done.toBoolean)
+      dut.io.start #= false
+      var c = 0
+      while (!dut.io.done.toBoolean && c < 50000) {
+        dut.clockDomain.waitSampling(); c += 1
+      }
+      monitor.join()
+      assert(dut.io.done.toBoolean, "target stretch: engine never halted")
+      assert(
+        sawSclLow,
+        "STRETCH_SCL in target role did not assert sclDriveLow"
+      )
+    }
+
   // --------------------------------------------------------------
   // Entry point (extended as tests land)
   // --------------------------------------------------------------
 
   def main(args: Array[String]): Unit = {
     testTargetSampleEightBits()
+    testTargetDriveEightBits()
+    testTargetMismatchOnDrive()
+    testTargetNoSclDriveFromEmit()
+    testTargetStretchDrivesSclLow()
     println("BitCycleEngineTargetSim OK")
   }
 }
