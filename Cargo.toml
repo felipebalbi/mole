@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["mole-asm"]
+members = ["mole-asm", "mole-asm-cli"]
 
 # Shared metadata for every workspace member. Per AGENTS §5, edition 2024
 # is fine now that rustc has stabilised it; bump `rust-version` only when
@@ -15,3 +15,6 @@ license = "MIT OR Apache-2.0"
 # Shared deps. Members opt in with e.g. `thiserror.workspace = true`.
 [workspace.dependencies]
 thiserror = "2"
+clap = { version = "4", features = ["derive"] }
+color-eyre = "0.6"
+
