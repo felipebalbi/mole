@@ -8,12 +8,13 @@ import spinal.core._
   * wire format. It is consumed by simulation (round-trip audits, engine tests)
   * and by the engine's RTL fetch path, which slices the 16-bit instruction word
   * directly from the `instrReg` register. It is **not** the host's runtime
-  * encoder: the host compiler is the (future) Rust crate under `../../crates/`,
+  * encoder: the host compiler is the `mole-asm` Rust crate under
+  * `../../mole-asm/` (with its CLI front-end in `../../mole-asm-cli/`),
   * which emits pre-assembled bytes that travel raw over UART into the engine's
-  * SPRAM. Once the Rust crate exists, the Scala `encode`/`decode` pair below
-  * doubles as a cross-validation oracle --- "every legal instruction encodes to
-  * the same 16-bit word in both implementations" is the cheapest strong-signal
-  * correctness check for a wire-format contract.
+  * SPRAM. With both the Scala and Rust encoders in tree, the Scala
+  * `encode`/`decode` pair below doubles as a cross-validation oracle --- "every
+  * legal instruction encodes to the same 16-bit word in both implementations"
+  * is the cheapest strong-signal correctness check for a wire-format contract.
   *
   * Wire-format scope. Per `../../AGENTS.md` §3.9 the instruction width is fixed
   * at 16 bits; §3.10 locks the `expect`/`mask`/`capture` flag triple at bit
@@ -432,8 +433,8 @@ object Instruction {
   /** Encode a host-side [[Instruction]] into its 16-bit wire word.
     *
     * **Pure Scala, not RTL.** This function is the sim-time reference encoder,
-    * not the host's runtime encoder. The host compiler (the future Rust crate
-    * under `../../crates/`) emits pre-assembled bytes over UART; this Scala
+    * not the host's runtime encoder. The host compiler (the `mole-asm` Rust
+    * crate under `../../mole-asm/`) emits pre-assembled bytes over UART; this Scala
     * function exists to (1) satisfy Step 7's "round-trip encode/decode" sim
     * requirement, (2) let Step 9+ engine sims construct test programs in Scala
     * instead of hand-coded hex literals, and (3) cross-validate the Rust

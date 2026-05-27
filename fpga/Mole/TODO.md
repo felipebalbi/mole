@@ -9,8 +9,9 @@ as the design teaches us something.
 
 This TODO covers the **FPGA side** of `ROADMAP.md`'s v0 Phase 0 +
 Phase 1 (engine in HDL). The host-side Scheme compiler, encoder,
-and result decoder live under `crates/` and have their own bring-up
-plan (TBD).
+and result decoder live in their own root-level crates (e.g.
+`../../mole-asm/`, `../../mole-asm-cli/`) and have their own
+bring-up plan (TBD).
 
 Each completed step gets a "What landed" entry so the design
 rationale survives independently of the source.
@@ -1177,7 +1178,8 @@ complete in both roles.
 
 ## Out of scope for this TODO
 
-- Scheme compiler / SDK (host-side; lives under `../../crates/`).
+- Scheme compiler / SDK (host-side; lives in its own root-level
+  crate, e.g. `../../mole-sdk/` when it lands).
 - Error-injection PRNG (host-side; see ROADMAP §"Error injection
   model").
 - RP2350 transport (v1; postcard-rpc).

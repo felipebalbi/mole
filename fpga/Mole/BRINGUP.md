@@ -164,8 +164,9 @@ external pull-ups against the I2C edge rates.
 
 ## 6. Next steps
 
-Once smoke passes, the `crates/` workspace will host the proper
-host-side compiler (a Rust crate that emits the binary frame
-described in `WIRE_FORMAT.md`). Until then, any host language
-that can talk to a serial port and compute CRC-16/XMODEM works
-(Python with `pyserial` + `crcmod`, C with `tio`, etc.).
+Once smoke passes, the host-side `mole-asm` crate (already
+landed at the repo root) is what produces the binary frame
+described in `WIRE_FORMAT.md`. Until you switch over to it, any
+host language that can talk to a serial port and compute
+CRC-16/XMODEM works (Python with `pyserial` + `crcmod`, C with
+`tio`, etc.).

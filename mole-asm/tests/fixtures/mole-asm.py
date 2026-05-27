@@ -6,9 +6,10 @@ into a sibling `.molecode` file. With `--frame` it also writes a framed
 `.mole.bin` (len + words + CRC-16/XMODEM) ready to drop onto the
 iCEbreaker UART at 1 Mbaud.
 
-This is the *reference* implementation: it's the spec to which the
-eventual Rust assembler in `crates/mole-host/src/instruction.rs` will be
-diffed. Every line of grammar here lines up with one of:
+This is the *reference* implementation that the Rust `mole-asm` crate
+(at `../../../mole-asm/`, with its CLI front-end at
+`../../../mole-asm-cli/`) is diffed against. Every line of grammar
+here lines up with one of:
 
     AGENTS.md  §3.16    moleasm syntax (locked)
     ROADMAP.md §"Example: I2C write-one-byte in moleasm"  conventions

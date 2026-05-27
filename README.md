@@ -45,15 +45,19 @@ one error-injection model.
 ├── AGENTS.md          ← contributor + AI-agent rules (read this)
 ├── ROADMAP.md         ← full design and rationale (source of truth)
 ├── README.md          ← you are here
-├── crates/            ← Rust workspaces (host compiler, encoder,
-│                        decoder, CLI, FFI, future Pico firmware)
+├── Cargo.toml         ← host-tools Cargo workspace at the root
+├── mole-asm/          ← bytecode compiler library + mdBook tutorial
+├── mole-asm-cli/      ← `mole-asm` CLI (clap + color-eyre)
+├── (future) firmware/ ← no_std Pico firmware (its own workspace)
 └── fpga/              ← SpinalHDL projects (bit engine, UART,
                          SPRAM controller, per-board top-levels)
 ```
 
 The layout is intentionally minimal --- sub-trees grow as roadmap
-phases land. There will eventually be two Rust workspaces (host
-tools vs. `no_std` Pico firmware); they will stay separate.
+phases land. New host-side crates land at the repo root alongside
+`mole-asm/`. There will eventually be two Rust workspaces (host
+tools at the root, `no_std` Pico firmware under `firmware/`); they
+will stay separate.
 
 ## Status
 
