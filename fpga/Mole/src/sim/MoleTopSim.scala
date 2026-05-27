@@ -284,6 +284,23 @@ object MoleTopSim extends App {
       Instruction.encode(Instruction.Halt(0))
     )
     val frame = buildFrame(program)
+    println(
+      s"   frame (${frame.length} bytes): ${frame.map(b => f"$b%02x").mkString(" ")}"
+    )
+
+    // Watcher fork: count loader.loaded pulses, fault pulses, engineDone
+    // edges so we can tell after the fact whether the engine ran at all.
+    var loadedPulses = 0
+    var faultPulses = 0
+    var engineDoneFalseSeen = false
+    val watcherFork = fork {
+      while (true) {
+        dut.clockDomain.waitSampling()
+        if (dut.io.loaderLoaded.toBoolean) loadedPulses += 1
+        if (dut.io.loaderFault.toBoolean) faultPulses += 1
+        if (!dut.io.engineDone.toBoolean) engineDoneFalseSeen = true
+      }
+    }
 
     // Sim-side fork: drain bytes as they arrive so back-pressure
     // from the drainer is visible to the engine, and we don't have
@@ -301,6 +318,15 @@ object MoleTopSim extends App {
     val expected = received.size
     val hex = received.map(b => f"$b%02x").mkString(" ")
     println(s"   drained $expected bytes: $hex")
+    println(
+      s"   end-state: loaded=${dut.io.loaderLoaded.toBoolean} " +
+        s"fault=${dut.io.loaderFault.toBoolean} " +
+        s"engineDone=${dut.io.engineDone.toBoolean}"
+    )
+    println(
+      s"   counters: loadedPulses=$loadedPulses faultPulses=$faultPulses " +
+        s"engineDoneFalseSeen=$engineDoneFalseSeen"
+    )
     assert(
       expected == cfg.resultRingByteCount,
       s"short-halt: expected $expected == ${cfg.resultRingByteCount}"
