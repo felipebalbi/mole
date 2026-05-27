@@ -407,9 +407,12 @@ def lex(source: str, filename: str) -> list[Statement]:
             continue
 
         # First whitespace-delimited token is the mnemonic or directive.
-        head, _, rest = body.partition(" ")
-        head = head.strip()
-        rest = rest.strip()
+        # Accept any kind and any amount of whitespace between mnemonic and
+        # operands --- `str.split(None, 1)` collapses runs of any whitespace
+        # (space, tab, NBSP, ...) into a single separator.
+        parts = body.split(None, 1)
+        head = parts[0]
+        rest = parts[1].strip() if len(parts) > 1 else ""
 
         if head.startswith("."):
             directive = head.lower()
@@ -1035,10 +1038,34 @@ def _selfcheck_dw_equ() -> None:
     ], f".equ/.dw round-trip failed: got {[hex(w) for w in words]}"
 
 
+def _selfcheck_whitespace_tolerance() -> None:
+    """Mnemonic / operand separator must accept any whitespace, any amount:
+    tabs, multiple spaces, mixed runs. Regression: the lexer used to call
+    `body.partition(" ")` which only recognised a single space character and
+    rejected tab-indented operand blocks."""
+    src = (
+        ".equ\tslow_div,\t59\n"
+        "start:\n"
+        "\tLOAD_TIMING\t\t i2c_freq,  slow_div\n"
+        "\tSET_BUS_MODE   \ti2c\n"
+        "\tHALT\tstatus=0\n"
+    )
+    words = assemble(src, filename="whitespace-check")
+    # LOAD_TIMING i2c_freq=0, 59 -> 0x803B
+    # SET_BUS_MODE i2c          -> 0x7000
+    # HALT status=0             -> 0x0000
+    assert words == [
+        0x803B,
+        0x7000,
+        0x0000,
+    ], f"whitespace tolerance failed: got {[hex(w) for w in words]}"
+
+
 def _selfcheck() -> None:
     _selfcheck_crc_and_frame()
     _selfcheck_roadmap_example()
     _selfcheck_dw_equ()
+    _selfcheck_whitespace_tolerance()
 
 
 # ===========================================================================
