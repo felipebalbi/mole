@@ -61,7 +61,7 @@ $(ASC): $(JSON) $(PCF)
 		--pcf $(PCF)    \
 		--json $< \
 		--asc $@  \
-		--freq 12
+		--freq 48
 
 # 4. Pack (ASC -> BIN)
 $(BIN): $(ASC)
@@ -168,10 +168,11 @@ sim-top: ## End-to-end MoleTop sim: UART load -> engine -> UART results (Step 14
 	$(SBT) -batch "runMain $(PACKAGE).MoleTopSim"
 
 # gen target -- the canonical Verilog entrypoint is MoleTopVerilog;
-# generated module is MoleTop. Lands with Step 15.
+# generated module is MoleTop. The generated file lives at gen/MoleTop.v
+# and is gitignored.
 
-# gen: | $(GEN_DIR) ## Generate MoleTop.v in gen/ (lands with Step 15)
-# 	$(SBT) -batch "runMain $(PACKAGE).$(TOP)Verilog"
+gen: | $(GEN_DIR) ## Generate gen/MoleTop.v from MoleTopVerilog (Step 15)
+	$(SBT) -batch "runMain $(PACKAGE).$(TOP)Verilog"
 
 waves: ## Open the most recent simulation VCD in gtkwave
 	@vcd=$$(find $(SIM_DIR) -name '*.vcd' -printf '%T@ %p\n' 2>/dev/null \
@@ -201,4 +202,4 @@ help: ## Show this help (every target with a ## description)
         sim-tx-shiftreg sim-rx-shiftreg sim-tx-fsm sim-rx-fsm \
         sim-uart-tx sim-uart-rx sim-uart sim-spram sim-isa \
         sim-engine-smoke sim-engine-full sim-pll sim-crc sim-iobuf \
-        sim-loader-fsm sim-drainer-fsm sim-top waves flash clean distclean help
+        sim-loader-fsm sim-drainer-fsm sim-top gen waves flash clean distclean help
