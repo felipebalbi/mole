@@ -1467,11 +1467,11 @@ trace.
 
 ## Hardware tiers
 
-| SKU                     | FPGA                     | I3C ceiling | I2C       | HDR-DDR     | Form factor                           | Target price |
-|-------------------------|--------------------------|-------------|-----------|-------------|---------------------------------------|--------------|
-| **Mole Verde** (pocket) | iCE40 UP5K-SG48          | 6 MHz SDR   | all modes | no          | icebreaker today; USB-stick PCB later | $299         |
-| **Mole Rojo** (bench)   | ECP5-45F-CABGA381        | 25 MHz      | all modes | yes         | small custom PCB                      | $599         |
-| **Mole Negro** (future) | TBD (CertusPro-NX class) | per spec    | all modes | yes + HDR-T | rack-friendly                         | premium      |
+| SKU                     | FPGA                     | I3C ceiling | I2C       | HDR-DDR     | Form factor                           |
+|-------------------------|--------------------------|-------------|-----------|-------------|---------------------------------------|
+| **Mole Verde** (pocket) | iCE40 UP5K-SG48          | 6 MHz SDR   | all modes | no          | icebreaker today; USB-stick PCB later |
+| **Mole Rojo** (bench)   | ECP5-45F-CABGA381        | 25 MHz      | all modes | yes         | small custom PCB                      |
+| **Mole Negro** (future) | TBD (CertusPro-NX class) | per spec    | all modes | yes + HDR-T | rack-friendly                         |
 
 Both tiers share: Scheme SDK, bytecode format, ISA, error-injection
 model, peripheral emulation library, transport protocol.
@@ -1619,72 +1619,22 @@ Runner-up names kept in reserve: **Compás** (Spanish for compass +
 musical measure --- literally describes a quarter-bit timing engine),
 **Berimbau** (Brazilian capoeira instrument, strong rhythm semantics).
 
-### Pricing
+### Distribution
 
-| SKU        | Price | Anchor                                | Margin posture                                         |
-|------------|-------|---------------------------------------|--------------------------------------------------------|
-| Mole Verde | $299  | vs. $30 hobbyist FPGA boards          | 8--12× BoM markup; software/SDK carries the price      |
-| Mole Rojo  | $599  | vs. SuperMITT $995 (-40 %)            | 5--7× BoM markup; healthy room for distributor channel |
-| Mole Negro | TBD   | premium tier, post-product-market-fit | ---                                                    |
+Mole is open-source / open-hardware. The three SKUs are *reference
+designs*, not products on a shelf: every Gerber, every BoM, every
+line of Scala / Rust / Scheme lives in this repository under a
+permissive license, so anyone who wants a Verde on their desk can
+order an icebreaker and follow `BRINGUP.md`. A Rojo or Negro
+needs board fabrication, but the design files are the same kind
+of artifact.
 
-**BoM estimates (small-volume direct)**:
-
-- Mole Verde: UP5K (~$10) + Pico 2 (~$5) + USB-C + LDO + passives +
-  small PCB → ~$25--40.
-- Mole Rojo: ECP5-45K (~$25) + Pico 2 (~$5) + level shifters / PHY
-  (~$15) + USB-C + flash + connectors + LDOs (~$15) + larger PCB
-  (~$20) → ~$80--120.
-
-### Positioning vs. MCCI SuperMITT
-
-- **Price**: Mole Rojo $599 vs. SuperMITT $995 --- ~40 % undercut.
-- **Software story**: Mole ships an *open*, *diff-able*, *hackable*
-  Scheme SDK + peripheral-emulator library + curated compliance test
-  catalog. SuperMITT's firmware is closed. This is the defensible
-  long-term moat --- hardware can be copied; a living, contributable
-  SDK is much harder.
-- **Audience**: open-source-friendly, Rust-using, Linux-comfortable
-  engineers --- self-serve buyers who do not need (or want)
-  sales@mcci.com hand-holding.
-- **Distribution**: direct (own webshop) + Crowd Supply launch + small
-  distributor footprint later.
-
-### Pricing risks / caveats
-
-1. **Certifications eat early margin**: CE EMC + FCC Part 15B
-   unintentional-radiator testing runs ~$5--20k per design depending
-   on test house. Budget ~$10k per SKU, ~$20k total fixed cost to
-   amortize before first profit dollar.
-2. **Support is the hidden tax**: at $299 / $599 in the engineering
-   tools market, customers expect real responsiveness. Mitigation:
-   excellent docs, excellent Scheme-compiler error messages, public
-   issue tracker, community-first support model.
-3. **The MCCI $995 includes hand-holding**: their TAM overlaps but
-   is not identical to ours. Do not model Mole unit volume off
-   SuperMITT sales --- our buyer self-serves, which means smaller
-   TAM but higher per-unit margin and lower CAC.
-4. **Hobbyist-board comparison risk on Mole Verde**: at $299 a
-   developer's instinct is to compare against $30 FPGA dev boards.
-   The Mole-Verde value prop must lead with the SDK / docs /
-   curated tests / peripheral emulators --- not the silicon. Lean
-   on "the cheapest way to put real I3C compliance coverage on
-   every developer's desk".
-
-### Volume / break-even sketch
-
-Conservative single-developer-operation assumptions:
-
-- Mole Verde at $299, ~$35 BoM, ~$50 fulfillment+support overhead
-  per unit → ~$214 contribution margin.
-- Mole Rojo at $599, ~$100 BoM, ~$80 fulfillment+support overhead
-  per unit → ~$419 contribution margin.
-- Fixed certification + tooling + initial inventory: ~$30--50k.
-- Break-even at ~150 Verde *or* ~80 Rojo *or* (more realistic) a
-  blended ~100 units across SKUs.
-
-That is a *small* number of units to be cash-positive --- which
-matches the "indie engineering tool" profile. The hard part is
-demand generation, not unit economics.
+A small batch of pre-built kits on something like CrowdSupply is
+possible later if the community asks for one --- as a service to
+people who don't want to fab their own --- but the project is
+not structured around hardware sales. The durable artifact is
+the SDK + bytecode + test catalog, and those don't ship in a
+box.
 
 ### Brand stack
 
@@ -1706,7 +1656,8 @@ demand generation, not unit economics.
   explicit in source.
 - The peripheral-emulator library is a second-order ecosystem
   asset: "test your firmware against the entire ODP sensor catalog
-  without owning the silicon" is a story that sells itself.
+  without owning the silicon" is the kind of capability that grows
+  a contributor community on its own.
 - Open-toolchain throughout (yosys + nextpnr-ice40 + icestorm for
   pocket; yosys + nextpnr-ecp5 + prjtrellis for bench). No node-
   locked licenses, no NDAs, reproducible CI.

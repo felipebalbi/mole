@@ -457,10 +457,10 @@ footer (see "Breaking changes" above).
   without a roadmap update. These are externally communicated
   names.
 - Don't ignore the personal-repo rule from the org-roam-daily
-  skill (this repo is *not* personal --- it's a product). Trade
-  secrets, partner names, and pricing math from the roadmap *do*
-  stay in-repo; private code from other repos does not get
-  copied in without attribution.
+  skill (this repo is *not* personal --- it's an open product).
+  Partner names that haven't been publicly disclosed *do* stay
+  in-repo; private code from other repos does not get copied in
+  without attribution.
 - Don't reintroduce a third drive-style vocabulary. There are
   exactly two: `tx_symbol` (the per-bit / per-quarter bitstream
   field, values `dominant`/`recessive`/`hiz`) and the
