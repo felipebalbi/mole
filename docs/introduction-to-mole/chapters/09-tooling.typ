@@ -39,8 +39,8 @@ $ make sim            ; everything
   #v(0.2em)
   #code-panel(size: 16pt)[
 ```
-$ make bitstream    ; yosys + nextpnr-ice40
-$ make program      ; iceprog
+$ make             ; yosys + nextpnr-ice40
+$ make flash       ; iceprog
 ```
   ]
   #v(0.5em)
