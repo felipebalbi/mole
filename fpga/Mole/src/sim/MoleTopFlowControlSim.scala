@@ -168,10 +168,36 @@ object MoleTopFlowControlSim extends App {
   // ----------------------------------------------------------------
   // Case 1: CTS asserted in acceptLoad.
   // ----------------------------------------------------------------
+  //
+  // *** Temporary diagnostic ***
+  // Seed 1523062563 reproducibly trips
+  // `MoleIoBufUp5k: sda bus contention (driveLow && driveHigh)`
+  // at sim t=170 on the user's Linux box. A first-pass fix in
+  // `MoleIoBufUp5k.scala` (wrapping the bare `assert(...)` in
+  // `when(!ClockDomain.current.isResetActive)`) was confirmed to
+  // be a no-op by inspecting `gen/sim-iobuf/MoleIoBufUp5k.v`:
+  // SpinalHDL already emits the assert inside
+  // `always @(posedge clk or posedge reset) if(reset)/else`, so
+  // the wrapping `when(!reset)` lives inside the `else(reset)`
+  // branch where it is structurally always true.
+  //
+  // To diagnose the actual cause, pin the failing Verilator seed
+  // and enable VCD dumping. The dump lands at
+  // `simWorkspace/MoleTopSimDut/cts-asserted-on-reset.vcd` and
+  // the relevant signals to inspect at t=160..180 are:
+  //   - `sdaDriveLow` / `sdaDriveHigh` on the engine boundary
+  //   - the engine FSM state register
+  //   - `resetSync` (fabric reset; check for X-prop)
+  //   - `busModeReg` (in case X-resolved bus mode briefly takes
+  //     a path through SymbolDecoder that we missed)
+  //
+  // Revert this block (drop `.withWave`, drop `seed = ...`) once
+  // the root cause is identified and fixed.
+  // ----------------------------------------------------------------
   println("--- MoleTopFlowControlSim: cts-asserted-on-reset ---")
-  SimConfig
+  SimConfig.withWave
     .compile(MoleTopSimDut(cfg))
-    .doSim("cts-asserted-on-reset") { dut =>
+    .doSim("cts-asserted-on-reset", seed = 1523062563L) { dut =>
       dut.clockDomain.forkStimulus(period = 10)
       doReset(dut)
 

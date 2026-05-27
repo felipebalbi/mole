@@ -37,20 +37,6 @@ import spinal.lib._
   * `OE=1, D_OUT_0=1` (PP drive high) -- the assert is enforcing the engine-side
   * invariant, not preventing a literal pad shoot-through.
   *
-  * The check is gated by `!ClockDomain.current.isResetActive` so it only fires
-  * once reset has deasserted. The reason is purely Verilator: SpinalSim's
-  * default `--x-assign=unique` resolves un-clocked-yet `Reg.init(...)` flops
-  * to seed-dependent values until the first clock edge applies the sync reset.
-  * The engine's `sda*` / `scl*` drive regs in [[BitCycleEngineCore]] live in
-  * a sync-reset clock domain, so on certain seeds they can briefly read as
-  * (driveLow=1, driveHigh=1) at sim time 0 -- a Verilator artefact, not a real
-  * engine state. Seed 1523062563 on the `cts-asserted-on-reset` case of
-  * [[MoleTopFlowControlSim]] hits this exact window at t=170. Gating on
-  * `!isResetActive` preserves the invariant check for every post-reset cycle
-  * (where a genuine engine bug would surface) while filtering the reset-phase
-  * X-prop. There is no synthesis cost: the assert disappears entirely under
-  * yosys.
-  *
   * `PIN_TYPE = 6'b101000` decomposes as:
   *   - bits[5:2] = 4'b1010 -> PIN_OUTPUT_TRISTATE: the pad's output stage is
   *     tristateable; OUTPUT_ENABLE controls whether D_OUT_0 reaches the pad or
@@ -103,16 +89,11 @@ case class MoleIoBufUp5k(useBlackBox: Boolean = true) extends Component {
     // Both modes: catch the symbol decoder's "never-emit" contention case
     // as a simulation-time assertion. `label` is bound at elaboration
     // time so the message identifies which line (sda / scl) tripped
-    // without any runtime overhead. The `when(!isResetActive)` guard
-    // suppresses the Verilator `--x-assign=unique` reset-phase artefact
-    // described in the class scaladoc; the invariant still holds for
-    // every cycle the engine is actually running.
-    when(!ClockDomain.current.isResetActive) {
-      assert(
-        !(line.driveLow && line.driveHigh),
-        s"MoleIoBufUp5k: $label bus contention (driveLow && driveHigh)"
-      )
-    }
+    // without any runtime overhead.
+    assert(
+      !(line.driveLow && line.driveHigh),
+      s"MoleIoBufUp5k: $label bus contention (driveLow && driveHigh)"
+    )
 
     if (useBlackBox) {
       val sb = SB_IO()
