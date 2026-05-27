@@ -57,10 +57,15 @@ tools vs. `no_std` Pico firmware); they will stay separate.
 
 ## Status
 
-Pre-Phase-0. The repo currently holds the design (`ROADMAP.md`),
-the contributor rules (`AGENTS.md`), and empty `crates/` and
-`fpga/` trees. Nothing builds yet. See **ROADMAP.md §Phased plan**
-for what lands when.
+Phase 0 complete --- foundational SpinalHDL blocks under
+[`fpga/Mole/`](./fpga/Mole/): `MoleConfig`, `MoleBus`, UART
+(`UartConfig` / `BaudGenerator` / `RxSync` / `UartTx` / `UartRx`),
+and `SpramController`. Phase 1 in progress: the 16-bit
+instruction encoding (`Instruction.scala` + `InstructionSim`) is
+stable. The `BitCycleEngineCore` FSM lands next. See
+**ROADMAP.md §Phased plan** and
+[`fpga/Mole/TODO.md`](./fpga/Mole/TODO.md) for current
+bring-up state.
 
 ## Getting started (for contributors)
 
