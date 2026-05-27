@@ -56,9 +56,9 @@ case class MoleTopSimDut(cfg: MoleConfig) extends Component {
     val ledG = out Bool ()
     val ledB = out Bool ()
 
-    /** MoleTop's CTS# output (active-low). Asserted (`0`) only while the
-      * loader is open for a new frame. Surfaced here so MoleTopFlowControlSim
-      * can sample it directly without reaching into `mole.io`.
+    /** MoleTop's CTS# output (active-low). Asserted (`0`) only while the loader
+      * is open for a new frame. Surfaced here so MoleTopFlowControlSim can
+      * sample it directly without reaching into `mole.io`.
       */
     val ctsOut = out Bool ()
 

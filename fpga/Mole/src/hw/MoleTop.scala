@@ -158,8 +158,8 @@ case class MoleTop(
       * fabric clock; the wrapper crosses it via a 2-FF `RxSync`. When
       * deasserted (line HIGH = host's USB pipe full), the drainer's TX stream
       * is halted via `Stream.haltWhen`. Standard hardware-flow-control
-      * semantics: deassertion does not abort an in-flight UART frame, only
-      * the start of the next one.
+      * semantics: deassertion does not abort an in-flight UART frame, only the
+      * start of the next one.
       *
       * The PCF enables an internal pull-up on this pin (see `icebreaker.pcf`),
       * so an unwired board reads HIGH = RTS#-deasserted = drainer halted -- a

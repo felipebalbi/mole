@@ -14,34 +14,30 @@ import scala.collection.mutable
   * The four cases below cover both directions of flow control:
   *
   *   1. **CTS asserted in acceptLoad** --- after reset, before any frame is
-  *      sent, `io_uCts` is the active-low `0` (asserted) and stays asserted
-  *      for many cycles. Validates that the phase FSM enters `acceptLoadState`
+  *      sent, `io_uCts` is the active-low `0` (asserted) and stays asserted for
+  *      many cycles. Validates that the phase FSM enters `acceptLoadState`
   *      cleanly out of reset.
-  *
-  *   2. **CTS deasserted during run+drain** --- after a frame loads, the
-  *      phase FSM transitions through `runningState` and `drainingState`
-  *      before returning to `acceptLoadState`. `io_uCts` must be `1`
-  *      (deasserted) somewhere in that window and back to `0` (asserted)
-  *      after the full drain. This is the spec invariant "while program is
-  *      not HALTED, don't accept data": with `crtscts` enabled a host driver
-  *      will stop TX'ing as soon as CTS# deasserts.
-  *
+  *   2. **CTS deasserted during run+drain** --- after a frame loads, the phase
+  *      FSM transitions through `runningState` and `drainingState` before
+  *      returning to `acceptLoadState`. `io_uCts` must be `1` (deasserted)
+  *      somewhere in that window and back to `0` (asserted) after the full
+  *      drain. This is the spec invariant "while program is not HALTED, don't
+  *      accept data": with `crtscts` enabled a host driver will stop TX'ing as
+  *      soon as CTS# deasserts.
   *   3. **TX backpressure on RTS deasserted** --- holding `io_uRts` high
-  *      (deasserted) before a frame is sent must prevent the drainer from
-  *      ever placing a byte on `io_uTx`. The engine still runs (loader and
-  *      engine are RX-side; RTS only gates TX), but no result bytes leak
-  *      out. Dropping `io_uRts` then drains the full ring with a clean HALT
-  *      word at the tail.
-  *
+  *      (deasserted) before a frame is sent must prevent the drainer from ever
+  *      placing a byte on `io_uTx`. The engine still runs (loader and engine
+  *      are RX-side; RTS only gates TX), but no result bytes leak out. Dropping
+  *      `io_uRts` then drains the full ring with a clean HALT word at the tail.
   *   4. **TX resumes after mid-drain halt** --- partial-drain N bytes, raise
-  *      `io_uRts` mid-drain, wait long enough for one in-flight UART frame
-  *      to complete, verify no further bytes arrive, then drop `io_uRts` and
-  *      drain the remainder. Total bytes drained equals the full ring and
-  *      the final HALT word is clean --- confirming `Stream.haltWhen` only
-  *      gates the producer side, never drops in-flight bytes.
+  *      `io_uRts` mid-drain, wait long enough for one in-flight UART frame to
+  *      complete, verify no further bytes arrive, then drop `io_uRts` and drain
+  *      the remainder. Total bytes drained equals the full ring and the final
+  *      HALT word is clean --- confirming `Stream.haltWhen` only gates the
+  *      producer side, never drops in-flight bytes.
   *
-  * Test config matches [[MoleTopSim]]: 16-word program memory, 32-byte
-  * result ring, `[SetBusMode(i2c), Halt(0)]` as the canonical short program.
+  * Test config matches [[MoleTopSim]]: 16-word program memory, 32-byte result
+  * ring, `[SetBusMode(i2c), Halt(0)]` as the canonical short program.
   */
 object MoleTopFlowControlSim extends App {
 
@@ -115,10 +111,10 @@ object MoleTopFlowControlSim extends App {
     b
   }
 
-  /** Non-asserting variant of [[recvByte]]. Returns `Some(b)` if a byte
-    * arrives within `maxCycles`, `None` otherwise. Used to assert
-    * **absence** of a byte (Test 3 + 4): if this returns `Some` when we
-    * expected `None`, the halt path is leaking bytes.
+  /** Non-asserting variant of [[recvByte]]. Returns `Some(b)` if a byte arrives
+    * within `maxCycles`, `None` otherwise. Used to assert **absence** of a byte
+    * (Test 3 + 4): if this returns `Some` when we expected `None`, the halt
+    * path is leaking bytes.
     */
   def tryRecvByte(dut: MoleTopSimDut, maxCycles: Int): Option[Int] = {
     dut.io.rxData.ready #= true
