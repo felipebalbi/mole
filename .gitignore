@@ -167,3 +167,4 @@ result-*
 *.orig
 *.tmp
 .cache/
+*.molecode

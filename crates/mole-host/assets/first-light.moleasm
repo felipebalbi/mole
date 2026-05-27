@@ -1,0 +1,39 @@
+; first-light --- infinite loop, no HALT, no result drain.
+;
+; SET_BUS_MODE i2c, drop SDA for START, then clock out address 0x90
+; (TMP108 7-bit 0x48 << 1, R/W=0) forever. Scope on PMOD1A.2 (SDA)
+; and PMOD1A.1 (SCL) should see a clean ~98.8 kHz square wave with
+; the 1001_0000 pattern repeating. Press the iCEbreaker reset button
+; (or power-cycle) to stop --- the engine never executes HALT.
+
+.equ slow_div, 59           ; 100 kHz target at 24 MHz fabric
+
+        LOAD_TIMING   i2c_freq, slow_div
+        SET_BUS_MODE  i2c
+
+body:
+        ; -- 4 idle quarters (bus high) --
+        EMIT_QUARTER  sda=recessive scl=recessive
+        EMIT_QUARTER  sda=recessive scl=recessive
+        EMIT_QUARTER  sda=recessive scl=recessive
+        EMIT_QUARTER  sda=recessive scl=recessive
+
+        ; -- START: SDA falls while SCL high (2 quarters) --
+        EMIT_QUARTER  sda=dominant  scl=recessive
+        EMIT_QUARTER  sda=dominant  scl=recessive
+
+        ; -- SCL pulled low, ready for first bit (2 quarters) --
+        EMIT_QUARTER  sda=dominant  scl=dominant
+        EMIT_QUARTER  sda=dominant  scl=dominant
+
+        ; -- 0x90 = 1001_0000 MSB first --
+        EMIT_BIT      tx=recessive            ; bit 7 = 1
+        EMIT_BIT      tx=dominant             ; bit 6 = 0
+        EMIT_BIT      tx=dominant             ; bit 5 = 0
+        EMIT_BIT      tx=recessive            ; bit 4 = 1
+        EMIT_BIT      tx=dominant             ; bit 3 = 0
+        EMIT_BIT      tx=dominant             ; bit 2 = 0
+        EMIT_BIT      tx=dominant             ; bit 1 = 0
+        EMIT_BIT      tx=dominant             ; bit 0 = R/W = 0 (write)
+
+        BRANCH_ON     ALWAYS, body

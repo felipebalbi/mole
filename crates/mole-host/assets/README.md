@@ -1,44 +1,99 @@
 # Phase 3 bring-up assets
 
-Hand-encoded wire blobs and the Python reference encoder that
-emits them. Used to validate the Phase 2 bitstream against
-real silicon **before** the Rust `mole-host` crate exists.
+The reference moleasm assembler (`mole-asm.py`), the three bundled
+`.moleasm` source programs, and the assembled `.molecode` /
+`.mole.bin` artifacts they produce. Used to validate the Phase 2
+bitstream against real silicon **before** the Rust `mole-host` crate
+exists.
 
 ## What's here
 
-| File                   | Size      | Notes                                                              |
-|------------------------|-----------|--------------------------------------------------------------------|
-| `mole_blobs.py`        | source    | Reference encoder; mirrors `Instruction.scala`                     |
-| `first_light.mole.bin` | 40 bytes  | Infinite loop, no `HALT`, no result drain. Scope-sanity.           |
-| `tmp108.mole.bin`      | 146 bytes | Full TMP108 read; ends in `HALT`; triggers 8192-byte result drain. |
+| File                          | Notes                                                                                                                  |
+|-------------------------------|------------------------------------------------------------------------------------------------------------------------|
+| `mole-asm.py`                 | Reference assembler --- the golden against which the future Rust assembler diffs. Mirrors `Instruction.scala::encode`. |
+| `first-light.moleasm`         | Infinite loop, no `HALT`. Scope-sanity program (~98.8 kHz SCL, 0x90 pattern).                                          |
+| `tmp108.moleasm`              | Full TMP108 read: START / write addr+ptr / Sr / read 16 bits / STOP / HALT. Triggers 8192-byte result drain.           |
+| `i2c-write-one-byte.moleasm`  | ROADMAP §"I2C write-one-byte" example, used as an assembler golden in the self-check suite.                            |
+| `*.molecode`                  | Raw 16-bit LE bytecode (2 bytes × N instructions). Gitignored.                                                         |
+| `*.mole.bin`                  | Framed UART payload (len + words + CRC-16/XMODEM). Gitignored.                                                         |
 
-The `.mole.bin` files are gitignored at the repo root
-(`*.mole.bin` in `.gitignore`). Regenerate them at any time:
+The `.molecode` and `.mole.bin` artifacts are gitignored at the repo
+root (`*.molecode`, `*.mole.bin`). Regenerate them at any time:
 
 ```sh
-python mole_blobs.py
+python mole-asm.py
 ```
 
-The script self-checks against the `WIRE_FORMAT.md` §6 worked
-example and the CRC-16/XMODEM catalog check value on every
-run.
+The default `__main__` behaviour assembles every `*.moleasm` source
+next to the script and emits both `.molecode` (raw bytecode) and
+`.mole.bin` (framed), and runs the full self-check suite (CRC catalog
++ WIRE_FORMAT §6 frame example + ROADMAP §1118 worked example +
+`.equ`/`.dw` round-trip).
+
+## CLI
+
+```text
+python mole-asm.py [-h] [--frame] [-o OUT] INPUT.moleasm
+```
+
+- Default output: `INPUT.molecode` (raw bytecode, no frame).
+- `--frame`: also writes `INPUT.mole.bin` (framed for UART).
+- No `INPUT`: runs the bundled batch (the three programs above) +
+  self-checks.
+
+## moleasm grammar (locked --- AGENTS §3.16, ROADMAP §"moleasm conventions")
+
+- One statement per line. `;` (any count) starts a comment to
+  end-of-line.
+- Labels: `name:` on its own line or before a statement.
+- Mnemonics UPPER CASE; operands lower case (except `X` for
+  don't-care `expect`).
+- Numeric literals: decimal default, `0x` hex, `0b` binary, leading
+  `-` for signed offsets.
+- **Named symbols only** for `tx` / `sda` / `scl`
+  (`dominant`/`recessive`/`hiz`, plus `dom`/`rec` shorthand), bus
+  modes (`i2c`, `i3c-OD`, `i3c-PP`, `hdr-ddr`), and cond codes
+  (`ALWAYS`, `MISMATCH`, `NOT_MISMATCH`, `START_SEEN`, `STOP_SEEN`,
+  `SDA_LOW`, `SDA_HIGH`, `SCL_HIGH`, `TIMEOUT`, `NOT_TIMEOUT`).
+- `LOAD_TIMING` register aliases: `i2c_freq=0`, `i3c_od_freq=1`,
+  `i3c_pp_freq=2`, `hdr_ddr_freq=3`.
+- Flag-bearing opcodes (EMIT_BIT, EMIT_QUARTER, SAMPLE_BIT_ON_SCL,
+  DRIVE_BIT_ON_SCL): `key=value` pairs space-separated.
+- HALT, MARK: `status=` / `label=`.
+- WAIT_ON, BRANCH_ON, LOAD_TIMING: positional, comma-separated.
+- JMP, SET_BUS_MODE, STRETCH_SCL: single positional arg.
+- BRANCH_ON / JMP targets: label name OR raw number.
+- `expect=X` (default) cannot be combined with `mask=1` (contradictory).
+- Reserved-v0.5 mnemonics (WAIT_ADDRESSED, MISMATCH_CLEAR,
+  FLAG_CLEAR, CAPTURE_RUN) are refused --- use `.dw` to inject the
+  raw 16-bit word.
+
+## Directives
+
+- **`.equ NAME, VALUE`** --- name a numeric constant. `VALUE` is a
+  literal or a previously-defined `.equ` name. Labels (PC addresses)
+  cannot be referenced here. Reserved-name collisions rejected.
+- **`.dw EXPR[, EXPR ...]`** --- emit raw 16-bit words at the current
+  PC, one per `EXPR`. Each `EXPR` is a literal or `.equ` name. Used
+  for v0.5-reserved opcode escapes, hand-crafted wire-format tests,
+  or anything without a mnemonic.
 
 ## How to send
 
-UART: `/dev/ttyUSBx, 1 000 000 baud, 8N1, no flow control`.
+UART: `/dev/ttyUSBx`, **1 000 000 baud**, 8N1, no flow control.
 
 ```python
 import serial
 port = serial.Serial("/dev/ttyUSB0", 1_000_000, timeout=2)
 
-with open("first_light.mole.bin", "rb") as f:
+with open("first-light.mole.bin", "rb") as f:
     port.write(f.read())
-# That's it --- engine auto-starts on the CRC-valid frame.
+# Engine auto-starts on the CRC-valid frame.
 # Press the iCEbreaker reset button to stop the forever loop.
 ```
 
-For `tmp108.mole.bin`, after `port.write(...)` read back the
-full ring:
+For `tmp108.mole.bin`, after `port.write(...)` read back the full
+8192-byte ring:
 
 ```python
 data = port.read(8192)
@@ -49,29 +104,26 @@ Or for a no-Python first-light send (one-shot, drop and watch):
 
 ```sh
 stty -F /dev/ttyUSB0 1000000 cs8 -cstopb -parenb -crtscts -ixon -ixoff raw
-cat first_light.mole.bin > /dev/ttyUSB0
+cat first-light.mole.bin > /dev/ttyUSB0
 ```
 
 ## What you should see
 
-**`first_light.mole.bin`** (scope on PMOD1A.1=SCL, PMOD1A.2=SDA,
+**`first-light.mole.bin`** (scope on PMOD1A.1=SCL, PMOD1A.2=SDA,
 4.7 kΩ pull-ups to 3V3):
 
 - SCL: ~98.8 kHz square wave (100 kHz I2C Standard-mode target,
-  derated by ~1 % for the engine's 3-cycle Fetch overhead per bit),
-  8 cycles per loop iteration, with a brief gap during the idle /
-  START quarters between iterations.
+  derated by ~1 % for the engine's 3-cycle Fetch overhead per bit).
 - SDA: holds high through the idle preamble, drops low for the
-  START, then clocks out the bit pattern **1001_0000** (0x90,
-  TMP108 7-bit address 0x48 << 1 with R/W=0) in sync with SCL
-  falling edges, then repeats forever.
+  START, then clocks out **1001_0000** (0x90, TMP108 7-bit address
+  0x48 << 1, R/W=0) in sync with SCL falling edges, repeating
+  forever. Press the reset button (or power-cycle) to stop.
 
-The script defaults to 100 kHz via `LOAD_TIMING reg=0
-divider_word=59` prepended at PC 0; pass `bit_hz=400_000` (or any
-other rate the timer can express) to `first_light_program()` /
-`tmp108_program()` if you want faster. The branch back to the top
-of the loop targets the body, not the one-time
-`LOAD_TIMING` + `SET_BUS_MODE` setup pair.
+To change the bit rate, edit `slow_div` in `first-light.moleasm` (or
+`tmp108.moleasm`). The `divider_word` formula at 24 MHz fabric:
+`(24_000_000 / bit_hz) / 4 - 1`. The branch back to the top of the
+loop targets the body, not the one-time `LOAD_TIMING` +
+`SET_BUS_MODE` setup pair.
 
 **`tmp108.mole.bin`**: the full 8192-byte ring drains back over
 the UART. First 4 bytes are the `Revision` word
@@ -87,7 +139,8 @@ back as whatever the bus is doing (typically all 1s).
 ## Eventual fate
 
 Once `crates/mole-host` lands as a real Rust crate, the
-encoder logic moves to `src/instruction.rs` and the binary
-fixtures move to `tests/golden/`. The Rust tests then diff
-against these same `.mole.bin` files (regenerated by this
-script, treated as the wire-format reference).
+assembler logic moves to `src/instruction.rs` + `src/assembler.rs`
+and the `.moleasm` / `.molecode` / `.mole.bin` fixtures move to
+`tests/golden/`. The Rust tests then diff the Rust assembler's
+output against the `.molecode` files this Python assembler emits,
+treating them as the wire-format reference.
