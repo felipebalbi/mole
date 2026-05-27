@@ -5,6 +5,9 @@
 //   - Token colors live at the top so the whole deck can be retuned
 //     by editing a handful of lines.
 //   - Slide kinds wrap polylux's `#slide` so chapters can stay terse.
+//   - Notes mode is opt-in: `typst compile --input notes=true ...`
+//     renders an italic "Speaker note" block at the bottom of every
+//     content-bearing slide. In slide mode notes are inert.
 
 #import "@preview/polylux:0.4.0": *
 
@@ -14,18 +17,21 @@
 // "Melissa" = bee. Warm honey paper, dark olive ink, warm accents.
 
 #let bg-page    = rgb("#fff6d8")  // bg-main      -- honey cream
+#let bg-tint    = rgb("#fbeec3")  // halfway between bg-page and bg-subtle
 #let bg-subtle  = rgb("#f5e9cb")  // bg-dim       -- dimmer cream panel
 #let bg-dark    = rgb("#2a2520")  // warm near-black for cover / thanks
 #let bg-code    = rgb("#2a2520")  // code panels match cover
 
 #let ink         = rgb("#484431")  // fg-main     -- warm dark olive
-#let ink-soft    = rgb("#6a6147")  // softened
+#let ink-soft    = rgb("#56503a")  // bumped from #6a6147 for 4.5:1 contrast
 #let ink-invert  = rgb("#fff6d8")  // bg-main on dark
 #let ink-code    = rgb("#fff6d8")
 
 #let accent      = rgb("#ba5205")  // yellow-warmer -- burnt honey
 #let secondary   = rgb("#0f708a")  // cyan-cooler   -- deep teal
 #let tertiary    = rgb("#007a0a")  // green
+#let success     = rgb("#1a7a1a")  // darker green for body-size text
+#let danger      = rgb("#c1190c")  // warm red, fits palette
 #let muted       = rgb("#80431a")  // fg-alt        -- warm chestnut
 #let muted-light = rgb("#a89682")
 #let divider-c   = rgb("#c5baa6")  // border
@@ -33,6 +39,33 @@
 #let font-sans  = ("Aporetic Sans", "Inter", "Helvetica Neue")
 #let font-serif = ("Aporetic Serif", "EB Garamond", "Georgia")
 #let font-mono  = ("Aporetic Sans Mono", "Cascadia Mono", "Consolas")
+
+// ---- Notes mode ----------------------------------------------------
+//
+// `typst compile --input notes=true` switches the deck into notes
+// mode: every #note(...) is rendered at the bottom of its slide as
+// faint italic prose. The default slide build is unchanged.
+
+#let notes-mode = sys.inputs.at("notes", default: "false") == "true"
+
+#let note(body) = {
+  // Always emit a pdfpc metadata note so pdfpc presenter view picks
+  // it up regardless of the build mode.
+  toolbox.pdfpc.speaker-note[#body]
+  if notes-mode {
+    place(
+      bottom + left,
+      dx: 0pt, dy: -4pt,
+      box(width: 100%, fill: bg-tint, inset: 10pt, radius: 4pt)[
+        #text(
+          font: font-serif, size: 10pt, fill: ink-soft, style: "italic",
+        )[
+          *Speaker note.* #body
+        ]
+      ],
+    )
+  }
+}
 
 // ---- Atoms ---------------------------------------------------------
 
@@ -55,6 +88,30 @@
   font: font-sans, size: 12pt, weight: "semibold",
   tracking: 2pt, fill: color,
 )[#upper(body)]
+
+// Callout box for asides, warnings, encouragement. Tints to the kind:
+//   info     -- secondary teal, neutral
+//   success  -- green, "you got this right"
+//   warn     -- accent honey, "watch out"
+//   danger   -- red, hard rule violation
+#let callout(body, kind: "info", icon: none) = {
+  let c = if kind == "success" { success }
+    else if kind == "warn" { accent }
+    else if kind == "danger" { danger }
+    else { secondary }
+  block(
+    fill: c.lighten(88%),
+    stroke: (left: 4pt + c),
+    inset: (x: 14pt, y: 10pt),
+    radius: (right: 4pt),
+    width: 100%,
+  )[
+    #if icon != none [
+      #text(fill: c, weight: "bold")[#icon ]
+    ]
+    #text(fill: ink-soft, size: 14pt)[#body]
+  ]
+}
 
 #let slide-title(s, kicker-text: none) = block[
   #if kicker-text != none [
@@ -86,6 +143,17 @@
   )
 }
 
+// Check-marked recap items. Use in recap-slide.
+#let checks(..items) = {
+  set text(size: 18pt, fill: ink-soft)
+  set par(leading: 0.55em)
+  list(
+    marker: text(fill: success)[✓],
+    spacing: 0.7em,
+    ..items.pos(),
+  )
+}
+
 #let stat-block(value, label) = align(center)[
   #text(font: font-serif, size: 110pt, weight: "bold", fill: accent)[#value]
   #v(-0.3em)
@@ -106,7 +174,12 @@
 
 // A dark code panel for use inside content-slides.  The inner show rule
 // undoes the global cream raw wrap so text is light-on-dark.
-#let code-panel(body, size: 16pt) = block(
+//
+// `highlight:` is a list of (pattern, color) pairs. Each pattern is a
+// `regex(...)` value matched inside the raw body; matches are recoloured
+// to the given fill. Useful for spotlighting `expect=`, `mask=`,
+// `capture=`, opcode mnemonics, etc.
+#let code-panel(body, size: 16pt, highlight: ()) = block(
   fill: bg-code,
   inset: 16pt,
   radius: 6pt,
@@ -119,8 +192,30 @@
   #show raw.where(block: false): it => (
     text(font: font-mono, fill: ink-code, size: size, it)
   )
+  #for (pat, color) in highlight {
+    show pat: set text(fill: color, weight: "semibold")
+  }
   #body
 ]
+
+// ---- Chrome --------------------------------------------------------
+//
+// Footer pinned to the bottom-right of content slides. Carries the
+// current part label (set by section-slide) and the slide number, so
+// an attendee skimming the deck always knows where they are.
+
+#let current-part = state("mole-part", none)
+
+#let chrome() = place(
+  bottom + right, dx: 0pt, dy: 0pt,
+  context {
+    let p = current-part.get()
+    let n = counter(page).get().first()
+    text(font: font-sans, size: 9pt, fill: muted-light, tracking: 1pt)[
+      #if p != none [#upper(p) · ]#n
+    ]
+  },
+)
 
 // ---- Slide kinds ---------------------------------------------------
 
@@ -148,6 +243,7 @@
 
 #let section-slide(num, title) = slide[
   #set page(fill: bg-page)
+  #current-part.update("Part " + num + " · " + title)
   #v(1fr)
   #kicker("Part " + num, color: accent)
   #v(0.5em)
@@ -160,6 +256,7 @@
 #let content-slide(title, kicker-text: none, body) = slide[
   #slide-title(title, kicker-text: kicker-text)
   #body
+  #chrome()
 ]
 
 #let stat-slide(value, label, caption: none) = slide[
@@ -172,6 +269,7 @@
     ]
   ]
   #v(1fr)
+  #chrome()
 ]
 
 #let quote-slide(body, by: none) = slide[
@@ -190,6 +288,7 @@
     ]
   ]
   #v(1fr)
+  #chrome()
 ]
 
 // Code slide: scoped raw-block rule renders straight onto a dark panel.
@@ -201,6 +300,94 @@
     text(font: font-mono, fill: ink-code, size: 16pt, it),
   )
   #body
+  #chrome()
+]
+
+// Definition slide: big word, optional etymology / sublabel, body
+// explanation. Used to introduce a single new term per slide
+// (quarter-bit, sticky flag, BUS_MODE, ...).
+#let definition-slide(term, sub: none, kicker-text: "Definition", body) = slide[
+  #slide-title(term, kicker-text: kicker-text)
+  #if sub != none [
+    #text(font: font-serif, size: 18pt, style: "italic", fill: muted)[#sub]
+    #v(0.6em)
+  ]
+  #body
+  #chrome()
+]
+
+// Try-it slide: poses a thought-experiment and asks the audience to
+// pause before the answer lands on the next slide. The prompt is the
+// content; `hint` is an optional faint nudge under it.
+#let try-it-slide(prompt, hint: none, kicker-text: "Try it") = slide[
+  #slide-title("Pause and think.", kicker-text: kicker-text)
+  #v(0.6em)
+  #box(width: 100%, fill: bg-tint, inset: 24pt, radius: 6pt)[
+    #text(font: font-serif, size: 22pt, fill: ink)[#prompt]
+    #if hint != none [
+      #v(0.8em)
+      #text(font: font-serif, size: 14pt, style: "italic", fill: muted)[
+        Hint: #hint
+      ]
+    ]
+  ]
+  #v(0.8em)
+  #align(center)[
+    #text(font: font-sans, size: 12pt, fill: muted-light, tracking: 3pt)[
+      #upper("answer on the next slide")
+    ]
+  ]
+  #chrome()
+]
+
+// Compare slide: two-column compare/contrast, optional bottom verdict.
+// Useful for before/after, controller-vs-target, OD-vs-PP, etc.
+#let compare-slide(
+  title,
+  left-title, left,
+  right-title, right,
+  kicker-text: none,
+  verdict: none,
+) = slide[
+  #slide-title(title, kicker-text: kicker-text)
+  #grid(
+    columns: (1fr, 1fr),
+    column-gutter: 32pt,
+    [
+      #tag(left-title, color: secondary)
+      #v(0.4em)
+      #left
+    ],
+    [
+      #tag(right-title, color: accent)
+      #v(0.4em)
+      #right
+    ],
+  )
+  #if verdict != none [
+    #v(0.8em)
+    #align(center)[
+      #text(font: font-serif, size: 18pt, style: "italic", fill: muted)[
+        #verdict
+      ]
+    ]
+  ]
+  #chrome()
+]
+
+// Recap slide: end-of-part summary with checkmarks. Optional `next`
+// pointer to the next part, so the audience sees the through-line.
+#let recap-slide(title, points, next: none, kicker-text: "Recap") = slide[
+  #slide-title(title, kicker-text: kicker-text)
+  #checks(..points)
+  #if next != none [
+    #v(0.8em)
+    #callout(
+      kind: "info",
+      icon: "→",
+    )[Next up: #next]
+  ]
+  #chrome()
 ]
 
 #let thank-you-slide(link-text) = slide[
