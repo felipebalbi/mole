@@ -667,11 +667,19 @@ case class BitCycleEngineCore(cfg: MoleConfig) extends Component {
 
               // Q0 = dominant per SclWaveformGen --- pre-compute
               // and latch into the SCL regs so the very first
-              // quarter dwell shows the correct level.
-              val sclSymQ0 = SclWaveformGen(U(0, 2 bits))
-              val sclQ0 = SymbolDecoder(sclSymQ0, busModeReg)
-              sclDriveLow := sclQ0.driveLow
-              sclDriveHigh := sclQ0.driveHigh
+              // quarter dwell shows the correct level. In target
+              // role the engine releases SCL entirely (slaves to
+              // external controller); the Scala `if` strips the
+              // SclWaveformGen path from target-role bitstreams.
+              if (cfg.role == EngineRole.Controller) {
+                val sclSymQ0 = SclWaveformGen(U(0, 2 bits))
+                val sclQ0 = SymbolDecoder(sclSymQ0, busModeReg)
+                sclDriveLow := sclQ0.driveLow
+                sclDriveHigh := sclQ0.driveHigh
+              } else {
+                sclDriveLow := False
+                sclDriveHigh := False
+              }
 
               qIdx := 0
               timerLoad := True
@@ -969,10 +977,14 @@ case class BitCycleEngineCore(cfg: MoleConfig) extends Component {
             qIdx := nextQ
             // Update SCL for the new quarter. SDA stays as latched on
             // entry to this state (held for the full bit per spec).
-            val sclSym = SclWaveformGen(nextQ)
-            val scl = SymbolDecoder(sclSym, busModeReg)
-            sclDriveLow := scl.driveLow
-            sclDriveHigh := scl.driveHigh
+            // Target-role: leave SCL released (set in decodeState's
+            // emitBit arm); the Scala `if` here matches that.
+            if (cfg.role == EngineRole.Controller) {
+              val sclSym = SclWaveformGen(nextQ)
+              val scl = SymbolDecoder(sclSym, busModeReg)
+              sclDriveLow := scl.driveLow
+              sclDriveHigh := scl.driveHigh
+            }
           }
         }
       }
