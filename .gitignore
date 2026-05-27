@@ -70,10 +70,11 @@ yosys.log
 nextpnr.log
 *.timing.rpt
 
-# Generated Verilog/VHDL from SpinalHDL: leave UNIGNORED so the author can
-# choose to commit a reference snapshot. If you want auto-regen-only, add:
-# *.v
-# *.vhd
+# Generated Verilog/VHDL from SpinalHDL: leave UNIGNORED by default
+# so any sub-project can choose to commit a reference snapshot. The
+# Mole top-level (fpga/Mole/) does NOT commit its generated Verilog
+# --- regenerate via `make gen`.
+fpga/Mole/gen/
 
 # -----------------------------------------------------------------------------
 # Simulation

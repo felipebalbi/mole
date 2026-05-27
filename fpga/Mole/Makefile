@@ -61,7 +61,7 @@ $(ASC): $(JSON) $(PCF)
 		--pcf $(PCF)    \
 		--json $< \
 		--asc $@  \
-		--freq 12
+		--freq 48
 
 # 4. Pack (ASC -> BIN)
 $(BIN): $(ASC)
@@ -72,7 +72,8 @@ $(BIN): $(ASC)
 sim: sim-config sim-opendrain sim-baud-gen sim-rx-sync \
      sim-tx-shiftreg sim-rx-shiftreg sim-tx-fsm sim-rx-fsm \
      sim-uart-tx sim-uart-rx sim-uart sim-spram sim-isa \
-     sim-engine-smoke sim-engine-full ## Run all simulations
+     sim-engine-smoke sim-engine-full sim-pll sim-crc sim-iobuf \
+     sim-loader-fsm sim-drainer-fsm sim-top ## Run all simulations
 
 # Per-block sim / gen targets land here once their hint blocks in
 # TODO.md flip from 🔲 to ✅. The naming contract is fixed:
@@ -92,6 +93,11 @@ sim: sim-config sim-opendrain sim-baud-gen sim-rx-sync \
 #   sim-isa              src/sim/InstructionSim.scala        (Step  7)
 #   sim-engine-smoke     src/sim/BitCycleEngineSmokeSim.scala (Step  9)
 #   sim-engine-full      src/sim/BitCycleEngineSim.scala     (Step 12)
+#   sim-pll              src/sim/MolePllUp5kSim.scala        (Step 13)
+#   sim-crc              src/sim/Crc16XmodemSim.scala        (Step 13)
+#   sim-iobuf            src/sim/MoleIoBufUp5kSim.scala      (Step 13)
+#   sim-loader-fsm       src/sim/MoleLoaderFsmSim.scala      (Step 13)
+#   sim-drainer-fsm      src/sim/MoleDrainerFsmSim.scala     (Step 13)
 #   sim-top              src/sim/MoleTopSim.scala            (Step 14)
 #
 # Declared here in advance so the build contract is visible from
@@ -143,14 +149,30 @@ sim-engine-smoke: ## EMIT_BIT smoke: i3c-OD vs i3c-PP byte trace (Step 9)
 sim-engine-full: ## Full ISA coverage of BitCycleEngineCore (Step 12)
 	$(SBT) -batch "runMain $(PACKAGE).BitCycleEngineSim"
 
-# sim-top: ## End-to-end MoleTop sim: UART load -> engine -> UART results (Step 14)
-# 	$(SBT) -batch "runMain $(PACKAGE).MoleTopSim"
+sim-pll: ## Run MolePllUp5k bypass + BlackBox elaboration sim (Step 13)
+	$(SBT) -batch "runMain $(PACKAGE).MolePllUp5kSim"
+
+sim-crc: ## Run Crc16Xmodem reference + DUT audit (Step 13)
+	$(SBT) -batch "runMain $(PACKAGE).Crc16XmodemSim"
+
+sim-iobuf: ## Run MoleIoBufUp5k bypass + BlackBox elaboration sim (Step 13)
+	$(SBT) -batch "runMain $(PACKAGE).MoleIoBufUp5kSim"
+
+sim-loader-fsm: ## Run MoleLoaderFsm frame-parser audit (Step 13)
+	$(SBT) -batch "runMain $(PACKAGE).MoleLoaderFsmSim"
+
+sim-drainer-fsm: ## Run MoleDrainerFsm result-ring sweep audit (Step 13)
+	$(SBT) -batch "runMain $(PACKAGE).MoleDrainerFsmSim"
+
+sim-top: ## End-to-end MoleTop sim: UART load -> engine -> UART results (Step 14)
+	$(SBT) -batch "runMain $(PACKAGE).MoleTopSim"
 
 # gen target -- the canonical Verilog entrypoint is MoleTopVerilog;
-# generated module is MoleTop. Lands with Step 15.
+# generated module is MoleTop. The generated file lives at gen/MoleTop.v
+# and is gitignored.
 
-# gen: | $(GEN_DIR) ## Generate MoleTop.v in gen/ (lands with Step 15)
-# 	$(SBT) -batch "runMain $(PACKAGE).$(TOP)Verilog"
+gen: | $(GEN_DIR) ## Generate gen/MoleTop.v from MoleTopVerilog (Step 15)
+	$(SBT) -batch "runMain $(PACKAGE).$(TOP)Verilog"
 
 waves: ## Open the most recent simulation VCD in gtkwave
 	@vcd=$$(find $(SIM_DIR) -name '*.vcd' -printf '%T@ %p\n' 2>/dev/null \
@@ -179,5 +201,5 @@ help: ## Show this help (every target with a ## description)
 .PHONY: all sim sim-config sim-opendrain sim-baud-gen sim-rx-sync \
         sim-tx-shiftreg sim-rx-shiftreg sim-tx-fsm sim-rx-fsm \
         sim-uart-tx sim-uart-rx sim-uart sim-spram sim-isa \
-        sim-engine-smoke sim-engine-full \
-        waves flash clean distclean help
+        sim-engine-smoke sim-engine-full sim-pll sim-crc sim-iobuf \
+        sim-loader-fsm sim-drainer-fsm sim-top gen waves flash clean distclean help

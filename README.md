@@ -57,23 +57,39 @@ tools vs. `no_std` Pico firmware); they will stay separate.
 
 ## Status
 
-Phase 1 complete --- the `BitCycleEngineCore` FSM under
-[`fpga/Mole/`](./fpga/Mole/) decodes the full controller-side ISA
-(`EMIT_BIT` / `EMIT_QUARTER` / `STRETCH_SCL` / `WAIT_ON` / `JMP` /
-`BRANCH_ON` / `SET_BUS_MODE` / `LOAD_TIMING` / `MARK` / `HALT`)
-with quarter-bit pacing, four `LOAD_TIMING`-addressable divider
-slots, sticky flag set (MISMATCH / TIMEOUT / START / STOP), a
-sync'd bus observer, and a result-ring writer (`Revision` + record
-stream + reserved `HALT` slot at `resultLimit`). The
-target-role opcodes (`SAMPLE_BIT_ON_SCL` / `DRIVE_BIT_ON_SCL`)
-and the four v0.5-reserved opcode slots all trap to `HALT` status
-`0xF`. Coverage: `sim-config`, `sim-opendrain`, eight UART block
-sims + `sim-uart` loopback, `sim-spram`, `sim-isa`,
-`sim-engine-smoke` (per-cycle bus-driver trace under `i3c-OD` vs
-`i3c-PP`), and `sim-engine-full` (17 named tests covering every
-opcode + the trap paths + ring overflow). Phase 0 (`MoleConfig`,
-`MoleBus`, UART, `SpramController`) and Phase 1 are landed; Phase
-2 is `MoleTop` integration + Verilog generation. See
+Phase 2 complete --- the `MoleTop` integration under
+[`fpga/Mole/`](./fpga/Mole/) wires the UART loader, the
+`BitCycleEngineCore`, the `SpramController`, and the result-ring
+drainer into a single synthesisable top-level. A 3-state phase
+FSM (`acceptLoad` -> `running` -> `draining`) gates `engine.start`,
+SPRAM read-port ownership, and the UART RX drain so the host can
+load a new program, the engine runs it to `HALT`, the drainer
+sweeps the result ring back over UART TX, and the cycle restarts.
+PLL (12 MHz -> 48 MHz) and SB_IO bypass-selectable for sim;
+`MoleTopVerilog` ships `gen/MoleTop.v` synthesised under
+`useBlackBox = true`. End-to-end coverage via `sim-top` (loader
++ engine + drainer in a single Verilator compile). Bring-up
+procedure (build, flash, three smoke programs) in
+[`fpga/Mole/BRINGUP.md`](./fpga/Mole/BRINGUP.md); wire format in
+[`fpga/Mole/WIRE_FORMAT.md`](./fpga/Mole/WIRE_FORMAT.md).
+
+Phase 1 (the `BitCycleEngineCore` ISA) shipped the full
+controller-side ISA (`EMIT_BIT` / `EMIT_QUARTER` / `STRETCH_SCL`
+/ `WAIT_ON` / `JMP` / `BRANCH_ON` / `SET_BUS_MODE` /
+`LOAD_TIMING` / `MARK` / `HALT`) with quarter-bit pacing, four
+`LOAD_TIMING`-addressable divider slots, sticky flag set
+(MISMATCH / TIMEOUT / START / STOP), a sync'd bus observer, and
+a result-ring writer (`Revision` + record stream + reserved
+`HALT` slot at `resultLimit`). The target-role opcodes
+(`SAMPLE_BIT_ON_SCL` / `DRIVE_BIT_ON_SCL`) and the four
+v0.5-reserved opcode slots all trap to `HALT` status `0xF`.
+Coverage: `sim-config`, `sim-opendrain`, eight UART block sims +
+`sim-uart` loopback, `sim-spram`, `sim-isa`, `sim-engine-smoke`
+(per-cycle bus-driver trace under `i3c-OD` vs `i3c-PP`),
+`sim-engine-full` (17 named tests covering every opcode + the
+trap paths + ring overflow), `sim-pll`, `sim-crc`, `sim-iobuf`,
+`sim-loader-fsm`, `sim-drainer-fsm`, `sim-top`. Next up: Phase 3
+(validation against a real DUT --- TMP108 over I2C). See
 **ROADMAP.md §Phased plan** and
 [`fpga/Mole/TODO.md`](./fpga/Mole/TODO.md) for current
 bring-up state.
