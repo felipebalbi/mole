@@ -1,0 +1,57 @@
+; loop-counter-demo.moleasm
+;
+; Two-LCR worked example covering both bounded-loop idioms.
+;
+;   Part 1: send 8 dominant bits via an outer LOAD_LOOP / DEC_BRANCH
+;           pair on lcr0. Models a write-one-byte that pulls SDA low
+;           for each bit's data-valid window.
+;
+;   Part 2: nested loop --- outer lcr1 = 3 (rows), inner lcr0 = 4
+;           (columns), MARK each (row, col) so the result ring has a
+;           clear timeline. 12 marker records, then HALT.
+;
+; The wire is just I2C-OD-ish (no real Start/Stop, no ACK slots) ---
+; this is a demo of the loop instructions, not of an I2C transaction.
+; For a real I2C write-one-byte using the same loop structure, see
+; the moleasm book chapter on bounded loops.
+;
+; Hand-encoded golden words (audited against the encoder):
+;
+;   pc  word    insn
+;   --  ----    ----
+;    0  0x8024  LOAD_TIMING i2c_freq, 36       ; ~166 kHz @ 24 MHz Verde
+;    1  0x7000  SET_BUS_MODE i2c
+;    2  0x9010  MARK 1                         ; "byte begins"
+;    3  0xC008  LOAD_LOOP lcr0, 8              ; count down 8 data bits
+;    4  0x1000  EMIT_BIT  tx=dominant          ; SDA low for one bit
+;    5  0xD0FF  DEC_BRANCH lcr0, bit_loop      ; offset -1 -> pc=4
+;    6  0x9020  MARK 2                         ; "byte ends"
+;    7  0xC903  LOAD_LOOP lcr1, 3              ; outer rows = 3
+;    8  0x9030  MARK 3                         ; "row begin"
+;    9  0xC004  LOAD_LOOP lcr0, 4              ; inner cols = 4
+;   10  0x9040  MARK 4                         ; "(row, col)"
+;   11  0xD0FF  DEC_BRANCH lcr0, col_loop      ; pc=10, 4 iters of col
+;   12  0x9050  MARK 5                         ; "row end"
+;   13  0xD8FB  DEC_BRANCH lcr1, row_loop      ; offset -5 -> pc=8, 3 rows
+;   14  0x0000  HALT 0
+
+                LOAD_TIMING   i2c_freq, 36
+                SET_BUS_MODE  i2c
+
+                ; -- Part 1: send 8 dominant bits via single LCR --
+                MARK          label=1
+                LOAD_LOOP     lcr0, 8
+bit_loop:       EMIT_BIT      tx=dominant
+                DEC_BRANCH    lcr0, bit_loop
+                MARK          label=2
+
+                ; -- Part 2: nested loop, lcr1 outer / lcr0 inner --
+                LOAD_LOOP     lcr1, 3
+row_loop:       MARK          label=3
+                LOAD_LOOP     lcr0, 4
+col_loop:       MARK          label=4
+                DEC_BRANCH    lcr0, col_loop
+                MARK          label=5
+                DEC_BRANCH    lcr1, row_loop
+
+                HALT          status=0

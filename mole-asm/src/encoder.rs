@@ -20,7 +20,9 @@ pub(crate) const OP_LOAD_TIMING: u16 = 0x8;
 pub(crate) const OP_MARK: u16 = 0x9;
 pub(crate) const OP_SAMPLE_BIT: u16 = 0xA;
 pub(crate) const OP_DRIVE_BIT: u16 = 0xB;
-// 0xC..=0xF are reserved-v0.5; reach them via `.dw` if you really must.
+pub(crate) const OP_LOAD_LOOP: u16 = 0xC;
+pub(crate) const OP_DEC_BRANCH: u16 = 0xD;
+// 0xE..=0xF are reserved-v0.5; reach them via `.dw` if you really must.
 
 /// Pack the `expect / mask / capture` flag triple into bits `[2:0]`.
 ///
@@ -135,6 +137,40 @@ pub(crate) fn enc_drive_bit(
 ) -> Result<u16, String> {
     check_tx("DRIVE_BIT_ON_SCL", tx)?;
     Ok((OP_DRIVE_BIT << 12) | (u16::from(tx) << 10) | flag_triple(expect, mask, capture))
+}
+
+/// `LOAD_LOOP reg, imm8` --- prime `LCR[reg]` with an 8-bit unsigned
+/// immediate. Wire layout: `[15:12]op [11]reg [10:8]reserved=0 [7:0]imm8`.
+///
+/// The reg id is one bit on the wire (`lcr0` = 0, `lcr1` = 1); the
+/// three pad bits stay reserved so a future 16-LCR widening can claim
+/// them without breaking the wire format. See `Instruction.scala`'s
+/// `LoadLoop` case-class doc for the full design note.
+pub(crate) fn enc_load_loop(reg: i64, imm: i64) -> Result<u16, String> {
+    if !(0..2).contains(&reg) {
+        return Err(format!("LOAD_LOOP reg must be 0 or 1, got {reg}"));
+    }
+    if !(0..(1 << 8)).contains(&imm) {
+        return Err(format!("LOAD_LOOP imm must be 0..255, got {imm}"));
+    }
+    Ok((OP_LOAD_LOOP << 12) | ((reg as u16) << 11) | (imm as u16 & 0xFF))
+}
+
+/// `DEC_BRANCH reg, offset` --- decrement `LCR[reg]` then back-edge by
+/// the signed 8-bit PC-relative offset iff the post-decrement value is
+/// non-zero (8-bit wrap on the decrement: 0 -> 0xFF). Wire layout:
+/// `[15:12]op [11]reg [10:8]reserved=0 [7:0]offset_signed`.
+pub(crate) fn enc_dec_branch(reg: i64, pc_rel_offset: i64) -> Result<u16, String> {
+    if !(0..2).contains(&reg) {
+        return Err(format!("DEC_BRANCH reg must be 0 or 1, got {reg}"));
+    }
+    if !(-128..=127).contains(&pc_rel_offset) {
+        return Err(format!(
+            "DEC_BRANCH pc-rel offset must be -128..127, got {pc_rel_offset}"
+        ));
+    }
+    let byte = (pc_rel_offset as i16 as u16) & 0xFF;
+    Ok((OP_DEC_BRANCH << 12) | ((reg as u16) << 11) | byte)
 }
 
 fn check_tx(name: &str, tx: u8) -> Result<(), String> {
@@ -282,5 +318,50 @@ mod tests {
     #[test]
     fn drive_bit_reserved_rejected() {
         assert!(enc_drive_bit(0b11, false, false, false).is_err());
+    }
+
+    #[test]
+    fn load_loop_lcr0_zero() {
+        // LOAD_LOOP lcr0, 0 -> 0xC000.
+        assert_eq!(enc_load_loop(0, 0).unwrap(), 0xC000);
+    }
+
+    #[test]
+    fn load_loop_lcr1_imm_ff() {
+        // LOAD_LOOP lcr1, 0xff -> 0xC8FF (reg bit at [11]; pad [10:8] = 0).
+        assert_eq!(enc_load_loop(1, 0xff).unwrap(), 0xC8FF);
+    }
+
+    #[test]
+    fn load_loop_range_rejects() {
+        assert!(enc_load_loop(2, 0).is_err());
+        assert!(enc_load_loop(-1, 0).is_err());
+        assert!(enc_load_loop(0, 256).is_err());
+        assert!(enc_load_loop(0, -1).is_err());
+    }
+
+    #[test]
+    fn dec_branch_lcr0_zero() {
+        // DEC_BRANCH lcr0, 0 -> 0xD000.
+        assert_eq!(enc_dec_branch(0, 0).unwrap(), 0xD000);
+    }
+
+    #[test]
+    fn dec_branch_lcr0_minus_one() {
+        // DEC_BRANCH lcr0, -1 -> 0xD0FF (two's-complement low byte).
+        assert_eq!(enc_dec_branch(0, -1).unwrap(), 0xD0FF);
+    }
+
+    #[test]
+    fn dec_branch_lcr1_plus_127() {
+        // DEC_BRANCH lcr1, 127 -> 0xD87F.
+        assert_eq!(enc_dec_branch(1, 127).unwrap(), 0xD87F);
+    }
+
+    #[test]
+    fn dec_branch_range_rejects() {
+        assert!(enc_dec_branch(2, 0).is_err());
+        assert!(enc_dec_branch(0, 128).is_err());
+        assert!(enc_dec_branch(0, -129).is_err());
     }
 }

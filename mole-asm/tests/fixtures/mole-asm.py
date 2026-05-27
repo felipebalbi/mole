@@ -57,7 +57,9 @@ OP_LOAD_TIMING = 0x8
 OP_MARK = 0x9
 OP_SAMPLE_BIT = 0xA
 OP_DRIVE_BIT = 0xB
-# 0xC..0xF reserved-v0.5 (use `.dw` to inject raw words if you really must)
+OP_LOAD_LOOP = 0xC
+OP_DEC_BRANCH = 0xD
+# 0xE..0xF reserved-v0.5 (use `.dw` to inject raw words if you really must)
 
 
 # ===========================================================================
@@ -115,6 +117,15 @@ TIMING_REG_ALIASES: dict[str, int] = {
 }
 
 
+# Loop-counter register aliases for LOAD_LOOP / DEC_BRANCH. One bit on
+# the wire (lcr0 -> 0, lcr1 -> 1); the [10:8] pad above stays reserved
+# for a future 16-LCR widening with no wire-format break.
+LOOP_REG_ALIASES: dict[str, int] = {
+    "lcr0": 0,
+    "lcr1": 1,
+}
+
+
 # Mnemonic dispatch (UPPER CASE). Maps to a per-opcode operand-parse +
 # encoder function; populated below the function definitions.
 MNEMONICS: set[str] = {
@@ -130,13 +141,15 @@ MNEMONICS: set[str] = {
     "MARK",
     "SAMPLE_BIT_ON_SCL",
     "DRIVE_BIT_ON_SCL",
+    "LOAD_LOOP",
+    "DEC_BRANCH",
 }
 
 # Reserved-v0.5 mnemonics; assembler rejects them and points the user at
-# `.dw` for raw-word injection. Names mirror Opcode case names.
+# `.dw` for raw-word injection. Names mirror Opcode case names. Slots
+# 0xC / 0xD (formerly WAIT_ADDRESSED / MISMATCH_CLEAR) graduated to v0
+# as LOAD_LOOP / DEC_BRANCH; only the remaining reservations are listed.
 RESERVED_V05_MNEMONICS: set[str] = {
-    "WAIT_ADDRESSED",
-    "MISMATCH_CLEAR",
     "FLAG_CLEAR",
     "CAPTURE_RUN",
 }
@@ -149,6 +162,7 @@ RESERVED_NAMES: set[str] = (
     | set(BUS_MODES)
     | set(COND_CODES)
     | set(TIMING_REG_ALIASES)
+    | set(LOOP_REG_ALIASES)
 )
 
 
@@ -276,6 +290,36 @@ def enc_drive_bit(tx: int, expect: bool, mask: bool, capture: bool) -> int:
     if tx == 0b11:
         raise ValueError("DRIVE_BIT_ON_SCL tx=reserved (0b11) is v0.5; use .dw")
     return (OP_DRIVE_BIT << 12) | (tx << 10) | _flag_triple(expect, mask, capture)
+
+
+def enc_load_loop(reg: int, imm: int) -> int:
+    """LOAD_LOOP reg, imm8 -> [15:12]op [11]reg [10:8]reserved=0 [7:0]imm8.
+
+    `reg` is one bit on the wire (lcr0 = 0, lcr1 = 1); the [10:8] pad
+    stays reserved so a future 16-LCR widening can claim those bits
+    without breaking the wire format. See Instruction.scala's LoadLoop
+    case-class doc for the full design note.
+    """
+    if not 0 <= reg < 2:
+        raise ValueError(f"LOAD_LOOP reg must be 0 or 1, got {reg}")
+    if not 0 <= imm < (1 << 8):
+        raise ValueError(f"LOAD_LOOP imm must be 0..255, got {imm}")
+    return (OP_LOAD_LOOP << 12) | (reg << 11) | (imm & 0xFF)
+
+
+def enc_dec_branch(reg: int, pc_rel_offset: int) -> int:
+    """DEC_BRANCH reg, offset -> decrement LCR[reg], back-edge if non-zero.
+
+    Wire: [15:12]op [11]reg [10:8]reserved=0 [7:0]offset_signed. 8-bit
+    wrap on the decrement (0 -> 0xFF).
+    """
+    if not 0 <= reg < 2:
+        raise ValueError(f"DEC_BRANCH reg must be 0 or 1, got {reg}")
+    if not -128 <= pc_rel_offset <= 127:
+        raise ValueError(
+            f"DEC_BRANCH pc-rel offset must be -128..127, got {pc_rel_offset}"
+        )
+    return (OP_DEC_BRANCH << 12) | (reg << 11) | (pc_rel_offset & 0xFF)
 
 
 # ===========================================================================
@@ -823,6 +867,26 @@ def _encode_mnemonic(
         addr = _resolve_jmp_target(target_tok, symbols, where)
         return enc_jmp(addr)
 
+    if m == "LOAD_LOOP":
+        if len(stmt.operands) != 2:
+            raise AsmError(
+                where, "LOAD_LOOP takes two positional operands: reg, imm8"
+            )
+        reg_tok, imm_tok = stmt.operands
+        reg = _resolve_loop_reg(reg_tok, where)
+        imm = _resolve_literal_or_equate(imm_tok, symbols, where)
+        return enc_load_loop(reg, imm)
+
+    if m == "DEC_BRANCH":
+        if len(stmt.operands) != 2:
+            raise AsmError(
+                where, "DEC_BRANCH takes two positional operands: reg, target"
+            )
+        reg_tok, target_tok = stmt.operands
+        reg = _resolve_loop_reg(reg_tok, where)
+        offset = _resolve_dec_branch_target(target_tok, pc, symbols, where)
+        return enc_dec_branch(reg, offset)
+
     raise AsmError(where, f"unhandled mnemonic in encoder: {m!r}")
 
 
@@ -876,6 +940,47 @@ def _resolve_jmp_target(tok: str, symbols: dict[str, Symbol], where: str) -> int
             )
         return sym.value
     return _parse_int(tok, where)
+
+
+def _resolve_loop_reg(tok: str, where: str) -> int:
+    """LOAD_LOOP / DEC_BRANCH reg: `lcr0` / `lcr1` or a literal 0 / 1."""
+    if tok in LOOP_REG_ALIASES:
+        return LOOP_REG_ALIASES[tok]
+    n = _parse_int(tok, where)
+    if not 0 <= n < 2:
+        raise AsmError(
+            where,
+            f"loop reg {tok!r} must be lcr0|lcr1 or a literal 0|1 "
+            f"(allowed names: {sorted(LOOP_REG_ALIASES)})",
+        )
+    return n
+
+
+def _resolve_dec_branch_target(
+    tok: str, branch_pc: int, symbols: dict[str, Symbol], where: str
+) -> int:
+    """DEC_BRANCH target: same shape and PC math as BRANCH_ON; distinct
+    error labels so debug output points at the right opcode.
+    """
+    if tok and tok[0].isalpha() or tok.startswith("_"):
+        sym = symbols.get(tok)
+        if sym is None:
+            raise AsmError(where, f"undefined DEC_BRANCH target: {tok!r}")
+        if sym.kind != "label":
+            raise AsmError(
+                where,
+                f"DEC_BRANCH target {tok!r} is an .equ constant, not a label",
+            )
+        offset = sym.value - branch_pc - 1
+    else:
+        offset = _parse_int(tok, where)
+    if not -128 <= offset <= 127:
+        raise AsmError(
+            where,
+            f"DEC_BRANCH offset {offset} out of signed 8-bit range "
+            f"(branch_pc={branch_pc})",
+        )
+    return offset
 
 
 # ===========================================================================
@@ -1136,7 +1241,12 @@ def main(argv: Optional[list[str]] = None) -> int:
     return 0
 
 
-_BUNDLED_PROGRAMS = ("first-light", "tmp108", "i2c-write-one-byte")
+_BUNDLED_PROGRAMS = (
+    "first-light",
+    "tmp108",
+    "i2c-write-one-byte",
+    "loop-counter-demo",
+)
 
 
 def _run_bundled_batch() -> int:
