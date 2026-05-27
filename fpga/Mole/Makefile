@@ -72,8 +72,9 @@ $(BIN): $(ASC)
 sim: sim-config sim-opendrain sim-baud-gen sim-rx-sync \
      sim-tx-shiftreg sim-rx-shiftreg sim-tx-fsm sim-rx-fsm \
      sim-uart-tx sim-uart-rx sim-uart sim-spram sim-isa \
-     sim-engine-smoke sim-engine-full sim-pll sim-crc sim-iobuf \
-     sim-loader-fsm sim-drainer-fsm sim-top sim-top-flow-control ## Run all simulations
+     sim-engine-smoke sim-engine-full sim-engine-target sim-pll \
+     sim-crc sim-iobuf sim-loader-fsm sim-drainer-fsm sim-top \
+     sim-top-flow-control ## Run all simulations
 
 # Per-block sim / gen targets land here once their hint blocks in
 # TODO.md flip from 🔲 to ✅. The naming contract is fixed:
@@ -93,6 +94,7 @@ sim: sim-config sim-opendrain sim-baud-gen sim-rx-sync \
 #   sim-isa              src/sim/InstructionSim.scala        (Step  7)
 #   sim-engine-smoke     src/sim/BitCycleEngineSmokeSim.scala (Step  9)
 #   sim-engine-full      src/sim/BitCycleEngineSim.scala     (Step 12)
+#   sim-engine-target    src/sim/BitCycleEngineTargetSim.scala (Step 19)
 #   sim-pll              src/sim/MolePllUp5kSim.scala        (Step 13)
 #   sim-crc              src/sim/Crc16XmodemSim.scala        (Step 13)
 #   sim-iobuf            src/sim/MoleIoBufUp5kSim.scala      (Step 13)
@@ -149,6 +151,9 @@ sim-engine-smoke: ## EMIT_BIT smoke: i3c-OD vs i3c-PP byte trace (Step 9)
 sim-engine-full: ## Full ISA coverage of BitCycleEngineCore (Step 12)
 	$(SBT) -batch "runMain $(PACKAGE).BitCycleEngineSim"
 
+sim-engine-target: ## Target-role coverage of BitCycleEngineCore (Step 19)
+	$(SBT) -batch "runMain $(PACKAGE).BitCycleEngineTargetSim"
+
 sim-pll: ## Run MolePllUp5k bypass + BlackBox elaboration sim (Step 13)
 	$(SBT) -batch "runMain $(PACKAGE).MolePllUp5kSim"
 
@@ -204,6 +209,6 @@ help: ## Show this help (every target with a ## description)
 .PHONY: all sim sim-config sim-opendrain sim-baud-gen sim-rx-sync \
         sim-tx-shiftreg sim-rx-shiftreg sim-tx-fsm sim-rx-fsm \
         sim-uart-tx sim-uart-rx sim-uart sim-spram sim-isa \
-        sim-engine-smoke sim-engine-full sim-pll sim-crc sim-iobuf \
-        sim-loader-fsm sim-drainer-fsm sim-top sim-top-flow-control \
-        gen waves flash clean distclean help
+        sim-engine-smoke sim-engine-full sim-engine-target sim-pll \
+        sim-crc sim-iobuf sim-loader-fsm sim-drainer-fsm sim-top \
+        sim-top-flow-control gen waves flash clean distclean help
