@@ -506,18 +506,16 @@ the opcode:
 | code  | name           | class    | v0   | meaning                                                            |
 |-------|----------------|----------|------|--------------------------------------------------------------------|
 | 0     | `ALWAYS`       | constant | yes  | true. `BRANCH_ON`: short jump. `WAIT_ON`: sleep for `timeout` Q    |
-| 1     | `NEVER`        | constant | yes  | false. `BRANCH_ON`: typed no-op. `WAIT_ON`: always times out       |
-| 2     | `MISMATCH`     | flag     | yes  | `MISMATCH_FLAG == 1`                                               |
-| 3     | `NOT_MISMATCH` | flag     | yes  | `MISMATCH_FLAG == 0`                                               |
-| 4     | `SCL_HIGH`     | level    | yes  | SCL line currently sampled high                                    |
+| 1     | `MISMATCH`     | flag     | yes  | `MISMATCH_FLAG == 1`                                               |
+| 2     | `NOT_MISMATCH` | flag     | yes  | `MISMATCH_FLAG == 0`                                               |
+| 3     | `START_SEEN`   | edge     | yes  | Start (or repeated Start) edge observed since `WAIT_ON` armed      |
+| 4     | `STOP_SEEN`    | edge     | yes  | Stop edge observed since `WAIT_ON` armed                           |
 | 5     | `SDA_LOW`      | level    | yes  | SDA line currently sampled low                                     |
-| 6     | `START_SEEN`   | edge     | yes  | Start (or repeated Start) edge observed since `WAIT_ON` armed      |
-| 7     | `STOP_SEEN`    | edge     | yes  | Stop edge observed since `WAIT_ON` armed                           |
+| 6     | `SDA_HIGH`     | level    | yes  | SDA line currently sampled high                                    |
+| 7     | `SCL_HIGH`     | level    | yes  | SCL line currently sampled high                                    |
 | 8     | `TIMEOUT`      | flag     | yes  | last `WAIT_ON` timed out                                           |
 | 9     | `NOT_TIMEOUT`  | flag     | yes  | last `WAIT_ON` did not time out                                    |
-| 10    | `CAPTURE_LOW`  | flag     | v0.5 | last captured SDA bit was 0                                        |
-| 11    | `CAPTURE_HIGH` | flag     | v0.5 | last captured SDA bit was 1                                        |
-| 12-15 | reserved       | ---      | ---  | future: `IBI_PENDING`, `REG_MASK_EQ`, ...                          |
+| 10-15 | reserved       | ---      | ---  | v0.5 candidates: `CAPTURE_LOW`, `CAPTURE_HIGH`, `IBI_PENDING`, `REG_MASK_EQ`, ... |
 
 Cond-by-opcode quick reference:
 
@@ -1072,12 +1070,14 @@ the above can land in v0.5 without an ISA-width bump.
 `cond_code` slots --- codes 10..15 ---  see §"Engine flags ---
 unified condition codes"):
 
-- `CAPTURE_LOW` / `CAPTURE_HIGH` (codes 10, 11) --- branch on
+- `CAPTURE_LOW` / `CAPTURE_HIGH` (candidates from the 10..15
+  reserved pool) --- branch on
   the bit most recently written to the result ring. Subsumes
   the "react to PID bits during DAA arbitration" use case
   originally reserved as `BRANCH_ON_CAPTURED_MASK`. Adding
   multi-bit mask compare is a future `REG_MASK_EQ` condition
-  (code 12+), backed by a small register file in the engine.
+  (likewise from the 10..15 pool), backed by a small register
+  file in the engine.
 - `IBI_PENDING` and friends --- bus-state observations the
   engine already tracks for the `WAIT_ON SDA_LOW, t` /
   `WAIT_ON START_SEEN, t` paths.
@@ -1172,7 +1172,7 @@ nak:
 
 Observations:
 
-- The whole transaction is **31 instructions = 62 bytes** of
+- The whole transaction is **32 instructions = 64 bytes** of
   bytecode. A 256-byte payload extrapolates linearly to ~280
   instructions, well inside the 4096-instruction `JMP` range
   and a tiny fraction of one SPRAM bank.
