@@ -16,7 +16,7 @@ SDA and SCL so a scope user can verify the pads are alive. Source:
 ; Configures I2C timing at ~100 kHz, sets bus mode, then loops
 ; forever toggling SDA and SCL one quarter at a time.
 
-.equ slow_div, 250
+.equ slow_div, 60
 
 start:
     LOAD_TIMING   i2c_freq, slow_div
@@ -32,8 +32,10 @@ loop:
 
 Reading top to bottom:
 
-- `.equ slow_div, 250` --- the divider for ~100 kHz. We name it so
-  the relationship with `LOAD_TIMING` is visible at a glance.
+- `.equ slow_div, 60` --- the divider for ~100 kHz at Verde's
+  24 MHz fabric (= 61 fabric cycles per quarter -> 244 per bit
+  -> ~98.4 kHz). We name it so the relationship with
+  `LOAD_TIMING` is visible at a glance.
 - `LOAD_TIMING i2c_freq, slow_div` --- writes the divider into the
   I2C timing register (reg 0).
 - `SET_BUS_MODE i2c` --- selects the open-drain electrical mode.
@@ -48,8 +50,9 @@ Reading top to bottom:
 
 What you see on hardware: two ~98 kHz square waves with a small
 phase shift between SDA and SCL. (98 kHz, not exactly 100, because
-the integer divider rounds; the [Errors](./errors.md) chapter has a
-note on how to dial that in for your board.)
+the integer divider rounds; the [Mental Model](./mental-model.md#picking-a-divider)
+chapter has a full divider table for Verde including the exact
+divisor for 100 kHz if you need it.)
 
 ## i2c-write-one-byte
 
@@ -59,7 +62,7 @@ ACK check, data, ACK check, STOP --- and halts with a status that
 encodes whether either ACK was missed.
 
 ```text
-        LOAD_TIMING   i2c_freq, 250
+        LOAD_TIMING   i2c_freq, 60
         SET_BUS_MODE  i2c
 
         ; START

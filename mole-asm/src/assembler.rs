@@ -853,7 +853,7 @@ mod tests {
         // ROADMAP §"Example: I2C write-one-byte in moleasm" --- 32 words.
         // Mirrors the Python `_selfcheck_roadmap_example` test.
         let src = "
-        LOAD_TIMING   i2c_freq, 250
+        LOAD_TIMING   i2c_freq, 60
         SET_BUS_MODE  i2c
         EMIT_QUARTER  sda=recessive scl=recessive
         EMIT_QUARTER  sda=dominant  scl=recessive
@@ -888,7 +888,7 @@ nak:
         HALT          status=1
 ";
         let expected = vec![
-            0x80FA, 0x7000, 0x2500, 0x2100, 0x2000, 0x1400, 0x1000, 0x1400, 0x1000, 0x1000, 0x1000,
+            0x803C, 0x7000, 0x2500, 0x2100, 0x2000, 0x1400, 0x1000, 0x1400, 0x1000, 0x1000, 0x1000,
             0x1000, 0x1000, 0x1803, 0x510F, 0x1400, 0x1000, 0x1400, 0x1000, 0x1400, 0x1000, 0x1400,
             0x1400, 0x1803, 0x5105, 0x2000, 0x2100, 0x2500, 0x9010, 0x0000, 0x9020, 0x0100,
         ];

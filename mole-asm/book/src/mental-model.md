@@ -17,20 +17,70 @@ a result ring, and the two pads.
 
 ## Quarter-bit time
 
-A **quarter-bit** is one tick of the engine's clock. Bits on the
-wire are four quarters wide; SCL is high for two quarters and low
-for two quarters in the nominal pattern. Every timing parameter you
-ever set in moleasm is expressed in quarters:
+A **quarter-bit** is one tick of the engine's quarter-bit timer.
+Bits on the wire are four quarters wide; SCL is high for two
+quarters and low for two quarters in the nominal pattern. Every
+timing parameter you ever set in moleasm is expressed in quarters
+or fabric-cycles-per-quarter:
 
-- `LOAD_TIMING i2c_freq, 250` means "make the bit period 250 quarters".
+- `LOAD_TIMING i2c_freq, 60` means "make every quarter 61 fabric
+  cycles long" (see [Picking a divider](#picking-a-divider)
+  below). At Verde's 24 MHz fabric, that lands at ~100 kHz on the
+  wire.
 - `STRETCH_SCL 12` means "hold the line in its current state for
   12 extra quarters".
-- `WAIT_ON ..., 64` means "wait up to 64 quarters before timing out".
+- `WAIT_ON ..., 64` means "wait up to 64 quarters before timing
+  out".
 
-The fabric clock *is* the quarter-bit clock --- there is no PLL
+The fabric clock *is* the engine's clock --- there is no PLL
 multiplying it up. That's a deliberate ROADMAP constraint
 (§"Quarter-bit timing") that keeps the engine analyzable: every
-event in a moleasm program lives on the same quarter-tick grid.
+event in a moleasm program lives on the same fabric-cycle grid.
+What's programmable is *how many fabric cycles long a single
+quarter is*; the wire-side bit rate falls out of that choice via
+`bit_rate = fabric / (4 * (N + 1))`.
+
+## Picking a divider
+
+`LOAD_TIMING reg, N` writes the 10-bit value `N` into one of the
+four per-mode divider registers. The active register feeds the
+**quarter-bit timer**, which produces one tick every `N + 1`
+fabric cycles. Four ticks make one bit on the wire, so the
+formula is:
+
+```text
+bit_rate = fabric_clock / (4 * (N + 1))
+```
+
+For Verde's 24 MHz fabric:
+
+| Target bit rate          | `N`  | Achieved          | Notes                                                                                |
+|--------------------------|------|-------------------|--------------------------------------------------------------------------------------|
+| 100 kHz (Standard mode)  | 60   | ~98.4 kHz         | `N = 59` hits exactly 100 kHz; 60 is the round number the rest of the book uses.     |
+| 400 kHz (Fast mode)      | 14   | 400 kHz exactly   |                                                                                      |
+| 1 MHz (Fast-mode Plus)   | 5    | 1 MHz exactly     | The reset default (`quarterPeriodCyclesReset = 6 -> reload = 5`).                    |
+| 3 MHz                    | 1    | 3 MHz exactly     | Two fabric cycles per quarter.                                                       |
+| 6 MHz                    | 0    | 6 MHz exactly     | One fabric cycle per quarter --- the cap on Verde.                                   |
+| 3.4 MHz (High-speed)     | --   | **not achievable**| Closest dividers (`1`, `0`) land at 3 MHz / 6 MHz. See "Why no 3.4 MHz" below.       |
+
+### Why no 3.4 MHz on Verde
+
+3.4 MHz I2C High-speed mode wants the quarter-bit timer to tick
+at `4 * 3.4 MHz = 13.6 MHz`. The ROADMAP fixes that **the fabric
+clock IS the quarter-bit clock --- there is no PLL multiplying
+it up.** So the only quarter rates Verde's 24 MHz fabric can
+produce are integer divisions of 24 MHz: 24, 12, 8, 6, 4.8, 4,
+... MHz. None of them is 13.6 MHz, and so no `N` produces
+exactly 3.4 MHz. The closest you can get is `N = 1` -> 3 MHz, or
+`N = 0` -> 6 MHz.
+
+To hit 3.4 MHz exactly you need a board whose fabric clock is a
+multiple of 13.6 MHz (27.2 MHz, 40.8 MHz, 54.4 MHz, ...). That's
+a board respin --- the **Negro** tier on the ROADMAP. The
+trade-off is conscious: keeping the fabric / quarter-bit clocks
+identical is what makes every timing budget in the engine a
+single number of fabric cycles, which is what made closing
+24 MHz on the iCEbreaker UP5K possible at all.
 
 ## The two-symbol vocabulary
 
@@ -125,7 +175,7 @@ That's the complete output channel. Nothing else leaves the engine.
 Here is the smallest non-trivial program: drive one I2C START.
 
 ```text
-LOAD_TIMING   i2c_freq, 250         ; 250 quarters per bit -> ~100 kHz
+LOAD_TIMING   i2c_freq, 60          ; 61 fabric cycles per quarter -> ~100 kHz @ Verde 24 MHz
 SET_BUS_MODE  i2c                   ; recessive = Hi-Z
 EMIT_QUARTER  sda=recessive scl=recessive   ; idle: both high
 EMIT_QUARTER  sda=dominant  scl=recessive   ; pull SDA low -> START

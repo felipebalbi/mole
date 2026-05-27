@@ -129,8 +129,8 @@ cannot use an `.equ` name where a label is expected (e.g. as a
 `BRANCH_ON` target), and vice versa.
 
 ```text
-.equ slow_div, 250          ; ~100 kHz at the Verde 24 MHz clock
-.equ fast_div, 25           ; ~1 MHz
+.equ slow_div, 60           ; ~100 kHz at the Verde 24 MHz clock
+.equ fast_div, 5            ; ~1 MHz at the Verde 24 MHz clock (= reset default)
 LOAD_TIMING i2c_freq, slow_div
 ```
 
@@ -165,7 +165,7 @@ A complete, mostly-trivial source file:
 
 ```text
 ; one-shot I2C scan-or-fail
-.equ slow_div, 250
+.equ slow_div, 60
 
 start:
     LOAD_TIMING   i2c_freq, slow_div

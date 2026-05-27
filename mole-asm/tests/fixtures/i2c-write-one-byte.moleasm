@@ -11,7 +11,7 @@
 ; 2 with comments. The encoded MARK words (0x9010, 0x9020) are the
 ; verifiable artifact.
 
-        LOAD_TIMING   i2c_freq, 250         ; ~100 kHz @ 100 MHz fabric (illustrative)
+        LOAD_TIMING   i2c_freq, 60          ; ~100 kHz @ 24 MHz Verde fabric
         SET_BUS_MODE  i2c                   ; SCL+SDA both OD-release on high half
 
         ; -- Start condition: SDA falling while SCL high --
