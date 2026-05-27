@@ -18,14 +18,14 @@ import spinal.core._
   *   F_pfd    = F_ref / (DIVR + 1)   // must fall in 10..133 MHz
   * }}}
   *
-  * For 12 MHz -> 48 MHz the values below give F_pllout = 12 * 32 / (1 * 8) =
-  * 48 MHz, F_pfd = 12 MHz. FILTER_RANGE = 1 follows the datasheet's loop-filter
+  * For 12 MHz -> 48 MHz the values below give F_pllout = 12 * 32 / (1 * 8) = 48
+  * MHz, F_pfd = 12 MHz. FILTER_RANGE = 1 follows the datasheet's loop-filter
   * table for F_pfd in (7, 17] MHz.
   *
-  *   - DIVR         = 0     reference divider; F_pfd = F_ref / (DIVR + 1)
-  *   - DIVF         = 31    feedback divider;  multiplies up by 32
-  *   - DIVQ         = 3     output divider;    divides down by 2^3 = 8
-  *   - FILTER_RANGE = 1     loop filter setting for F_pfd in (7, 17] MHz
+  *   - DIVR = 0 reference divider; F_pfd = F_ref / (DIVR + 1)
+  *   - DIVF = 31 feedback divider; multiplies up by 32
+  *   - DIVQ = 3 output divider; divides down by 2^3 = 8
+  *   - FILTER_RANGE = 1 loop filter setting for F_pfd in (7, 17] MHz
   *
   * Outputs:
   *   - `clkOut` is taken from PLLOUTGLOBAL so the fabric sees the 48 MHz clock
@@ -38,16 +38,16 @@ import spinal.core._
   *     the 48 MHz domain (async-assert, sync-deassert).
   *
   * Bypass strategy:
-  *   - `useBlackBox = true` (default, synthesis path) instantiates
-  *     SB_PLL40_PAD with the parameters above.
-  *   - `useBlackBox = false` (sim path) routes `clkIn` straight to `clkOut`
-  *     and ties `locked` high. Verilator sims do not have the iCE40 PLL cell
-  *     model, so the BlackBox path cannot be elaborated under simulation.
-  *     MoleTopSim sets `useBlackBox = false` and pretends the 12 MHz pin is
-  *     already the 48 MHz fabric clock --- the cycle-count translation does
-  *     not matter for functional sim, and the wrapper logic that depends on
-  *     `locked` (the reset bridge) is exercised both ways by toggling
-  *     `io_reset` at sim start.
+  *   - `useBlackBox = true` (default, synthesis path) instantiates SB_PLL40_PAD
+  *     with the parameters above.
+  *   - `useBlackBox = false` (sim path) routes `clkIn` straight to `clkOut` and
+  *     ties `locked` high. Verilator sims do not have the iCE40 PLL cell model,
+  *     so the BlackBox path cannot be elaborated under simulation. MoleTopSim
+  *     sets `useBlackBox = false` and pretends the 12 MHz pin is already the 48
+  *     MHz fabric clock --- the cycle-count translation does not matter for
+  *     functional sim, and the wrapper logic that depends on `locked` (the
+  *     reset bridge) is exercised both ways by toggling `io_reset` at sim
+  *     start.
   *
   * SB_PLL40_PAD pin notes:
   *   - PACKAGEPIN takes the reference straight from the pad; do not route it
@@ -55,8 +55,8 @@ import spinal.core._
   *   - BYPASS is hard-tied LOW here: the PLL is the only clock source we want
   *     in production. The Scala-level `useBlackBox = false` is the only bypass
   *     mechanism Mole uses.
-  *   - RESETB is **active LOW** (note the B suffix). MoleTop drives it from
-  *     the synchronised, inverted external reset button.
+  *   - RESETB is **active LOW** (note the B suffix). MoleTop drives it from the
+  *     synchronised, inverted external reset button.
   *
   * Phase 2 targets 48 MHz; the 8x recipe (DIVR = 0, DIVF = 63, DIVQ = 3 -> 96
   * MHz) is deferred to Step 16.5 once the 48 MHz bring-up is silicon-validated.
@@ -69,9 +69,9 @@ import spinal.core._
 case class MolePllUp5k(useBlackBox: Boolean = true) extends Component {
   val io = new Bundle {
 
-    /** Reference clock straight from the dedicated PLL input pad (12 MHz on
-      * the iCEbreaker). Must be wired to PACKAGEPIN with no intermediate
-      * fabric routing.
+    /** Reference clock straight from the dedicated PLL input pad (12 MHz on the
+      * iCEbreaker). Must be wired to PACKAGEPIN with no intermediate fabric
+      * routing.
       */
     val clkIn = in Bool ()
 
@@ -86,8 +86,8 @@ case class MolePllUp5k(useBlackBox: Boolean = true) extends Component {
       */
     val clkOut = out Bool ()
 
-    /** PLL LOCK indicator. Asynchronous to fabric; pass through a
-      * synchroniser before using as a logic signal.
+    /** PLL LOCK indicator. Asynchronous to fabric; pass through a synchroniser
+      * before using as a logic signal.
       */
     val locked = out Bool ()
   }
@@ -121,17 +121,17 @@ case class MolePllUp5k(useBlackBox: Boolean = true) extends Component {
   * oscillator onto exactly such a pad, so this is the correct primitive.
   *
   * Pins (production-relevant only):
-  *   - PACKAGEPIN     in   reference clock from pad
-  *   - RESETB         in   active-low PLL reset
-  *   - BYPASS         in   active-high: routes PACKAGEPIN -> PLLOUT* directly
-  *   - PLLOUTCORE     out  PLL output routed through ordinary fabric routing
-  *   - PLLOUTGLOBAL   out  PLL output routed through a global clock buffer
-  *   - LOCK           out  asynchronous lock indicator
+  *   - PACKAGEPIN in reference clock from pad
+  *   - RESETB in active-low PLL reset
+  *   - BYPASS in active-high: routes PACKAGEPIN -> PLLOUT* directly
+  *   - PLLOUTCORE out PLL output routed through ordinary fabric routing
+  *   - PLLOUTGLOBAL out PLL output routed through a global clock buffer
+  *   - LOCK out asynchronous lock indicator
   *
   * Unused production pins (omitted from this BlackBox so yosys does not warn
-  * about unconnected nets): EXTFEEDBACK, DYNAMICDELAY,
-  * LATCHINPUTVALUE, SDI, SDO, SCLK. They are for advanced features (dynamic
-  * phase shift, external feedback loop) that Mole does not need.
+  * about unconnected nets): EXTFEEDBACK, DYNAMICDELAY, LATCHINPUTVALUE, SDI,
+  * SDO, SCLK. They are for advanced features (dynamic phase shift, external
+  * feedback loop) that Mole does not need.
   */
 class SB_PLL40_PAD extends BlackBox {
   // Parameters are added as generics so the BlackBox elaboration matches the

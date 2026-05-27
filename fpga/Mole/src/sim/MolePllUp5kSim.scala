@@ -9,17 +9,16 @@ import spinal.core.sim._
   * of its own, so this sim is intentionally tiny. Two things to verify:
   *
   *   1. The bypass path elaborates cleanly and wires `clkIn` straight to
-  *      `clkOut`, with `locked` tied high. This is the path
-  *      [[MoleTopSim]] depends on, since Verilator has no model of the iCE40
-  *      `SB_PLL40_PAD` cell.
+  *      `clkOut`, with `locked` tied high. This is the path [[MoleTopSim]]
+  *      depends on, since Verilator has no model of the iCE40 `SB_PLL40_PAD`
+  *      cell.
   *   2. The BlackBox path elaborates to Verilog without errors and emits the
-  *      `SB_PLL40_PAD` primitive with the 4x-recipe generics
-  *      (DIVR=0, DIVF=31, DIVQ=3, FILTER_RANGE=1, FEEDBACK_PATH="SIMPLE").
-  *      yosys's `synth_ice40` is the actual end-to-end check; here we just
-  *      verify the SpinalHDL elaboration stage produces a Verilog file that
-  *      mentions the primitive, so a future refactor that silently drops the
-  *      BlackBox is caught at sim time rather than at the next bitstream
-  *      build.
+  *      `SB_PLL40_PAD` primitive with the 4x-recipe generics (DIVR=0, DIVF=31,
+  *      DIVQ=3, FILTER_RANGE=1, FEEDBACK_PATH="SIMPLE"). yosys's `synth_ice40`
+  *      is the actual end-to-end check; here we just verify the SpinalHDL
+  *      elaboration stage produces a Verilog file that mentions the primitive,
+  *      so a future refactor that silently drops the BlackBox is caught at sim
+  *      time rather than at the next bitstream build.
   *
   * The wrapper has no state to exercise beyond combinational pass-through, so
   * there is no need for a full SpinalSim DUT compile. Case 1 uses SpinalSim
@@ -87,7 +86,9 @@ object MolePllUp5kSim extends App {
   {
     val report = SpinalConfig(
       targetDirectory = "simWorkspace/MolePllUp5kBlackBoxGen"
-    ).generateVerilog(MolePllUp5k(useBlackBox = true).setDefinitionName("MolePllUp5kBlackBox"))
+    ).generateVerilog(
+      MolePllUp5k(useBlackBox = true).setDefinitionName("MolePllUp5kBlackBox")
+    )
 
     val vPath = report.toplevelName + ".v"
     val vFile =

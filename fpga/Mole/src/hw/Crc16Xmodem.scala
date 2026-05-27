@@ -15,8 +15,8 @@ import spinal.lib._
   * The Component absorbs at most one byte per fabric cycle and holds the
   * running CRC in a registered output. The combinational byte-update step
   * unrolls all eight bit iterations at elaboration time --- about eight levels
-  * of cascaded XOR/MUX, which fits comfortably under the Phase 2 48 MHz
-  * fabric timing budget on the iCE40 UP5K.
+  * of cascaded XOR/MUX, which fits comfortably under the Phase 2 48 MHz fabric
+  * timing budget on the iCE40 UP5K.
   *
   * `MoleLoaderFsm` instantiates exactly one of these. The loader asserts
   * `io.init` during `Idle` and `Resync` (clearing the register to 0x0000) and
@@ -30,10 +30,10 @@ case class Crc16Xmodem() extends Component {
 
     /** Level-sensitive synchronous reset of the CRC register to 0x0000. Hold
       * high across any cycle where the running CRC should be cleared (the
-      * loader holds it through `Idle` and `Resync`). Wins over `update` if
-      * both fire in the same cycle --- "you cannot meaningfully initialise
-      * and absorb a byte at the same time" is a contract violation, and
-      * latching the initial state is the safer of the two interpretations.
+      * loader holds it through `Idle` and `Resync`). Wins over `update` if both
+      * fire in the same cycle --- "you cannot meaningfully initialise and
+      * absorb a byte at the same time" is a contract violation, and latching
+      * the initial state is the safer of the two interpretations.
       */
     val init = in Bool ()
 
@@ -45,8 +45,8 @@ case class Crc16Xmodem() extends Component {
     val update = slave Flow (Bits(8 bits))
 
     /** Current CRC register value. Combinationally tracks the register, so a
-      * consumer that samples it on the same cycle as `init` sees 0x0000 a
-      * cycle later, and a consumer that samples it the cycle after the final
+      * consumer that samples it on the same cycle as `init` sees 0x0000 a cycle
+      * later, and a consumer that samples it the cycle after the final
       * `update.fire` sees the final CRC.
       */
     val value = out Bits (16 bits)
@@ -89,9 +89,9 @@ object Crc16Xmodem {
     *                          :  crc << 1;
     * }}}
     *
-    * All eight bit iterations unroll at elaboration time into cascaded
-    * MUX/XOR levels. The loader can therefore absorb one byte per fabric
-    * cycle without inserting wait states.
+    * All eight bit iterations unroll at elaboration time into cascaded MUX/XOR
+    * levels. The loader can therefore absorb one byte per fabric cycle without
+    * inserting wait states.
     *
     * @param crc
     *   Current 16-bit CRC running value (`Bits(16 bits)`).
@@ -129,9 +129,9 @@ object Crc16Xmodem {
     work
   }
 
-  /** Convenience: absorb an entire byte sequence at elaboration time. Useful
-    * in sims for pre-computing expected CRCs over hard-coded byte arrays.
-    * Not for synthesis --- folds at elaboration in pure Scala, no hardware.
+  /** Convenience: absorb an entire byte sequence at elaboration time. Useful in
+    * sims for pre-computing expected CRCs over hard-coded byte arrays. Not for
+    * synthesis --- folds at elaboration in pure Scala, no hardware.
     */
   def updateAll(initCrc: Int, bytes: Iterable[Int]): Int = {
     var c = initCrc & 0xffff
@@ -139,8 +139,9 @@ object Crc16Xmodem {
       val bb = b & 0xff
       c ^= bb << 8
       for (_ <- 0 until 8) {
-        c = if ((c & 0x8000) != 0) ((c << 1) ^ POLY) & 0xffff
-        else (c << 1) & 0xffff
+        c =
+          if ((c & 0x8000) != 0) ((c << 1) ^ POLY) & 0xffff
+          else (c << 1) & 0xffff
       }
     }
     c

@@ -8,21 +8,20 @@ import spinal.core.sim._
   * Two layers of coverage:
   *
   *   1. **Pure-Scala** (`Crc16Xmodem.updateAll`): verify the catalogue check
-  *      vector and every Mole-specific vector listed in
-  *      `../../WIRE_FORMAT.md`. Catches a reference-algorithm regression in
-  *      `Crc16Xmodem.updateAll`, which sims and the eventual host-side
-  *      builder both rely on as a golden source.
+  *      vector and every Mole-specific vector listed in `../../WIRE_FORMAT.md`.
+  *      Catches a reference-algorithm regression in `Crc16Xmodem.updateAll`,
+  *      which sims and the eventual host-side builder both rely on as a golden
+  *      source.
   *   2. **SpinalSim DUT** ([[Crc16Xmodem]] Component): drive the same byte
   *      sequences through the registered accumulator and assert `io.value`
   *      matches `updateAll`. Catches a hardware-vs-software divergence in
-  *      [[Crc16Xmodem.update]] (the combinational byte-step the loader will
-  *      use cycle-by-cycle), and exercises the `init` / `update` priority
-  *      contract.
+  *      [[Crc16Xmodem.update]] (the combinational byte-step the loader will use
+  *      cycle-by-cycle), and exercises the `init` / `update` priority contract.
   *
-  * The two layers are deliberately redundant: the catalogue check value is
-  * what an independent host-side implementation will use to validate its own
-  * CRC; the DUT sim then proves the hardware agrees byte-for-byte with that
-  * same software reference. Either layer alone leaves a wire-format gap.
+  * The two layers are deliberately redundant: the catalogue check value is what
+  * an independent host-side implementation will use to validate its own CRC;
+  * the DUT sim then proves the hardware agrees byte-for-byte with that same
+  * software reference. Either layer alone leaves a wire-format gap.
   *
   * Run: `sbt "runMain mole.Crc16XmodemSim"`
   */
@@ -45,7 +44,11 @@ object Crc16XmodemSim extends App {
     Vec("empty", Seq.empty, 0x0000),
     Vec("single 0x00", Seq(0x00), 0x0000),
     Vec("single 0xFF", Seq(0xff), 0x1ef0),
-    Vec("ASCII 123456789", "123456789".getBytes("US-ASCII").map(_ & 0xff).toSeq, 0x31c3),
+    Vec(
+      "ASCII 123456789",
+      "123456789".getBytes("US-ASCII").map(_ & 0xff).toSeq,
+      0x31c3
+    ),
     Vec("two 0x00", Seq(0x00, 0x00), 0x0000),
     Vec("0xAA 0x55", Seq(0xaa, 0x55), 0xf8e5),
     Vec("example frame payload", exampleFramePayload, 0x9fdf)
