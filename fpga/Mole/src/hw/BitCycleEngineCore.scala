@@ -6,71 +6,65 @@ import spinal.lib.fsm._
 
 /** The Mole bit-cycle engine --- Step 8 minimal variant.
   *
-  * This is the smallest engine that satisfies the Phase 1 milestone:
-  * fetch from program memory, decode `EMIT_BIT` / `SET_BUS_MODE` /
-  * `HALT`, drive the [[MoleBus]] at quarter-bit pacing, and emit the
-  * 32-bit [[Revision]] word into the result ring when the program
-  * halts. Every other v0 opcode (the eight added in Step 7's encoder)
-  * is recognised by the decode mux and traps to the same `HALT`
-  * sequence so a stray opcode cannot run away with the bus; the real
-  * implementations land in Steps 10 / 11.
+  * This is the smallest engine that satisfies the Phase 1 milestone: fetch from
+  * program memory, decode `EMIT_BIT` / `SET_BUS_MODE` / `HALT`, drive the
+  * [[MoleBus]] at quarter-bit pacing, and emit the 32-bit [[Revision]] word
+  * into the result ring when the program halts. Every other v0 opcode (the
+  * eight added in Step 7's encoder) is recognised by the decode mux and traps
+  * to the same `HALT` sequence so a stray opcode cannot run away with the bus;
+  * the real implementations land in Steps 10 / 11.
   *
   * ==Architecture (one paragraph)==
   *
-  * One `StateMachine` walks `Idle → Fetch → FetchWait → Decode →
-  * (Execute) → Fetch` with a parallel `Halt` exit that pushes
-  * [[Revision.wordLo]] and [[Revision.wordHi]] into the result ring
-  * and returns to `Idle`. The `EMIT_BIT` execute state is the only
-  * place the bus is driven, and only at quarter-bit boundaries
-  * announced by [[QuarterBitTimer]]. The bus pads come from
-  * `Reg(Bool())`s at component scope so every transition is a single
+  * One `StateMachine` walks `Idle → Fetch → FetchWait → Decode → (Execute) →
+  * Fetch` with a parallel `Halt` exit that pushes [[Revision.wordLo]] and
+  * [[Revision.wordHi]] into the result ring and returns to `Idle`. The
+  * `EMIT_BIT` execute state is the only place the bus is driven, and only at
+  * quarter-bit boundaries announced by [[QuarterBitTimer]]. The bus pads come
+  * from `Reg(Bool())`s at component scope so every transition is a single
   * registered edge per `fpga/Mole/AGENTS.md` §"Bus-shaped FSM idiom".
   *
   * ==Bus driver model==
   *
-  * `sda*` and `scl*` driver regs hold whatever value was last latched
-  * for them. Between bits (during `Fetch` / `FetchWait` / `Decode`)
-  * the regs are not touched, so SCL stays at its `Q3=recessive`
-  * value through fetch overhead --- which is what an I3C / I2C
-  * receiver expects (SCL high between bits). On entry to `Idle`
-  * (after `HALT`), the regs are forced to all-off so the bus releases
-  * cleanly.
+  * `sda*` and `scl*` driver regs hold whatever value was last latched for them.
+  * Between bits (during `Fetch` / `FetchWait` / `Decode`) the regs are not
+  * touched, so SCL stays at its `Q3=recessive` value through fetch overhead ---
+  * which is what an I3C / I2C receiver expects (SCL high between bits). On
+  * entry to `Idle` (after `HALT`), the regs are forced to all-off so the bus
+  * releases cleanly.
   *
   * ==Quarter-bit pacing==
   *
-  * The shared [[QuarterBitTimer]] is loaded on entry to `EMIT_BIT`
-  * and `enable`d while we are in the execute state. Each tick
-  * advances `qIdx` (`0 → 1 → 2 → 3`); on the `Q3` tick we move on
-  * (PC++ and refetch). Updates to the SCL register happen on the
-  * cycle the timer ticks; updates to the SDA register only on entry
-  * to `EMIT_BIT` (SDA is held for the whole bit by spec).
+  * The shared [[QuarterBitTimer]] is loaded on entry to `EMIT_BIT` and
+  * `enable`d while we are in the execute state. Each tick advances `qIdx` (`0 →
+  * 1 → 2 → 3`); on the `Q3` tick we move on (PC++ and refetch). Updates to the
+  * SCL register happen on the cycle the timer ticks; updates to the SDA
+  * register only on entry to `EMIT_BIT` (SDA is held for the whole bit by
+  * spec).
   *
   * ==What is deliberately *not* implemented yet==
   *
-  *  - `EMIT_QUARTER`, `STRETCH_SCL`, `WAIT_ON` (Step 10).
-  *  - `JMP`, `BRANCH_ON`, `MARK`, `LOAD_TIMING` (Step 11).
-  *  - `SAMPLE_BIT_ON_SCL`, `DRIVE_BIT_ON_SCL` (Phase 4 / Step 19).
-  *  - Result-ring write-pointer management. Step 8 writes the two
-  *    `REVISION` halves to fixed addresses `programWordCount` and
-  *    `programWordCount + 1`; the proper ring pointer lands with
-  *    `MARK` in Step 11.
-  *  - Reserved opcode trap with status code in the `HALT` word.
-  *    Step 8 traps any unknown opcode to the same Revision-then-Idle
-  *    sequence with no diagnostic.
+  *   - `EMIT_QUARTER`, `STRETCH_SCL`, `WAIT_ON` (Step 10).
+  *   - `JMP`, `BRANCH_ON`, `MARK`, `LOAD_TIMING` (Step 11).
+  *   - `SAMPLE_BIT_ON_SCL`, `DRIVE_BIT_ON_SCL` (Phase 4 / Step 19).
+  *   - Result-ring write-pointer management. Step 8 writes the two `REVISION`
+  *     halves to fixed addresses `programWordCount` and `programWordCount + 1`;
+  *     the proper ring pointer lands with `MARK` in Step 11.
+  *   - Reserved opcode trap with status code in the `HALT` word. Step 8 traps
+  *     any unknown opcode to the same Revision-then-Idle sequence with no
+  *     diagnostic.
   *
   * ==IO bundle==
   *
-  * The engine speaks one master read port and one master write port
-  * to the [[SpramController]], plus the [[MoleBus]] and a
-  * `start` / `done` pair. The wrapper in Phase 2 will sit between the
-  * UART loader and this engine; for Step 8 a sim drives `start`
-  * directly after pre-loading program memory.
+  * The engine speaks one master read port and one master write port to the
+  * [[SpramController]], plus the [[MoleBus]] and a `start` / `done` pair. The
+  * wrapper in Phase 2 will sit between the UART loader and this engine; for
+  * Step 8 a sim drives `start` directly after pre-loading program memory.
   *
   * @param cfg
-  *   Mole configuration record. Only `programWordCount`,
-  *   `resultRingByteCount`, and `quarterPeriodCyclesReset` are
-  *   consumed at Step 8; the rest threads through but does not change
-  *   elaboration.
+  *   Mole configuration record. Only `programWordCount`, `resultRingByteCount`,
+  *   and `quarterPeriodCyclesReset` are consumed at Step 8; the rest threads
+  *   through but does not change elaboration.
   */
 case class BitCycleEngineCore(cfg: MoleConfig) extends Component {
 
@@ -81,28 +75,27 @@ case class BitCycleEngineCore(cfg: MoleConfig) extends Component {
   /** Number of words in program memory (low half of the SPRAM). */
   val programWordCount: Int = cfg.programWordCount
 
-  /** Number of words reserved for the result ring (high half of the
-    * SPRAM). Mirrors the rounding [[SpramController]] does.
+  /** Number of words reserved for the result ring (high half of the SPRAM).
+    * Mirrors the rounding [[SpramController]] does.
     */
   val resultWordCount: Int = (cfg.resultRingByteCount + 1) / 2
 
-  /** Total addressable words (program + result), used to size the
-    * shared SPRAM address.
+  /** Total addressable words (program + result), used to size the shared SPRAM
+    * address.
     */
   val totalWords: Int = programWordCount + resultWordCount
 
-  /** Width of an SPRAM address. Matches [[SpramController]]'s
-    * `addrWidth`.
+  /** Width of an SPRAM address. Matches [[SpramController]]'s `addrWidth`.
     */
   val addrWidth: Int = log2Up(totalWords)
 
-  /** Width of the program counter --- enough to address any
-    * `programWordCount` slot.
+  /** Width of the program counter --- enough to address any `programWordCount`
+    * slot.
     */
   val pcWidth: Int = log2Up(programWordCount)
 
-  /** First result-ring word address (the `HALT` Revision is written
-    * here and at `+1`).
+  /** First result-ring word address (the `HALT` Revision is written here and at
+    * `+1`).
     */
   val resultBase: Int = programWordCount
 
@@ -112,9 +105,8 @@ case class BitCycleEngineCore(cfg: MoleConfig) extends Component {
 
   val io = new Bundle {
 
-    /** Bus pads. Connected directly into the SB_IO wrapper at the
-      * `MoleTop` level (Step 13); for sim it goes to an
-      * `OpenDrainBus` model.
+    /** Bus pads. Connected directly into the SB_IO wrapper at the `MoleTop`
+      * level (Step 13); for sim it goes to an `OpenDrainBus` model.
       */
     val bus = master(MoleBus())
 
@@ -129,14 +121,13 @@ case class BitCycleEngineCore(cfg: MoleConfig) extends Component {
       */
     val resultWrite = master Stream SpramWriteCmd(addrWidth)
 
-    /** Level-sensitive start request. Sampled while the engine is in
-      * `Idle` (i.e. `done === True`). The wrapper drops `start` once
-      * `done` falls.
+    /** Level-sensitive start request. Sampled while the engine is in `Idle`
+      * (i.e. `done === True`). The wrapper drops `start` once `done` falls.
       */
     val start = in Bool ()
 
-    /** High whenever the engine is in `Idle`. Falls on `start`,
-      * re-rises after the final `HALT` result-ring write completes.
+    /** High whenever the engine is in `Idle`. Falls on `start`, re-rises after
+      * the final `HALT` result-ring write completes.
       */
     val done = out Bool ()
   }
@@ -159,11 +150,10 @@ case class BitCycleEngineCore(cfg: MoleConfig) extends Component {
   // Engine state
   // ------------------------------------------------------------------
 
-  /** Active bus mode --- the engine's only protocol context. One
-    * writer (`SET_BUS_MODE`), two readers
-    * ([[SymbolDecoder]] and, post-Step 11, the timing-divider mux).
-    * Reset value `i2c` per ROADMAP §"Bus mode register" (safe default:
-    * OD release on idle bus).
+  /** Active bus mode --- the engine's only protocol context. One writer
+    * (`SET_BUS_MODE`), two readers ([[SymbolDecoder]] and, post-Step 11, the
+    * timing-divider mux). Reset value `i2c` per ROADMAP §"Bus mode register"
+    * (safe default: OD release on idle bus).
     */
   val busModeReg = Reg(BusMode()) init (BusMode.i2c)
 
@@ -173,14 +163,14 @@ case class BitCycleEngineCore(cfg: MoleConfig) extends Component {
   /** Latched instruction word from the last completed fetch. */
   val instrReg = Reg(Bits(Instruction.WORD_WIDTH bits)) init (0)
 
-  /** Combinational decode view of [[instrReg]]: opcode in the high
-    * 4 bits, opaque payload in the low 12.
+  /** Combinational decode view of [[instrReg]]: opcode in the high 4 bits,
+    * opaque payload in the low 12.
     */
   val instrWord = InstructionWord()
   instrWord.assignFromBits(instrReg)
 
-  /** Quarter index within the active `EMIT_BIT` (0..3). Only valid in
-    * the `emitBitState`.
+  /** Quarter index within the active `EMIT_BIT` (0..3). Only valid in the
+    * `emitBitState`.
     */
   val qIdx = Reg(UInt(2 bits)) init (0)
 

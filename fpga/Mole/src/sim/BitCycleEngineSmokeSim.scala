@@ -4,23 +4,21 @@ import spinal.core._
 import spinal.core.sim._
 import spinal.lib._
 
-/** Sim DUT for [[BitCycleEngineSmokeSim]] --- wraps a
-  * [[BitCycleEngineCore]] with a [[SpramController]] (the `Mem`-backed
-  * sim path) and exposes the loader-write port plus `start` / `done`
-  * directly to the test bench.
+/** Sim DUT for [[BitCycleEngineSmokeSim]] --- wraps a [[BitCycleEngineCore]]
+  * with a [[SpramController]] (the `Mem`-backed sim path) and exposes the
+  * loader-write port plus `start` / `done` directly to the test bench.
   *
-  * The wrapper is the smallest thing that lets a test load a hand-
-  * encoded program over the loader port, raise `start`, and observe
-  * the engine's bus drivers per fabric cycle. It is deliberately
-  * *not* a [[MoleTop]] --- the UART loader / TX-drainer wiring is
-  * Phase 2's concern, and pulling it into the smoke sim would force
-  * every test to push instructions one byte at a time over a baud-
-  * rate-paced UART.
+  * The wrapper is the smallest thing that lets a test load a hand- encoded
+  * program over the loader port, raise `start`, and observe the engine's bus
+  * drivers per fabric cycle. It is deliberately *not* a [[MoleTop]] --- the
+  * UART loader / TX-drainer wiring is Phase 2's concern, and pulling it into
+  * the smoke sim would force every test to push instructions one byte at a time
+  * over a baud- rate-paced UART.
   *
-  * Bus IO is left as a `master(MoleBus())` (not tied off internally)
-  * so the test can read every leaf signal in waveforms; the engine's
-  * `read` lines are unused in Step 8 (no sampling yet) so the sim
-  * does not need to model a pull-up.
+  * Bus IO is left as a `master(MoleBus())` (not tied off internally) so the
+  * test can read every leaf signal in waveforms; the engine's `read` lines are
+  * unused in Step 8 (no sampling yet) so the sim does not need to model a
+  * pull-up.
   *
   * Lives in `src/sim/` --- this component never elaborates to RTL.
   */
@@ -34,22 +32,21 @@ case class BitCycleEngineSmokeDut(cfg: MoleConfig) extends Component {
 
   val io = new Bundle {
 
-    /** The engine's bus pads, exposed verbatim for waveform inspection.
-      * Every leaf wire is observable from `SpinalSim` via `toBoolean`.
+    /** The engine's bus pads, exposed verbatim for waveform inspection. Every
+      * leaf wire is observable from `SpinalSim` via `toBoolean`.
       */
     val bus = master(MoleBus())
 
-    /** Boot-time loader write port into program memory. The test
-      * drives one write per word at the start of each run, before
-      * raising `start`.
+    /** Boot-time loader write port into program memory. The test drives one
+      * write per word at the start of each run, before raising `start`.
       */
     val loaderWrite = slave Stream SpramWriteCmd(addrWidth)
 
     /** Engine start strobe. The test holds it high until `done` falls. */
     val start = in Bool ()
 
-    /** Engine done flag --- high while the FSM sits in Idle. Falls when
-      * the program begins executing and re-rises once `HALT` finishes.
+    /** Engine done flag --- high while the FSM sits in Idle. Falls when the
+      * program begins executing and re-rises once `HALT` finishes.
       */
     val done = out Bool ()
   }
@@ -83,59 +80,55 @@ case class BitCycleEngineSmokeDut(cfg: MoleConfig) extends Component {
   io.done := engine.io.done
 }
 
-/** Smoke sim for [[BitCycleEngineCore]] under the two SCL drive
-  * classes that matter --- OD (release at the high half) and PP
-  * (actively drive at the high half).
+/** Smoke sim for [[BitCycleEngineCore]] under the two SCL drive classes that
+  * matter --- OD (release at the high half) and PP (actively drive at the high
+  * half).
   *
   * The sim is the cheapest test that catches an engine that wires
-  * `SclWaveformGen` to a stuck `BUS_MODE`, ignores `BUS_MODE.mode[2]`,
-  * or accidentally swaps `driveLow` / `driveHigh`. Two runs, same
-  * 9-bit program (a controller emitting the byte `0x55` plus a
-  * `hiz` ACK slot) under `i3c-OD` and `i3c-PP` respectively;
-  * per-cycle bus-driver trace; structural assertions on the trace.
+  * `SclWaveformGen` to a stuck `BUS_MODE`, ignores `BUS_MODE.mode[2]`, or
+  * accidentally swaps `driveLow` / `driveHigh`. Two runs, same 9-bit program (a
+  * controller emitting the byte `0x55` plus a `hiz` ACK slot) under `i3c-OD`
+  * and `i3c-PP` respectively; per-cycle bus-driver trace; structural assertions
+  * on the trace.
   *
   * ==Distinguishing "pulled high" from "driven high"==
   *
-  * On a real wired bus, OD release and PP drive-high both end up
-  * with the wire at `VIO`. The smoke sim disambiguates them by
-  * inspecting the *engine's* drivers directly (`driveLow`,
-  * `driveHigh`) rather than the post-pad read. Under `i3c-OD` the
-  * engine must release SCL at the high half (`driveHigh = False`);
-  * under `i3c-PP` it must drive it (`driveHigh = True`). The test
-  * asserts that for every cycle between consecutive SCL-low
-  * intervals.
+  * On a real wired bus, OD release and PP drive-high both end up with the wire
+  * at `VIO`. The smoke sim disambiguates them by inspecting the *engine's*
+  * drivers directly (`driveLow`, `driveHigh`) rather than the post-pad read.
+  * Under `i3c-OD` the engine must release SCL at the high half (`driveHigh =
+  * False`); under `i3c-PP` it must drive it (`driveHigh = True`). The test
+  * asserts that for every cycle between consecutive SCL-low intervals.
   *
   * ==`tx_symbol` coverage==
   *
-  *  - `dominant` (logical 0) under both modes → `(driveLow=1, driveHigh=0)`.
-  *  - `recessive` (logical 1) under OD → `(0, 0)` (release; sim pull-up
-  *    wins on a real bus).
-  *  - `recessive` (logical 1) under PP → `(0, 1)` (drive high; pull-up
-  *    irrelevant).
-  *  - `hiz` (ACK slot) under both modes → `(0, 0)`.
+  *   - `dominant` (logical 0) under both modes → `(driveLow=1, driveHigh=0)`.
+  *   - `recessive` (logical 1) under OD → `(0, 0)` (release; sim pull-up wins
+  *     on a real bus).
+  *   - `recessive` (logical 1) under PP → `(0, 1)` (drive high; pull-up
+  *     irrelevant).
+  *   - `hiz` (ACK slot) under both modes → `(0, 0)`.
   *
-  * The `0x55` bit pattern alternates `0` and `1`, so each run exercises
-  * both `dominant` and `recessive` on SDA, four times each; the ACK slot
-  * adds `hiz`.
+  * The `0x55` bit pattern alternates `0` and `1`, so each run exercises both
+  * `dominant` and `recessive` on SDA, four times each; the ACK slot adds `hiz`.
   *
   * ==Trace validation strategy==
   *
-  *  1. Find every contiguous interval where `sclDriveLow` is high. The
-  *     engine drives SCL low only during `Q0` and `Q1` of each
-  *     `EMIT_BIT`, so the count must match the number of `EMIT_BIT`s
-  *     (9) and the width must be roughly `2 * quarterPeriodCyclesReset`
-  *     fabric cycles.
-  *  2. Sample SDA in the middle of each SCL-low interval and compare to
-  *     the symbol decoder's expected `(driveLow, driveHigh)` for the
-  *     `tx_symbol` of that bit under the active `BusMode`.
-  *  3. For every cycle *between* two consecutive SCL-low intervals
-  *     (i.e. `Q2 + Q3` plus the 3-cycle fetch / decode overhead), assert
-  *     the engine's `sclDriveHigh` matches the expected drive class
-  *     (False under OD, True under PP).
+  *   1. Find every contiguous interval where `sclDriveLow` is high. The engine
+  *      drives SCL low only during `Q0` and `Q1` of each `EMIT_BIT`, so the
+  *      count must match the number of `EMIT_BIT`s (9) and the width must be
+  *      roughly `2 * quarterPeriodCyclesReset` fabric cycles.
+  *   2. Sample SDA in the middle of each SCL-low interval and compare to the
+  *      symbol decoder's expected `(driveLow, driveHigh)` for the `tx_symbol`
+  *      of that bit under the active `BusMode`.
+  *   3. For every cycle *between* two consecutive SCL-low intervals (i.e.
+  *      `Q2 + Q3` plus the 3-cycle fetch / decode overhead), assert the
+  *      engine's `sclDriveHigh` matches the expected drive class (False under
+  *      OD, True under PP).
   *
-  * The strategy ignores the trailing tail after the 9th SCL-low
-  * interval --- the regs hold their `Q3` values through the two `HALT`
-  * result-ring writes, which is fine but noisy to assert on directly.
+  * The strategy ignores the trailing tail after the 9th SCL-low interval ---
+  * the regs hold their `Q3` values through the two `HALT` result-ring writes,
+  * which is fine but noisy to assert on directly.
   *
   * Run: `sbt "runMain mole.BitCycleEngineSmokeSim"`
   */
@@ -153,11 +146,11 @@ object BitCycleEngineSmokeSim {
       sclHigh: Boolean
   )
 
-  /** One contiguous interval of `sclLow = True` in the trace. Inclusive
-    * indices into the trace array. `midSda` is the SDA snapshot at the
-    * interval's midpoint --- SDA is held for the whole bit by spec, so
-    * any sample inside is representative; the midpoint is the most
-    * conservative choice against any boundary aliasing.
+  /** One contiguous interval of `sclLow = True` in the trace. Inclusive indices
+    * into the trace array. `midSda` is the SDA snapshot at the interval's
+    * midpoint --- SDA is held for the whole bit by spec, so any sample inside
+    * is representative; the midpoint is the most conservative choice against
+    * any boundary aliasing.
     */
   private case class LowInterval(start: Int, end: Int, midSda: BusSample)
 
@@ -165,17 +158,15 @@ object BitCycleEngineSmokeSim {
   // Program builder
   // --------------------------------------------------------------
 
-  /** Build the 9-bit "byte 0x55 + ACK hiz + HALT" program for the
-    * given controller bus mode.
+  /** Build the 9-bit "byte 0x55 + ACK hiz + HALT" program for the given
+    * controller bus mode.
     *
-    * Layout:
-    *   addr 0  : SET_BUS_MODE mode
-    *   addr 1-8: EMIT_BIT bit[i] of 0x55 (MSB first)
-    *   addr 9  : EMIT_BIT hiz (ACK slot --- target drives this on real bus)
-    *   addr 10 : HALT status=0
+    * Layout: addr 0 : SET_BUS_MODE mode addr 1-8: EMIT_BIT bit[i] of 0x55 (MSB
+    * first) addr 9 : EMIT_BIT hiz (ACK slot --- target drives this on real bus)
+    * addr 10 : HALT status=0
     *
-    * Flag triple is all-zero on every bit (Step 8 ignores it; mismatch
-    * tracking arrives in Step 10 / 11).
+    * Flag triple is all-zero on every bit (Step 8 ignores it; mismatch tracking
+    * arrives in Step 10 / 11).
     */
   private def buildProgram(mode: BusMode.E): Seq[Int] = {
     import Instruction._
@@ -188,25 +179,24 @@ object BitCycleEngineSmokeSim {
     Seq(encode(SetBusMode(mode))) ++ dataBits ++ Seq(ackBit, encode(Halt(0)))
   }
 
-  /** Expected `(sdaDriveLow, sdaDriveHigh)` for `(tx_symbol, BusMode)`.
-    * Mirrors [[SymbolDecoder]]; serves as the sim's pure-Scala oracle.
+  /** Expected `(sdaDriveLow, sdaDriveHigh)` for `(tx_symbol, BusMode)`. Mirrors
+    * [[SymbolDecoder]]; serves as the sim's pure-Scala oracle.
     */
   private def expectedSda(
       sym: TxSymbol.E,
       mode: BusMode.E
   ): (Boolean, Boolean) =
     (sym, mode) match {
-      case (TxSymbol.dominant, _)                => (true, false)
-      case (TxSymbol.recessive, BusMode.i2c)     => (false, false)
-      case (TxSymbol.recessive, BusMode.i3cOd)   => (false, false)
-      case (TxSymbol.recessive, BusMode.i3cPp)   => (false, true)
-      case (TxSymbol.recessive, BusMode.hdrDdr)  => (false, true)
-      case (TxSymbol.hiz, _)                     => (false, false)
-      case (TxSymbol.reserved, _)                => (false, false)
+      case (TxSymbol.dominant, _)               => (true, false)
+      case (TxSymbol.recessive, BusMode.i2c)    => (false, false)
+      case (TxSymbol.recessive, BusMode.i3cOd)  => (false, false)
+      case (TxSymbol.recessive, BusMode.i3cPp)  => (false, true)
+      case (TxSymbol.recessive, BusMode.hdrDdr) => (false, true)
+      case (TxSymbol.hiz, _)                    => (false, false)
+      case (TxSymbol.reserved, _)               => (false, false)
     }
 
-  /** True if `mode` is a PP-class bus (engine actively drives SCL
-    * Q2/Q3 high).
+  /** True if `mode` is a PP-class bus (engine actively drives SCL Q2/Q3 high).
     */
   private def isPpClass(mode: BusMode.E): Boolean = mode match {
     case BusMode.i3cPp | BusMode.hdrDdr => true
@@ -251,9 +241,9 @@ object BitCycleEngineSmokeSim {
     dut.io.bus.scl.read #= true
   }
 
-  /** Walk a per-cycle trace and extract every contiguous interval
-    * where `sclLow` is True. With Mole's quarter-bit pacing each
-    * interval corresponds to the `Q0 + Q1` phase of one `EMIT_BIT`.
+  /** Walk a per-cycle trace and extract every contiguous interval where
+    * `sclLow` is True. With Mole's quarter-bit pacing each interval corresponds
+    * to the `Q0 + Q1` phase of one `EMIT_BIT`.
     */
   private def findSclLowIntervals(trace: Seq[BusSample]): Seq[LowInterval] = {
     val out = collection.mutable.ArrayBuffer.empty[LowInterval]
@@ -280,9 +270,9 @@ object BitCycleEngineSmokeSim {
   // DUT compile
   // --------------------------------------------------------------
 
-  /** Smallest sim config that still has enough address space for the
-    * 11-word program + 2 result words. Total = 96 words → 7-bit
-    * address space, comfortably below the 4096-instruction cap.
+  /** Smallest sim config that still has enough address space for the 11-word
+    * program + 2 result words. Total = 96 words → 7-bit address space,
+    * comfortably below the 4096-instruction cap.
     */
   private def smallCfg = MoleConfig(
     fabricFreqHz = 48 MHz,

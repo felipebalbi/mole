@@ -2,30 +2,29 @@ package mole
 
 /** Round-trip audit for [[Instruction]] --- the wire-format contract.
   *
-  * Pure-Scala main, not a SpinalSim DUT. The host-side [[Instruction]] ADT
-  * and its encode/decode pair are pure Scala functions over `Int` words;
-  * exercising them does not need a simulator backend. Mirrors the
-  * [[MoleConfigSim]] / [[OpenDrainBusSim]] convention: a `runMain`
-  * entrypoint wired into `make sim-isa`, asserting and exiting zero on
-  * success.
+  * Pure-Scala main, not a SpinalSim DUT. The host-side [[Instruction]] ADT and
+  * its encode/decode pair are pure Scala functions over `Int` words; exercising
+  * them does not need a simulator backend. Mirrors the [[MoleConfigSim]] /
+  * [[OpenDrainBusSim]] convention: a `runMain` entrypoint wired into
+  * `make sim-isa`, asserting and exiting zero on success.
   *
   * What this sim guards against:
   *   1. **Round-trip stability.** For every legal `Instruction` value,
   *      `decode(encode(i)) == i` must hold. Any mismatch is a wire-format
-  *      regression --- the host compiler and a deployed Mole would disagree
-  *      on the bytecode.
-  *   2. **Field-position alignment.** The opcode lives at `[15:12]`, the
-  *      flag triple at `[2:0]` (`expect`/`mask`/`capture`), and `tx_symbol`
-  *      at `[11:10]` of every bearer opcode. Drifting these positions is
-  *      what `../../AGENTS.md` §3.10 forbids; the sim asserts the bit
-  *      positions structurally.
-  *   3. **Reserved-bits-are-zero invariant on encode.** Bits in the
-  *      "reserved" middle slice of every opcode must encode to zero so the
-  *      engine's v0-vs-v0.5 trap can distinguish a v0 program (clean
-  *      reserved bits) from a forward-rolled program (set reserved bits).
+  *      regression --- the host compiler and a deployed Mole would disagree on
+  *      the bytecode.
+  *   2. **Field-position alignment.** The opcode lives at `[15:12]`, the flag
+  *      triple at `[2:0]` (`expect`/`mask`/`capture`), and `tx_symbol` at
+  *      `[11:10]` of every bearer opcode. Drifting these positions is what
+  *      `../../AGENTS.md` §3.10 forbids; the sim asserts the bit positions
+  *      structurally.
+  *   3. **Reserved-bits-are-zero invariant on encode.** Bits in the "reserved"
+  *      middle slice of every opcode must encode to zero so the engine's
+  *      v0-vs-v0.5 trap can distinguish a v0 program (clean reserved bits) from
+  *      a forward-rolled program (set reserved bits).
   *   4. **Golden encodings** for at least one shape per opcode --- catches
-  *      accidental field-shift regressions that round-trip cleanly but
-  *      generate a different wire word than the spec says.
+  *      accidental field-shift regressions that round-trip cleanly but generate
+  *      a different wire word than the spec says.
   *
   * Run: `sbt "runMain mole.InstructionSim"`
   */
@@ -37,8 +36,8 @@ object InstructionSim extends App {
   // Round-trip primitives
   // --------------------------------------------------------------
 
-  /** Encode `i`, decode the result, assert equality. Returns the encoded
-    * word so callers can also assert on its bit layout.
+  /** Encode `i`, decode the result, assert equality. Returns the encoded word
+    * so callers can also assert on its bit layout.
     */
   def roundTrip(i: Instruction): Int = {
     val word = encode(i)
@@ -54,9 +53,9 @@ object InstructionSim extends App {
     word
   }
 
-  /** Assert that exactly the listed bit indices are set in `word`. Useful
-    * for structural opcode-layout checks ("the flag triple lives at
-    * `[2:0]`" --- which bits are *not* part of the triple must be zero).
+  /** Assert that exactly the listed bit indices are set in `word`. Useful for
+    * structural opcode-layout checks ("the flag triple lives at `[2:0]`" ---
+    * which bits are *not* part of the triple must be zero).
     */
   def assertBitsSet(word: Int, expected: Set[Int], label: String): Unit = {
     val actual: Set[Int] =
@@ -83,9 +82,9 @@ object InstructionSim extends App {
         f"(expected ${expected.position}%X)"
     )
 
-  /** Assert the (expect, mask, capture) flag triple lands at exactly
-    * `[2:0]` of `word`. The single most load-bearing structural assertion
-    * in the file (AGENTS §3.10) --- every bearer opcode runs through it.
+  /** Assert the (expect, mask, capture) flag triple lands at exactly `[2:0]` of
+    * `word`. The single most load-bearing structural assertion in the file
+    * (AGENTS §3.10) --- every bearer opcode runs through it.
     */
   def assertFlagTriple(
       word: Int,
@@ -109,8 +108,7 @@ object InstructionSim extends App {
   }
 
   /** Assert the slice `[hi:lo]` of `word` is zero. Used to lock in the
-    * reserved-bits-are-zero invariant on each bearer opcode's middle
-    * slice.
+    * reserved-bits-are-zero invariant on each bearer opcode's middle slice.
     */
   def assertReservedZero(
       word: Int,
@@ -139,8 +137,8 @@ object InstructionSim extends App {
     TxSymbol.reserved
   )
 
-  /** All four `BusMode` values --- declaration order, wire codes
-    * deliberately non-sequential (see [[BusMode]] docstring).
+  /** All four `BusMode` values --- declaration order, wire codes deliberately
+    * non-sequential (see [[BusMode]] docstring).
     */
   val allBusModes: Seq[BusMode.E] = Seq(
     BusMode.i2c,
@@ -195,7 +193,9 @@ object InstructionSim extends App {
     encode(EmitBit(TxSymbol.recessive, true, true, true)) == 0x1407,
     "EMIT_BIT full golden mismatch"
   )
-  println(s"  EMIT_BIT: ${allTxSymbols.size * allFlagTriples.size} round-trips OK")
+  println(
+    s"  EMIT_BIT: ${allTxSymbols.size * allFlagTriples.size} round-trips OK"
+  )
 
   // --------------------------------------------------------------
   // EMIT_QUARTER
@@ -225,20 +225,34 @@ object InstructionSim extends App {
   }
   // Golden: EMIT_QUARTER(dominant, dominant, 0,0,0) = 0x2000.
   assert(
-    encode(EmitQuarter(
-      TxSymbol.dominant, TxSymbol.dominant, false, false, false
-    )) == 0x2000,
+    encode(
+      EmitQuarter(
+        TxSymbol.dominant,
+        TxSymbol.dominant,
+        false,
+        false,
+        false
+      )
+    ) == 0x2000,
     "EMIT_QUARTER minimal golden mismatch"
   )
   // Golden: EMIT_QUARTER(recessive, hiz, 1,1,1) =
   //   opcode(0x2)<<12 | sda(0b01)<<10 | scl(0b10)<<8 | 0b111 = 0x2607.
   assert(
-    encode(EmitQuarter(
-      TxSymbol.recessive, TxSymbol.hiz, true, true, true
-    )) == 0x2607,
+    encode(
+      EmitQuarter(
+        TxSymbol.recessive,
+        TxSymbol.hiz,
+        true,
+        true,
+        true
+      )
+    ) == 0x2607,
     "EMIT_QUARTER full golden mismatch"
   )
-  println(s"  EMIT_QUARTER: ${allTxSymbols.size * allTxSymbols.size * allFlagTriples.size} round-trips OK")
+  println(
+    s"  EMIT_QUARTER: ${allTxSymbols.size * allTxSymbols.size * allFlagTriples.size} round-trips OK"
+  )
 
   // --------------------------------------------------------------
   // STRETCH_SCL
@@ -257,7 +271,10 @@ object InstructionSim extends App {
     )
   }
   assert(encode(StretchScl(0)) == 0x3000, "STRETCH_SCL(0) golden mismatch")
-  assert(encode(StretchScl(0xfff)) == 0x3fff, "STRETCH_SCL(0xfff) golden mismatch")
+  assert(
+    encode(StretchScl(0xfff)) == 0x3fff,
+    "STRETCH_SCL(0xfff) golden mismatch"
+  )
   // Reject overflow.
   try {
     encode(StretchScl(4096))
@@ -296,13 +313,18 @@ object InstructionSim extends App {
     roundTrip(insn) // must not throw
   }
   // Golden: WAIT_ON(always, 0) = 0x4000.
-  assert(encode(WaitOn(CondCode.always, 0)) == 0x4000, "WAIT_ON golden mismatch")
+  assert(
+    encode(WaitOn(CondCode.always, 0)) == 0x4000,
+    "WAIT_ON golden mismatch"
+  )
   // Reject timeout overflow.
   try {
     encode(WaitOn(CondCode.always, 256))
     sys.error("WAIT_ON(always, 256) should have thrown")
   } catch { case _: IllegalArgumentException => () }
-  println(s"  WAIT_ON: ${allCondCodes.size * waitTimeouts.size} round-trips + timeout-reject OK")
+  println(
+    s"  WAIT_ON: ${allCondCodes.size * waitTimeouts.size} round-trips + timeout-reject OK"
+  )
 
   // --------------------------------------------------------------
   // BRANCH_ON
@@ -329,7 +351,10 @@ object InstructionSim extends App {
     )
   }
   // Golden: BRANCH_ON(always, 0) = 0x5000.
-  assert(encode(BranchOn(CondCode.always, 0)) == 0x5000, "BRANCH_ON golden mismatch")
+  assert(
+    encode(BranchOn(CondCode.always, 0)) == 0x5000,
+    "BRANCH_ON golden mismatch"
+  )
   // Golden: BRANCH_ON(always, -1) = 0x50ff (two's-complement low byte).
   assert(
     encode(BranchOn(CondCode.always, -1)) == 0x50ff,
@@ -344,7 +369,9 @@ object InstructionSim extends App {
     encode(BranchOn(CondCode.always, -129))
     sys.error("BRANCH_ON(always, -129) should have thrown")
   } catch { case _: IllegalArgumentException => () }
-  println(s"  BRANCH_ON: ${allCondCodes.size * 256} round-trips + range-reject OK")
+  println(
+    s"  BRANCH_ON: ${allCondCodes.size * 256} round-trips + range-reject OK"
+  )
 
   // --------------------------------------------------------------
   // JMP
@@ -460,7 +487,9 @@ object InstructionSim extends App {
     encode(LoadTiming(0, 1024))
     sys.error("LOAD_TIMING(0,1024) should have thrown")
   } catch { case _: IllegalArgumentException => () }
-  println(s"  LOAD_TIMING: ${4 * dividerSamples.size} round-trips + range-reject OK")
+  println(
+    s"  LOAD_TIMING: ${4 * dividerSamples.size} round-trips + range-reject OK"
+  )
 
   // --------------------------------------------------------------
   // MARK
@@ -541,7 +570,9 @@ object InstructionSim extends App {
     encode(DriveBitOnScl(TxSymbol.recessive, true, true, true)) == 0xb407,
     "DRIVE_BIT_ON_SCL full golden mismatch"
   )
-  println(s"  DRIVE_BIT_ON_SCL: ${allTxSymbols.size * allFlagTriples.size} round-trips OK")
+  println(
+    s"  DRIVE_BIT_ON_SCL: ${allTxSymbols.size * allFlagTriples.size} round-trips OK"
+  )
 
   // --------------------------------------------------------------
   // HALT
@@ -608,7 +639,9 @@ object InstructionSim extends App {
     ReservedV05(Opcode.waitAddressed, 0x1000)
     sys.error("ReservedV05 with 0x1000 payload should have thrown")
   } catch { case _: IllegalArgumentException => () }
-  println(s"  ReservedV05: ${reservedOpcodes.size * payloadSamples.size} round-trips + constructor-reject OK")
+  println(
+    s"  ReservedV05: ${reservedOpcodes.size * payloadSamples.size} round-trips + constructor-reject OK"
+  )
 
   // --------------------------------------------------------------
   // Decoder must produce a ReservedV05 for any word whose opcode
@@ -628,7 +661,9 @@ object InstructionSim extends App {
       f"decoder reserved-opcode dispatch failed for word 0x$word%04X: got $back"
     )
   }
-  println(s"  Decoder reserved dispatch: ${reservedOpcodes.size * payloadSamples.size} cases OK")
+  println(
+    s"  Decoder reserved dispatch: ${reservedOpcodes.size * payloadSamples.size} cases OK"
+  )
 
   // --------------------------------------------------------------
   // Flag-triple-at-[2:0] invariant on every bearer opcode.
@@ -639,19 +674,23 @@ object InstructionSim extends App {
 
   println("--- InstructionSim: flag-triple [2:0] invariant ---")
 
-  /** For each bearer opcode, returns a builder that produces an
-    * `Instruction` with the given flag triple but otherwise minimal
-    * (zero) operand values. The minimal operands keep the assertion
-    * focused on the flag bits only.
+  /** For each bearer opcode, returns a builder that produces an `Instruction`
+    * with the given flag triple but otherwise minimal (zero) operand values.
+    * The minimal operands keep the assertion focused on the flag bits only.
     */
-  val bearerBuilders: Seq[(String, (Boolean, Boolean, Boolean) => Instruction)] =
+  val bearerBuilders
+      : Seq[(String, (Boolean, Boolean, Boolean) => Instruction)] =
     Seq(
       ("EMIT_BIT", (e, m, c) => EmitBit(TxSymbol.dominant, e, m, c)),
-      ("EMIT_QUARTER", (e, m, c) =>
-        EmitQuarter(TxSymbol.dominant, TxSymbol.dominant, e, m, c)),
+      (
+        "EMIT_QUARTER",
+        (e, m, c) => EmitQuarter(TxSymbol.dominant, TxSymbol.dominant, e, m, c)
+      ),
       ("SAMPLE_BIT_ON_SCL", (e, m, c) => SampleBitOnScl(e, m, c)),
-      ("DRIVE_BIT_ON_SCL", (e, m, c) =>
-        DriveBitOnScl(TxSymbol.dominant, e, m, c))
+      (
+        "DRIVE_BIT_ON_SCL",
+        (e, m, c) => DriveBitOnScl(TxSymbol.dominant, e, m, c)
+      )
     )
 
   for ((label, build) <- bearerBuilders) {

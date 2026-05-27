@@ -5,49 +5,47 @@ import spinal.core._
 /** 16-bit fixed-width instruction encoding for the Mole bit-cycle engine.
   *
   * This file is the Scala-side **reference implementation** of the bytecode
-  * wire format. It is consumed by simulation (round-trip audits, engine
-  * tests) and by the engine's RTL fetch path (via [[InstructionWord]] at the
-  * bottom of this file). It is **not** the host's runtime encoder: the host
-  * compiler is the (future) Rust crate under `../../crates/`, which emits
-  * pre-assembled bytes that travel raw over UART into the engine's SPRAM.
-  * Once the Rust crate exists, the Scala `encode`/`decode` pair below
-  * doubles as a cross-validation oracle --- "every legal instruction
-  * encodes to the same 16-bit word in both implementations" is the cheapest
-  * strong-signal correctness check for a wire-format contract.
+  * wire format. It is consumed by simulation (round-trip audits, engine tests)
+  * and by the engine's RTL fetch path (via [[InstructionWord]] at the bottom of
+  * this file). It is **not** the host's runtime encoder: the host compiler is
+  * the (future) Rust crate under `../../crates/`, which emits pre-assembled
+  * bytes that travel raw over UART into the engine's SPRAM. Once the Rust crate
+  * exists, the Scala `encode`/`decode` pair below doubles as a cross-validation
+  * oracle --- "every legal instruction encodes to the same 16-bit word in both
+  * implementations" is the cheapest strong-signal correctness check for a
+  * wire-format contract.
   *
-  * Wire-format scope. Per `../../AGENTS.md` §3.9 the instruction width is
-  * fixed at 16 bits; §3.10 locks the `expect`/`mask`/`capture` flag triple
-  * at bit positions `[2:0]` on every bearer opcode. ROADMAP §"Encoding
-  * width" lists the full per-opcode field budget and §"ISA" lists the 12
-  * v0 opcodes (plus 4 reserved slots).
+  * Wire-format scope. Per `../../AGENTS.md` §3.9 the instruction width is fixed
+  * at 16 bits; §3.10 locks the `expect`/`mask`/`capture` flag triple at bit
+  * positions `[2:0]` on every bearer opcode. ROADMAP §"Encoding width" lists
+  * the full per-opcode field budget and §"ISA" lists the 12 v0 opcodes (plus 4
+  * reserved slots).
   *
   * Wire-format stability. Pre-Phase-0 the binary encoding is still mutable
-  * (AGENTS §3.17); once the Rust host encoder ships its first tagged
-  * release the encoding becomes a contract between the host compiler and
-  * every deployed Mole. Reordering opcodes, moving the flag triple, or
-  * repurposing a reserved `tx_symbol` / `cond_code` slot would all be
-  * wire-format breaks that require a bytecode-version bump and a
-  * `BREAKING CHANGE:` footer.
+  * (AGENTS §3.17); once the Rust host encoder ships its first tagged release
+  * the encoding becomes a contract between the host compiler and every deployed
+  * Mole. Reordering opcodes, moving the flag triple, or repurposing a reserved
+  * `tx_symbol` / `cond_code` slot would all be wire-format breaks that require
+  * a bytecode-version bump and a `BREAKING CHANGE:` footer.
   *
   * File layout:
   *   1. SpinalEnums for the four operand domains shared across opcodes
   *      ([[Opcode]], [[TxSymbol]], [[BusMode]], [[CondCode]]) --- shared
   *      between the Scala reference impl and the RTL fetch path.
-  *   2. The Scala-side [[Instruction]] sealed-trait ADT --- one case class
-  *      per v0 opcode plus a generic `ReservedV05` carrier. Pure Scala;
-  *      never elaborated into RTL.
+  *   2. The Scala-side [[Instruction]] sealed-trait ADT --- one case class per
+  *      v0 opcode plus a generic `ReservedV05` carrier. Pure Scala; never
+  *      elaborated into RTL.
   *   3. [[Instruction.encode]] / [[Instruction.decode]] --- the host-side
   *      round-trip pair operating on the 16-bit wire word as a plain `Int`.
-  *      Pure Scala. The future Rust encoder is the runtime authority; this
-  *      pair is its sim-time twin.
+  *      Pure Scala. The future Rust encoder is the runtime authority; this pair
+  *      is its sim-time twin.
   *   4. [[InstructionWord]] --- the only HW-facing artefact: a thin
   *      opcode-plus-payload Bundle that Step 8's fetch path consumes.
   *
-  * Step 7 ships all four SpinalEnums, all twelve case classes, encode +
-  * decode bodies for the entire ISA (12 v0 opcodes plus a `ReservedV05`
-  * carrier for the four v0.5 slots), plus the round-trip audit in
-  * [[InstructionSim]]. The engine's RTL-side decode and per-opcode
-  * semantics land in Step 8 onward.
+  * Step 7 ships all four SpinalEnums, all twelve case classes, encode + decode
+  * bodies for the entire ISA (12 v0 opcodes plus a `ReservedV05` carrier for
+  * the four v0.5 slots), plus the round-trip audit in [[InstructionSim]]. The
+  * engine's RTL-side decode and per-opcode semantics land in Step 8 onward.
   */
 
 /** Opcode field --- bits `[15:12]` of every instruction word.
@@ -58,18 +56,18 @@ import spinal.core._
   * order is the binary code under SpinalHDL's default `binarySequential`
   * encoding.
   *
-  * `HALT` deliberately occupies code `0x0` so a zero-initialised SPRAM word
-  * (or a fetch off the end of a loaded program) traps cleanly rather than
-  * decoding as a free-running `EMIT_BIT`.
+  * `HALT` deliberately occupies code `0x0` so a zero-initialised SPRAM word (or
+  * a fetch off the end of a loaded program) traps cleanly rather than decoding
+  * as a free-running `EMIT_BIT`.
   *
   * The four reserved slots are claimed by v0.5 candidates per ROADMAP
   * §"Reserved for v0.5". `CALL` / `RET` were considered and deliberately
   * dropped --- the SDK inlines call sites at compile time, so dedicated
   * control-flow opcodes never become necessary. The `MISMATCH_CLEAR` +
-  * `FLAG_CLEAR` overlap is intentional: v0.5 picks one or both depending on
-  * the use case that surfaces; reserving slots for each preserves that
-  * choice. The slots are reservations only; v0 has no decoder behaviour for
-  * them and the engine rejects them at fetch (Step 8).
+  * `FLAG_CLEAR` overlap is intentional: v0.5 picks one or both depending on the
+  * use case that surfaces; reserving slots for each preserves that choice. The
+  * slots are reservations only; v0 has no decoder behaviour for them and the
+  * engine rejects them at fetch (Step 8).
   */
 object Opcode extends SpinalEnum {
   val halt = newElement() // 0x0  --- safer trap on zero-memory fetch
@@ -102,9 +100,9 @@ object Opcode extends SpinalEnum {
   * nothing about which protocol applies.
   *
   * `reserved` (binary `11`) is held for the v0.5 `raw_override` escape (see
-  * ROADMAP §"Reserved for v0.5"). The encoder/decoder round-trip the value
-  * but the engine refuses to execute it in v0 --- per AGENTS §3.11 the
-  * encoding must not be repurposed.
+  * ROADMAP §"Reserved for v0.5"). The encoder/decoder round-trip the value but
+  * the engine refuses to execute it in v0 --- per AGENTS §3.11 the encoding
+  * must not be repurposed.
   *
   * Appears in three opcodes:
   *   - [[Instruction.EmitBit]] (SDA only; SCL is engine-generated).
@@ -122,10 +120,11 @@ object TxSymbol extends SpinalEnum {
   * engine's only piece of protocol context.
   *
   * `mode[2]` selects the SCL high-half drive class (0 = OD-release, 1 = PP
-  * active high). `mode[1:0]` selects which of the four [[Instruction.LoadTiming]]
-  * divider registers feeds the quarter-bit timer. The encoding is
-  * deliberately non-sequential to keep the `mode[2:0]` semantics auditable
-  * directly from the wire word --- per ROADMAP §"Bus mode register":
+  * active high). `mode[1:0]` selects which of the four
+  * [[Instruction.LoadTiming]] divider registers feeds the quarter-bit timer.
+  * The encoding is deliberately non-sequential to keep the `mode[2:0]`
+  * semantics auditable directly from the wire word --- per ROADMAP §"Bus mode
+  * register":
   *
   * {{{
   *   i2c    : mode[2]=0 mode[1:0]=00 -> 0b000 = 0
@@ -153,14 +152,14 @@ object BusMode extends SpinalEnum {
 
 /** Unified condition code --- 4-bit field at `[11:8]` of both
   * [[Instruction.BranchOn]] (PC-relative branch) and [[Instruction.WaitOn]]
-  * (timed block). Single shared namespace per AGENTS §3.14: adding a code in
-  * a reserved slot is not a wire-format break; repurposing one in use is.
+  * (timed block). Single shared namespace per AGENTS §3.14: adding a code in a
+  * reserved slot is not a wire-format break; repurposing one in use is.
   *
   * Codes 0..9 are in use per `../../fpga/Mole/TODO.md` §"Engine flags +
   * cond-code namespace" and ROADMAP §"Engine flags --- unified condition
-  * codes". The declaration order below is the wire-format binding. Codes
-  * 10..15 round-trip cleanly through the encoder but decode to a "trap" the
-  * engine refuses to execute (Step 8 enforces).
+  * codes". The declaration order below is the wire-format binding. Codes 10..15
+  * round-trip cleanly through the encoder but decode to a "trap" the engine
+  * refuses to execute (Step 8 enforces).
   */
 object CondCode extends SpinalEnum {
   val always = newElement() // 0x0  unconditional
@@ -180,20 +179,20 @@ object CondCode extends SpinalEnum {
   val reserved14 = newElement() // 0xE  reserved (v0.5)
   val reserved15 = newElement() // 0xF  reserved (v0.5)
 
-  /** `true` for cond codes 0x0..0x9 (the ten v0 codes). `false` for
-    * 0xA..0xF (reserved). Host encoder uses this to warn when generating
-    * a reserved-slot condition.
+  /** `true` for cond codes 0x0..0x9 (the ten v0 codes). `false` for 0xA..0xF
+    * (reserved). Host encoder uses this to warn when generating a reserved-slot
+    * condition.
     */
   def isV0(c: CondCode.E): Boolean = c.position < 10
 }
 
-/** Host-side instruction value --- one case class per opcode. The sealed
-  * trait gives the round-trip suite a typed `==`-based equality check, and
-  * the case-class form is what the future Rust host encoder mirrors.
+/** Host-side instruction value --- one case class per opcode. The sealed trait
+  * gives the round-trip suite a typed `==`-based equality check, and the
+  * case-class form is what the future Rust host encoder mirrors.
   *
-  * Reserved v0.5 opcode slots collapse onto a single [[Instruction.ReservedV05]]
-  * carrier --- they have no operand structure in v0 and the engine refuses
-  * to execute them at fetch.
+  * Reserved v0.5 opcode slots collapse onto a single
+  * [[Instruction.ReservedV05]] carrier --- they have no operand structure in v0
+  * and the engine refuses to execute them at fetch.
   */
 sealed trait Instruction
 
@@ -248,9 +247,9 @@ object Instruction {
     * }}}
     *
     * Per ROADMAP §"Canonical EMIT_BIT shape" SCL is engine-generated and not
-    * part of the bitstream. The compare against the sampled SDA value, gated
-    * by `mask`, updates the sticky `MISMATCH_FLAG`. `capture=1` also writes
-    * the sampled bit to the result ring.
+    * part of the bitstream. The compare against the sampled SDA value, gated by
+    * `mask`, updates the sticky `MISMATCH_FLAG`. `capture=1` also writes the
+    * sampled bit to the result ring.
     */
   case class EmitBit(
       txSymbol: TxSymbol.E,
@@ -273,9 +272,9 @@ object Instruction {
   case class Halt(status: Int) extends Instruction
 
   /** `EMIT_QUARTER sda_symbol scl_symbol expect mask capture` --- single
-    * quarter-bit override of both SDA and SCL. The only opcode that encodes
-    * SCL in the bitstream (per ROADMAP §"When to use EMIT_QUARTER"). Used for
-    * Start / Stop / Repeated Start, HDR-DDR bit shapes, compliance violations
+    * quarter-bit override of both SDA and SCL. The only opcode that encodes SCL
+    * in the bitstream (per ROADMAP §"When to use EMIT_QUARTER"). Used for Start
+    * / Stop / Repeated Start, HDR-DDR bit shapes, compliance violations
     * (early/late releases, glitches), and bus-idle waits. Layout:
     *
     * {{{
@@ -292,8 +291,8 @@ object Instruction {
   ) extends Instruction
 
   /** `STRETCH_SCL n` --- hold SCL low for `n` quarters. 12-bit operand at
-    * `[11:0]`. Used in both roles: controller-role forced stretching (fuzz)
-    * and target-role canonical clock stretching.
+    * `[11:0]`. Used in both roles: controller-role forced stretching (fuzz) and
+    * target-role canonical clock stretching.
     */
   case class StretchScl(nQuarters: Int) extends Instruction
 
@@ -306,8 +305,8 @@ object Instruction {
     *
     * `timeout = 0` means "wait forever" (no timeout). Shares the
     * `[11:8]cond_code [7:0]operand` shape with [[BranchOn]] --- only operand
-    * semantics differ (signed-PC-offset vs unsigned-quarter-timeout) per
-    * AGENTS §3.14.
+    * semantics differ (signed-PC-offset vs unsigned-quarter-timeout) per AGENTS
+    * §3.14.
     */
   case class WaitOn(cond: CondCode.E, timeoutQuarters: Int) extends Instruction
 
@@ -318,17 +317,17 @@ object Instruction {
     *   [15:12] opcode   [11:8] cond_code   [7:0] pc_rel_offset (signed)
     * }}}
     *
-    * The unified branch opcode replaces all per-condition branch
-    * instructions: a new condition is a new `cond_code` value, not a new
-    * opcode. Shares field shape with [[WaitOn]].
+    * The unified branch opcode replaces all per-condition branch instructions:
+    * a new condition is a new `cond_code` value, not a new opcode. Shares field
+    * shape with [[WaitOn]].
     */
   case class BranchOn(cond: CondCode.E, pcRelOffset: Int) extends Instruction
 
-  /** `JMP addr` --- unconditional jump to absolute 12-bit instruction
-    * address. Layout: `[15:12] opcode [11:0] addr`. 4096-instruction range
-    * (the whole program). Long-distance conditional branches in the SDK
-    * expand to `BRANCH_ON cond, near` + `JMP far` to stay within
-    * [[BranchOn]]'s ±128 reach.
+  /** `JMP addr` --- unconditional jump to absolute 12-bit instruction address.
+    * Layout: `[15:12] opcode [11:0] addr`. 4096-instruction range (the whole
+    * program). Long-distance conditional branches in the SDK expand to
+    * `BRANCH_ON cond, near` + `JMP far` to stay within [[BranchOn]]'s ±128
+    * reach.
     */
   case class Jmp(addr: Int) extends Instruction
 
@@ -339,9 +338,9 @@ object Instruction {
     *   [15:12] opcode   [11:9] mode   [8:0] reserved (=0)
     * }}}
     *
-    * The 3-bit `mode` field's encoding is non-sequential to keep
-    * `mode[2]` = SCL drive class and `mode[1:0]` = active divider register
-    * directly readable from the wire (see [[BusMode]]).
+    * The 3-bit `mode` field's encoding is non-sequential to keep `mode[2]` =
+    * SCL drive class and `mode[1:0]` = active divider register directly
+    * readable from the wire (see [[BusMode]]).
     */
   case class SetBusMode(mode: BusMode.E) extends Instruction
 
@@ -357,8 +356,8 @@ object Instruction {
     */
   case class LoadTiming(reg: Int, dividerWord: Int) extends Instruction
 
-  /** `MARK label` --- insert a labelled marker (with implicit timestamp) in
-    * the result ring. Layout:
+  /** `MARK label` --- insert a labelled marker (with implicit timestamp) in the
+    * result ring. Layout:
     *
     * {{{
     *   [15:12] opcode   [11:4] label   [3:0] reserved (=0)
@@ -369,9 +368,9 @@ object Instruction {
     */
   case class Mark(label: Int) extends Instruction
 
-  /** `SAMPLE_BIT_ON_SCL expect mask capture` --- target-role opcode: wait
-    * for the next SCL rising edge (driven externally), sample SDA at the
-    * canonical sample point, compare, optionally capture. Layout:
+  /** `SAMPLE_BIT_ON_SCL expect mask capture` --- target-role opcode: wait for
+    * the next SCL rising edge (driven externally), sample SDA at the canonical
+    * sample point, compare, optionally capture. Layout:
     *
     * {{{
     *   [15:12] opcode      [11:3] reserved (=0)
@@ -389,19 +388,18 @@ object Instruction {
 
   /** `DRIVE_BIT_ON_SCL tx_symbol expect mask capture` --- target-role opcode:
     * on the next SCL falling edge, drive SDA per `tx_symbol` for one
-    * external-SCL-clocked bit cell; concurrently, on the SCL rising edge
-    * inside that cell, sample SDA, compare, optionally capture. The
-    * simultaneous drive + sample is what enables I3C DAA arbitration: a
-    * target driving `recessive` reads `dominant` iff another target pulled
-    * the line low, setting `MISMATCH_FLAG`. Layout:
+    * external-SCL-clocked bit cell; concurrently, on the SCL rising edge inside
+    * that cell, sample SDA, compare, optionally capture. The simultaneous drive
+    * + sample is what enables I3C DAA arbitration: a target driving `recessive`
+    * reads `dominant` iff another target pulled the line low, setting
+    * `MISMATCH_FLAG`. Layout:
     *
     * {{{
     *   [15:12] opcode      [11:10] tx_symbol    [9:3] reserved (=0)
     *   [2] expect [1] mask [0] capture
     * }}}
     *
-    * Identical shape to [[EmitBit]] --- the only difference is who clocks
-    * SCL.
+    * Identical shape to [[EmitBit]] --- the only difference is who clocks SCL.
     */
   case class DriveBitOnScl(
       txSymbol: TxSymbol.E,
@@ -411,12 +409,12 @@ object Instruction {
   ) extends Instruction
 
   /** Reserved-v0.5 opcode carrier. Round-trips a 12-bit operand payload
-    * verbatim --- v0 has no semantics for any of the four reserved slots,
-    * and the per-opcode payload layout is a v0.5 design decision that has
-    * not happened yet.
+    * verbatim --- v0 has no semantics for any of the four reserved slots, and
+    * the per-opcode payload layout is a v0.5 design decision that has not
+    * happened yet.
     *
-    * Constructor enforces `Opcode.isV0(opcode) == false`; v0 opcodes use
-    * their own typed case classes, not this carrier.
+    * Constructor enforces `Opcode.isV0(opcode) == false`; v0 opcodes use their
+    * own typed case classes, not this carrier.
     */
   case class ReservedV05(opcode: Opcode.E, payload: Int) extends Instruction {
     require(
@@ -435,25 +433,23 @@ object Instruction {
 
   /** Encode a host-side [[Instruction]] into its 16-bit wire word.
     *
-    * **Pure Scala, not RTL.** This function is the sim-time reference
-    * encoder, not the host's runtime encoder. The host compiler (the
-    * future Rust crate under `../../crates/`) emits pre-assembled bytes
-    * over UART; this Scala function exists to (1) satisfy Step 7's
-    * "round-trip encode/decode" sim requirement, (2) let Step 9+ engine
-    * sims construct test programs in Scala instead of hand-coded hex
-    * literals, and (3) cross-validate the Rust encoder once it lands ---
-    * if the two implementations agree on every legal instruction, the
-    * wire format is correct.
+    * **Pure Scala, not RTL.** This function is the sim-time reference encoder,
+    * not the host's runtime encoder. The host compiler (the future Rust crate
+    * under `../../crates/`) emits pre-assembled bytes over UART; this Scala
+    * function exists to (1) satisfy Step 7's "round-trip encode/decode" sim
+    * requirement, (2) let Step 9+ engine sims construct test programs in Scala
+    * instead of hand-coded hex literals, and (3) cross-validate the Rust
+    * encoder once it lands --- if the two implementations agree on every legal
+    * instruction, the wire format is correct.
     *
-    * `encode` operates on Scala case classes and returns a plain
-    * `scala.Int`. It cannot elaborate into hardware: SpinalHDL does not
-    * "see" Scala case classes at elaboration time, and the call site
-    * would emerge as a baked-in constant even if invoked from a
-    * Component body.
+    * `encode` operates on Scala case classes and returns a plain `scala.Int`.
+    * It cannot elaborate into hardware: SpinalHDL does not "see" Scala case
+    * classes at elaboration time, and the call site would emerge as a baked-in
+    * constant even if invoked from a Component body.
     *
-    * Throws [[IllegalArgumentException]] on out-of-range operand values
-    * (e.g. a `Jmp` whose address overflows 12 bits) --- the host SDK is
-    * responsible for catching those before they reach the engine.
+    * Throws [[IllegalArgumentException]] on out-of-range operand values (e.g. a
+    * `Jmp` whose address overflows 12 bits) --- the host SDK is responsible for
+    * catching those before they reach the engine.
     */
   def encode(insn: Instruction): Int = insn match {
     case EmitBit(tx, expect, mask, capture) =>
@@ -548,21 +544,21 @@ object Instruction {
 
   /** Decode a 16-bit wire word into its host-side [[Instruction]].
     *
-    * **Pure Scala, not RTL.** Same role as [[encode]] (which see): this is
-    * the sim-time reference decoder, not the engine's RTL fetch decoder.
-    * The engine's decode happens combinationally on [[InstructionWord]]'s
-    * payload slice in the Step-8 fetch FSM and shares the SpinalEnum
-    * widths defined above but none of this Scala function's body.
+    * **Pure Scala, not RTL.** Same role as [[encode]] (which see): this is the
+    * sim-time reference decoder, not the engine's RTL fetch decoder. The
+    * engine's decode happens combinationally on [[InstructionWord]]'s payload
+    * slice in the Step-8 fetch FSM and shares the SpinalEnum widths defined
+    * above but none of this Scala function's body.
     *
-    * `word` must fit in the lower 16 bits; the upper bits are required to
-    * be zero so callers cannot accidentally pass a sign-extended `Int`.
+    * `word` must fit in the lower 16 bits; the upper bits are required to be
+    * zero so callers cannot accidentally pass a sign-extended `Int`.
     *
-    * Reserved-bit slices in the wire word are not inspected --- a
-    * hand-crafted word with stray bits in a reserved field decodes to the
-    * same case-class value as a clean one. Round-trip stability
-    * (`decode(encode(i)) == i`) is the invariant the sim asserts; strict
-    * "reject stray reserved bits" is a defense-in-depth check the engine
-    * (not this function) can choose to add later.
+    * Reserved-bit slices in the wire word are not inspected --- a hand-crafted
+    * word with stray bits in a reserved field decodes to the same case-class
+    * value as a clean one. Round-trip stability (`decode(encode(i)) == i`) is
+    * the invariant the sim asserts; strict "reject stray reserved bits" is a
+    * defense-in-depth check the engine (not this function) can choose to add
+    * later.
     */
   def decode(word: Int): Instruction = {
     require(
@@ -657,13 +653,13 @@ object Instruction {
   // --------------------------------------------------------------
 
   /** Wire encoding for [[BusMode]] --- mirrors the SpinalEnumEncoding
-    * `busModeWire` declared on the enum itself. The wire codes are
-    * deliberately non-sequential per ROADMAP §"Bus mode register":
-    * `mode[2]` (the SCL drive class) sits high while `mode[1:0]` (the
-    * timing-divider selector) sits low, so `mode` bits read directly as
-    * "drive-class then divider". The host encoder MUST use these wire
-    * codes (not the SpinalEnumElement `.position` declaration index) so
-    * the Scala reference and the engine RTL agree at the bit level.
+    * `busModeWire` declared on the enum itself. The wire codes are deliberately
+    * non-sequential per ROADMAP §"Bus mode register": `mode[2]` (the SCL drive
+    * class) sits high while `mode[1:0]` (the timing-divider selector) sits low,
+    * so `mode` bits read directly as "drive-class then divider". The host
+    * encoder MUST use these wire codes (not the SpinalEnumElement `.position`
+    * declaration index) so the Scala reference and the engine RTL agree at the
+    * bit level.
     */
   private val busModeWireValue: Map[BusMode.E, Int] = Map(
     BusMode.i2c -> 0,
@@ -688,27 +684,26 @@ object Instruction {
       (if (mask) 1 << MASK_BIT else 0) |
       (if (capture) 1 << CAPTURE_BIT else 0)
 
-  /** `true` iff bit `pos` is set in `word`. Shorthand used by every
-    * flag-triple decoder.
+  /** `true` iff bit `pos` is set in `word`. Shorthand used by every flag-triple
+    * decoder.
     */
   private def bitSet(word: Int, pos: Int): Boolean =
     ((word >> pos) & 1) == 1
 
   /** Sign-extend an 8-bit unsigned value (0..255) into a signed `Int`
-    * (-128..127). Used by [[BranchOn]] to recover the signed PC-relative
-    * offset from the wire word's low byte. Uses Java's arithmetic-right-
-    * shift on `Int` (`>>`) to sign-extend the top bit.
+    * (-128..127). Used by [[BranchOn]] to recover the signed PC-relative offset
+    * from the wire word's low byte. Uses Java's arithmetic-right- shift on
+    * `Int` (`>>`) to sign-extend the top bit.
     */
   private def signExtend8(byte: Int): Int = (byte << 24) >> 24
 }
 
-/** Hardware-side instruction Bundle skeleton --- consumed by the engine
-  * fetch path in Step 8. The 16-bit instruction word splits at the opcode /
-  * payload boundary; per-opcode field decoding happens combinationally on
-  * the payload slice and is the engine FSM's responsibility, not this
-  * bundle's. Keeping the bundle this thin avoids baking per-opcode layout
-  * into the fetch path and lets each consumer slice `payload` against its
-  * own operand layout.
+/** Hardware-side instruction Bundle skeleton --- consumed by the engine fetch
+  * path in Step 8. The 16-bit instruction word splits at the opcode / payload
+  * boundary; per-opcode field decoding happens combinationally on the payload
+  * slice and is the engine FSM's responsibility, not this bundle's. Keeping the
+  * bundle this thin avoids baking per-opcode layout into the fetch path and
+  * lets each consumer slice `payload` against its own operand layout.
   */
 case class InstructionWord() extends Bundle {
 
