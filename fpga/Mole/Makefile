@@ -72,7 +72,7 @@ $(BIN): $(ASC)
 sim: sim-config sim-opendrain sim-baud-gen sim-rx-sync \
      sim-tx-shiftreg sim-rx-shiftreg sim-tx-fsm sim-rx-fsm \
      sim-uart-tx sim-uart-rx sim-uart sim-spram sim-isa \
-     sim-engine-smoke ## Run all simulations
+     sim-engine-smoke sim-engine-full ## Run all simulations
 
 # Per-block sim / gen targets land here once their hint blocks in
 # TODO.md flip from 🔲 to ✅. The naming contract is fixed:
@@ -140,8 +140,8 @@ sim-isa: ## Round-trip the 12-opcode encoder/decoder (Step 7)
 sim-engine-smoke: ## EMIT_BIT smoke: i3c-OD vs i3c-PP byte trace (Step 9)
 	$(SBT) -batch "runMain $(PACKAGE).BitCycleEngineSmokeSim"
 
-# sim-engine-full: ## Full ISA coverage (lands with Step 12)
-# 	$(SBT) -batch "runMain $(PACKAGE).BitCycleEngineSim"
+sim-engine-full: ## Full ISA coverage of BitCycleEngineCore (Step 12)
+	$(SBT) -batch "runMain $(PACKAGE).BitCycleEngineSim"
 
 # sim-top: ## End-to-end MoleTop sim: UART load -> engine -> UART results (Step 14)
 # 	$(SBT) -batch "runMain $(PACKAGE).MoleTopSim"
@@ -179,5 +179,5 @@ help: ## Show this help (every target with a ## description)
 .PHONY: all sim sim-config sim-opendrain sim-baud-gen sim-rx-sync \
         sim-tx-shiftreg sim-rx-shiftreg sim-tx-fsm sim-rx-fsm \
         sim-uart-tx sim-uart-rx sim-uart sim-spram sim-isa \
-        sim-engine-smoke \
+        sim-engine-smoke sim-engine-full \
         waves flash clean distclean help

@@ -41,6 +41,7 @@ stable contract" before changing either.
 - [x] **Step 9 --- `BitCycleEngineSmokeSim`.** Per-cycle bus-driver trace under `i3c-OD` vs `i3c-PP`, asserting "released" vs "actively driven high" on the SCL high half + the SDA decode for `dominant` / `recessive` / `hiz`. Distinguishes pulled-high (pull-up) from driven-high (PP) by reading the engine's `driveHigh` directly. `sim-engine-smoke` uncommented; aggregate `sim` target picks it up.
 - [x] **Step 10 --- Async waits + stretch.** `EMIT_QUARTER` / `STRETCH_SCL` / `WAIT_ON cond, timeout` added to `BitCycleEngineCore`. Sticky flag set wired up (`MISMATCH_FLAG`, `TIMEOUT_FLAG`, `START_FLAG`, `STOP_FLAG` per AGENTS §3.15). Bus observer (2-FF sync on SDA/SCL + edge detectors). Reserved cond codes trap to halt.
 - [x] **Step 11 --- Control flow + bookkeeping + timing override.** `JMP` / `BRANCH_ON cond, offset` / `LOAD_TIMING reg word` / `MARK label` decoded; controller-side ISA complete for v0 (target-role opcodes still deferred to Step 19). CAPTURE bit on EMIT_BIT / EMIT_QUARTER wired through to a new ring-write path. Result-ring format pinned (Revision + record stream + reserved HALT slot at `resultLimit`). Single `enterHalt(status)` helper across all trap paths (HALT opcode, reserved opcode, reserved cond code, reserved tx_symbol, invalid `SET_BUS_MODE` wire value). 32-bit MARK timestamp counter reset on `io.start`.
+- [x] **Step 12 --- `BitCycleEngineSim`.** Full-ISA Verilator sim with 17 named tests under one `BitCycleEngineFullDut` compile (debug read mux over `SpramController` while the engine is idle). Covers JMP / BRANCH_ON ALWAYS + SDA_LOW + MISMATCH + TIMEOUT / WAIT_ON cond-hit + timeout-hit / MARK records + monotonic timestamps / CAPTURE record value / MISMATCH_FLAG tracking / LOAD_TIMING swap / STRETCH_SCL dwell / Revision word format / HALT status passthrough / reserved-opcode + invalid-BUS_MODE + reserved-tx_symbol traps / result-ring overflow. `sim-engine-full` uncommented; aggregate `sim` picks it up. `SAMPLE_BIT_ON_SCL` / `DRIVE_BIT_ON_SCL` deferred to Step 19.
 
 ---
 
@@ -883,16 +884,77 @@ coverage lands in Step 12. Existing `sim-config` /
 
 **Makefile:** unchanged (Step 12 uncomments `sim-engine-full`).
 
-### 🔲 Step 12 --- `BitCycleEngineSim` (full ISA)
+### ✅ Step 12 --- `BitCycleEngineSim` (full ISA)
 
-**Goal:** systematic coverage of every opcode + every operand
-field. Includes branch-taken / branch-not-taken pairs, stretch
-under measured-vs-programmed timing, async waits with timeout,
-result-ring overflow, mismatch tracking across multiple `EMIT_*`.
+**What landed:**
 
-**Files:** `src/sim/BitCycleEngineSim.scala`.
-
-**Makefile:** uncomment `sim-engine-full`.
+- **Files:** `src/sim/BitCycleEngineSim.scala` (new). 17 named
+  tests under one lazy-compiled `BitCycleEngineFullDut`
+  elaboration; entry point `mole.BitCycleEngineSim` runs the
+  full suite. Compile-once, doSim-many keeps Verilator cost
+  amortised across cases.
+- **DUT shape:** `BitCycleEngineFullDut` is the smoke-sim DUT
+  plus a debug read port that mux-takes the SPRAM read interface
+  while the engine is idle. Engine wins arbitration while
+  running; the test wins while halted. Avoids touching
+  `SpramController` (whose `mem` lives inside an `else` block and
+  is not externally visible). Lives in `src/sim/`; never
+  elaborates to RTL.
+- **DSL helpers:** `emitBit`, `emitQuarter`, `setMode`, `halt`,
+  `jmp`, `branchOn`, `waitOn`, `stretch`, `loadTiming`, `mark`
+  each return the wire word. `haltAt(ring, addr)` decodes the
+  HALT word into a typed `HaltWord(overflow, mismatch, status)`
+  case class. `revisionAt(ring)` returns the `(lo, hi)` pair at
+  `resultBase` / `resultBase+1`.
+- **Coverage matrix:**
+  - `revision-written` --- HALT writes Revision lo/hi verbatim at
+    `resultBase`/`resultBase+1`.
+  - `halt-status-passthrough` --- caller's 4-bit status code
+    survives into HALT word `[11:8]`.
+  - `jmp-forward` --- `JMP addr` jumps over a poison HALT.
+  - `branch-always-taken` --- `BRANCH_ON ALWAYS, +2` lands on
+    the right HALT.
+  - `branch-sda-low-taken` --- pre-drive SDA low; an
+    `EMIT_QUARTER(hiz, hiz)` registers the level;
+    `BRANCH_ON SDA_LOW, +2` takes.
+  - `wait-cond-hit` --- bus high at start; test drops SDA
+    mid-wait; engine clears TIMEOUT and falls through.
+  - `wait-timeout-hit` --- bus stuck high; `WAIT_ON(SDA_LOW, 4)`
+    times out; `BRANCH_ON TIMEOUT, +1` picks the right HALT.
+  - `mark-records` --- two MARKs land at `resultBase+2` and
+    `resultBase+5` as 3-word records; labels survive verbatim;
+    timestamps are monotonic.
+  - `capture-record` --- one `EMIT_BIT(hiz, capture=true)`
+    against SDA pre-driven high produces a CAPTURE record
+    `[15:14]=00, [0]=1`.
+  - `mismatch-tracking` --- one `EMIT_BIT(hiz, expect=true,
+    mask=true)` against SDA=low sets MISMATCH; HALT word's
+    `mismatch` bit is true.
+  - `branch-on-mismatch` --- as above, with `BRANCH_ON MISMATCH`
+    in between; takes.
+  - `load-timing` --- writes divider=2 to the i2c slot; measured
+    SCL-low width drops into the `[4,8]`-cycle window (vs the
+    default `~24`-cycle width).
+  - `stretch-scl` --- `STRETCH_SCL 5` holds SCL low for
+    `5 * (divider+1) ± 4` cycles.
+  - `reserved-opcode-trap` --- opcode 0xC (sampleBitOnScl,
+    target-role, unimplemented) traps to HALT status 0xF.
+  - `invalid-busmode-trap` --- `SET_BUS_MODE` with wire value 2
+    (not in {0,1,6,7}) traps to 0xF.
+  - `reserved-tx-symbol-trap` --- `EMIT_BIT` with tx_symbol=0b11
+    traps to 0xF.
+  - `ring-overflow` --- 12 MARKs into a 29-word record area;
+    the 10th overflows; HALT word's `overflow` bit is true.
+- **`SAMPLE_BIT_ON_SCL` / `DRIVE_BIT_ON_SCL`:** intentionally
+  not covered. These are target-role and land in Step 19 with
+  the actual controller-driven SCL stim setup; covering them
+  here would duplicate that test rig before it exists.
+- **Per-test ring size:** uses a small cfg
+  (`resultRingByteCount = 64` → 32 ring words, `programWordCount
+  = 64`) so overflow is exercisable in a handful of MARKs.
+- **Makefile:** uncommented `sim-engine-full`; added to
+  `.PHONY`; added to the aggregate `sim:` target after
+  `sim-engine-smoke`.
 
 ---
 
