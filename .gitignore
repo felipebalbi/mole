@@ -168,3 +168,18 @@ result-*
 *.tmp
 .cache/
 *.molecode
+
+# -----------------------------------------------------------------------------
+# mole-asm fixture goldens
+# -----------------------------------------------------------------------------
+# The fixture goldens are committed intentionally: they are the byte-for-byte
+# regression oracle for the Rust assembler. Cascading un-ignores walk down
+# from the crate root so a future broader ignore on `mole-asm/**` would not
+# silently re-ignore them. Keep this block at the end of the file --- gitignore
+# semantics require un-ignore lines to appear after every ignore pattern they
+# need to override (here, `*.bin`, `*.mole.bin`, `*.molecode`).
+!mole-asm/
+!mole-asm/tests/
+!mole-asm/tests/fixtures/
+!mole-asm/tests/fixtures/*.molecode
+!mole-asm/tests/fixtures/*.mole.bin

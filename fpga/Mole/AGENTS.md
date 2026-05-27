@@ -64,7 +64,8 @@ If the ISA truly needs to change:
 1. Bump a bytecode-format version word at the top of every
    program.
 2. Update `ROADMAP.md` §"Layer 0 --- the bit-cycle engine".
-3. Update the host encoder (the Rust crate under `../../crates/`)
+3. Update the host encoder (the Rust `mole-asm` crate at
+   `../../mole-asm/`, with its CLI front-end in `../../mole-asm-cli/`)
    in the same PR.
 
 The `WAIT_ADDRESSED`, `MISMATCH_CLEAR`, `FLAG_CLEAR`,

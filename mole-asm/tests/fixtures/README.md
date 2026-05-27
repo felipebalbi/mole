@@ -1,24 +1,27 @@
 # Phase 3 bring-up assets
 
-The reference moleasm assembler (`mole-asm.py`), the three bundled
+The Python reference assembler (`mole-asm.py`), the three bundled
 `.moleasm` source programs, and the assembled `.molecode` /
 `.mole.bin` artifacts they produce. Used to validate the Phase 2
-bitstream against real silicon **before** the Rust `mole-host` crate
-exists.
+bitstream against real silicon and to seed the Rust `mole-asm`
+crate's golden-test suite (see `../golden.rs`).
 
 ## What's here
 
 | File                          | Notes                                                                                                                  |
 |-------------------------------|------------------------------------------------------------------------------------------------------------------------|
-| `mole-asm.py`                 | Reference assembler --- the golden against which the future Rust assembler diffs. Mirrors `Instruction.scala::encode`. |
+| `mole-asm.py`                 | Python reference assembler. The Rust `mole-asm` crate is byte-for-byte diffed against it. Mirrors `Instruction.scala::encode`. |
 | `first-light.moleasm`         | Infinite loop, no `HALT`. Scope-sanity program (~98.8 kHz SCL, 0x90 pattern).                                          |
 | `tmp108.moleasm`              | Full TMP108 read: START / write addr+ptr / Sr / read 16 bits / STOP / HALT. Triggers 8192-byte result drain.           |
 | `i2c-write-one-byte.moleasm`  | ROADMAP §"I2C write-one-byte" example, used as an assembler golden in the self-check suite.                            |
-| `*.molecode`                  | Raw 16-bit LE bytecode (2 bytes × N instructions). Gitignored.                                                         |
-| `*.mole.bin`                  | Framed UART payload (len + words + CRC-16/XMODEM). Gitignored.                                                         |
+| `*.molecode`                  | Raw 16-bit LE bytecode (2 bytes × N instructions). Committed (un-ignored under this directory) so Rust goldens run offline. |
+| `*.mole.bin`                  | Framed UART payload (len + words + CRC-16/XMODEM). Committed (un-ignored under this directory) so Rust goldens run offline. |
 
-The `.molecode` and `.mole.bin` artifacts are gitignored at the repo
-root (`*.molecode`, `*.mole.bin`). Regenerate them at any time:
+The repo's top-level `.gitignore` ignores `*.molecode` and
+`*.mole.bin` globally, but a cascading un-ignore block lets the
+artifacts in this directory remain checked in --- they are the
+wire-format goldens the Rust assembler is regression-tested
+against. Regenerate them at any time:
 
 ```sh
 python mole-asm.py
@@ -136,11 +139,12 @@ If no TMP108 is wired up, the 3 ACK bits will read `recessive`
 silently --- the engine does not abort, the read bits still come
 back as whatever the bus is doing (typically all 1s).
 
-## Eventual fate
+## Current status
 
-Once `crates/mole-host` lands as a real Rust crate, the
-assembler logic moves to `src/instruction.rs` + `src/assembler.rs`
-and the `.moleasm` / `.molecode` / `.mole.bin` fixtures move to
-`tests/golden/`. The Rust tests then diff the Rust assembler's
-output against the `.molecode` files this Python assembler emits,
-treating them as the wire-format reference.
+The Rust `mole-asm` crate (at `../../`) ports this Python reference
+in full and is the source-of-truth implementation going forward.
+This script remains here as the spec it was diffed against, and as
+the oracle for the opt-in `MOLEASM_PYTHON_PARITY=1` integration
+test in `mole-asm/tests/golden.rs`. Keep the two implementations in
+lockstep or retire the Python only after the SDK has been on the
+Rust crate for a release cycle.

@@ -1,0 +1,13 @@
+[book]
+title = "The moleasm Tutorial"
+authors = ["Felipe Balbi"]
+description = "Tutorial and reference for moleasm, the Layer-1 assembly language of the Mole I3C/I2C compliance rig."
+language = "en"
+src = "src"
+
+[output.html]
+default-theme = "navy"
+preferred-dark-theme = "navy"
+git-repository-url = "https://github.com/6mil-Labs/mole"
+edit-url-template = "https://github.com/6mil-Labs/mole/edit/master/mole-asm/book/{path}"
+no-section-label = true

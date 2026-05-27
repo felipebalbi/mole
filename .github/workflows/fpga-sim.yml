@@ -27,8 +27,14 @@ name: fpga-sim
 
 on:
   push:
+    paths:
+      - 'fpga/**'
+      - '.github/workflows/fpga-sim.yml'
   pull_request:
-    branches: [main]
+    branches: [main, master]
+    paths:
+      - 'fpga/**'
+      - '.github/workflows/fpga-sim.yml'
 
 permissions:
   contents: read

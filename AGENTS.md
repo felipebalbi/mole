@@ -54,22 +54,27 @@ time (PRNG in the host) so `ratio = 0` is *exactly* zero, not
 .
 ├── AGENTS.md          ← you are here
 ├── ROADMAP.md         ← source of truth for the design; read first
+├── README.md          ← contributor-facing overview
+├── Cargo.toml         ← host-tools Cargo workspace (root)
+├── Cargo.lock         ← committed
 ├── .gitignore         ← Rust + SpinalHDL + FPGA toolchain
-├── crates/            ← Rust workspaces (host compiler, encoder,
-│                        result decoder, CLI, FFI, eventual Pico
-│                        firmware)
+├── mole-asm/          ← bytecode compiler library + mdBook tutorial
+├── mole-asm-cli/      ← clap + color-eyre CLI front-end (`mole-asm` binary)
+├── (future) firmware/ ← no_std Pico firmware (separate Cargo workspace)
 └── fpga/              ← SpinalHDL projects (bit engine, UART,
                          SPRAM controller, top-levels per board)
 ```
 
 Layout is *intentionally* minimal right now. Sub-trees grow as
 phases of the roadmap land; do not pre-create scaffolding for work
-that isn't underway.
+that isn't underway. New host-side crates land at the repo root
+alongside `mole-asm/` / `mole-asm-cli/` --- there is no `crates/`
+sub-directory.
 
-There will eventually be **two Rust workspaces** (host tools vs.
-no_std Pico firmware) for the same reason pico-de-gallo split them:
-target triples and `no_std` deps don't co-exist cleanly in one
-workspace. Do not merge them.
+There will eventually be **two Rust workspaces** (host tools at the
+repo root, no_std Pico firmware under `firmware/`) for the same
+reason pico-de-gallo split them: target triples and `no_std` deps
+don't co-exist cleanly in one workspace. Do not merge them.
 
 ---
 
@@ -234,7 +239,9 @@ workspace. Do not merge them.
 
 ### Scheme / SDK sources
 
-- One namespace per file under `crates/<sdk-crate>/sdk/<ns>/`.
+- One namespace per file under the SDK crate's `sdk/<ns>/` tree
+  (the SDK crate itself lands at the repo root when it materialises,
+  e.g. `mole-sdk/`).
 - A source that uses `raw/` *must* declare
   `(use-raw-primitives)` as its first non-comment form.
 - Test sources end in `.mole.scm`; library sources end in `.scm`.
