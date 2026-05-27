@@ -299,6 +299,8 @@ object MoleTopSim extends App {
     drainFork.join()
 
     val expected = received.size
+    val hex = received.map(b => f"$b%02x").mkString(" ")
+    println(s"   drained $expected bytes: $hex")
     assert(
       expected == cfg.resultRingByteCount,
       s"short-halt: expected $expected == ${cfg.resultRingByteCount}"
