@@ -1120,73 +1120,84 @@ case class BitCycleEngineCore(cfg: MoleConfig) extends Component {
 
     // ---------------------------------------- DriveBitOnScl -----
     //
-    // Target-role only. Three sub-phases tracked by a small
-    // local register `driveBitPhase`:
+    // Target-role only. Three dedicated sub-states (no phase
+    // register --- a previous single-state version with a
+    // `Reg(UInt(2 bits))` phase counter suffered a same-cycle
+    // stale-read bug where `onEntry { phase := 0 }` did not
+    // become visible until the next cycle, but the `switch`
+    // inside `whenIsActive` ran on entry and read the prior
+    // value, so every bit after the first deadlocked):
     //
-    //   0 = wait for the next SCL falling edge.
-    //   1 = SDA driven; wait for the next SCL rising edge.
-    //   2 = SDA driven; sample SDA at the rising edge, hold drive
-    //       through the high half, wait for the next falling edge
-    //       (which is also the cell boundary).
+    //   driveBitOnSclState     : wait for SCL falling, decode
+    //                            tx_symbol, drive SDA.
+    //   driveBitWaitRising     : SDA driven; on SCL rising,
+    //                            evaluate MASK / CAPTURE.
+    //   driveBitWaitClosing    : SDA still driven through the
+    //                            high half; on the next SCL
+    //                            falling, release SDA, bump PC.
     //
-    // SDA stays driven from the start of phase 1 through the end
-    // of phase 2. The captured/compared value reflects the
-    // wired-AND SDA at the rising edge --- a target driving
-    // recessive that reads dominant lost the bit to another
-    // target on the wire, sets MISMATCH_FLAG, and a following
-    // BRANCH_ON MISMATCH routes to the lost-arbitration handler.
-    // This is the I3C DAA arbitration mechanic.
+    // SDA stays driven from the falling edge that opens the
+    // cell through the falling edge that closes it. The
+    // captured / compared value reflects the wired-AND SDA at
+    // the rising edge --- a target driving recessive that
+    // reads dominant lost the bit to another target on the
+    // wire, sets MISMATCH_FLAG, and a following BRANCH_ON
+    // MISMATCH routes to the lost-arbitration handler. This is
+    // the I3C DAA arbitration mechanic.
     //
     // Reserved tx_symbol (0b11) is rejected in decodeState above.
-    val driveBitPhase =
-      if (cfg.role == EngineRole.Target) Reg(UInt(2 bits)) init (0)
+    // States are declared in reverse-goto order so each forward
+    // reference (`goto(driveBitWaitClosing)`, `goto(
+    // driveBitWaitRising)`) resolves cleanly without `lazy val`.
+    val driveBitWaitClosing: State =
+      if (cfg.role == EngineRole.Target) new State {
+        whenIsActive {
+          when(observer.sclFalling) {
+            sdaDriveLow := False
+            sdaDriveHigh := False
+            pc := pc + 1
+            when(instrReg(Instruction.CAPTURE_BIT)) {
+              goto(captureWriteState)
+            } otherwise {
+              goto(fetchState)
+            }
+          }
+        }
+      }
+      else null
+
+    val driveBitWaitRising: State =
+      if (cfg.role == EngineRole.Target) new State {
+        whenIsActive {
+          when(observer.sclRising) {
+            when(instrReg(Instruction.MASK_BIT)) {
+              mismatchFlag :=
+                sdaSampled =/= instrReg(Instruction.EXPECT_BIT)
+            }
+            when(instrReg(Instruction.CAPTURE_BIT)) {
+              captureValueReg := sdaSampled
+            }
+            goto(driveBitWaitClosing)
+          }
+        }
+      }
       else null
 
     val driveBitOnSclState: State =
       if (cfg.role == EngineRole.Target) new State {
         onEntry {
-          // Phase 0: SDA released until the falling edge arrives.
-          driveBitPhase := 0
           sdaDriveLow := False
           sdaDriveHigh := False
         }
         whenIsActive {
-          switch(driveBitPhase) {
-            is(0) {
-              when(observer.sclFalling) {
-                val txRaw = instrReg(11 downto 10)
-                val sdaSym = TxSymbol()
-                sdaSym.assignFromBits(txRaw)
-                val sda = SymbolDecoder(sdaSym, busModeReg)
-                sdaDriveLow := sda.driveLow
-                sdaDriveHigh := sda.driveHigh
-                driveBitPhase := 1
-              }
-            }
-            is(1) {
-              when(observer.sclRising) {
-                when(instrReg(Instruction.MASK_BIT)) {
-                  mismatchFlag :=
-                    sdaSampled =/= instrReg(Instruction.EXPECT_BIT)
-                }
-                when(instrReg(Instruction.CAPTURE_BIT)) {
-                  captureValueReg := sdaSampled
-                }
-                driveBitPhase := 2
-              }
-            }
-            default { // phase 2
-              when(observer.sclFalling) {
-                sdaDriveLow := False
-                sdaDriveHigh := False
-                pc := pc + 1
-                when(instrReg(Instruction.CAPTURE_BIT)) {
-                  goto(captureWriteState)
-                } otherwise {
-                  goto(fetchState)
-                }
-              }
-            }
+          when(observer.sclFalling) {
+            val txRaw = instrReg(11 downto 10)
+            val sdaSym = TxSymbol()
+            sdaSym.assignFromBits(txRaw)
+            val sda = SymbolDecoder(sdaSym, busModeReg)
+            sdaDriveLow := sda.driveLow
+            sdaDriveHigh := sda.driveHigh
+            goto(driveBitWaitRising)
           }
         }
       }
