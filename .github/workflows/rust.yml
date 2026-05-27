@@ -1,0 +1,144 @@
+# Rust + mdBook CI for the Mole host tooling.
+#
+# Two parallel jobs:
+#
+#   rust-quality --- fmt + clippy + build + test for the whole
+#                    Cargo workspace at the repo root (mole-asm
+#                    library + mole-asm-cli binary). Catches the
+#                    obvious-but-easy-to-miss class of regressions:
+#                    formatter drift, new clippy lints, lockfile
+#                    desync (`--locked`), and the byte-for-byte
+#                    golden tests against the Phase 3 fixtures.
+#
+#   book         --- `mdbook build` of the moleasm tutorial.
+#                    The book is not a workspace member, so
+#                    `cargo build` doesn't exercise it. This job
+#                    is the only gate that catches a chapter that
+#                    fails to render (bad fenced code block, bad
+#                    SUMMARY.md entry, etc.).
+#
+# What this workflow does NOT do:
+#   - publish the book. Just builds it; deployment is a separate
+#     decision (and not made yet).
+#   - run on every push to docs-only changes elsewhere in the repo.
+#     The `paths:` filter scopes triggers to changes that can
+#     actually affect this workflow's outputs.
+#   - install nightly toolchains, miri, or any custom rustflags.
+#     Plain stable is the contract.
+#
+# Sibling fpga-sim.yml already gates CRLF for *.yml files in
+# .github/, so this workflow doesn't duplicate that check.
+
+name: rust
+
+on:
+  push:
+    paths:
+      - 'mole-asm/**'
+      - 'mole-asm-cli/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/rust.yml'
+  pull_request:
+    branches: [main, master]
+    paths:
+      - 'mole-asm/**'
+      - 'mole-asm-cli/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/rust.yml'
+
+permissions:
+  contents: read
+
+jobs:
+  rust-quality:
+    name: cargo fmt + clippy + build + test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      # Stable channel, with the formatter and linter components
+      # we explicitly invoke below. Pinning to `stable` rather than
+      # a specific version trades reproducibility for low
+      # maintenance --- if a stable bump breaks us, that is
+      # information we want to see promptly. Bump to a pinned
+      # version only if churn becomes a real problem.
+      - name: Install Rust (stable + rustfmt + clippy)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      # Cache ~/.cargo/registry, ~/.cargo/git, and target/ keyed on
+      # Cargo.lock + toolchain. Cold builds of this workspace are
+      # fast (~30 s) so the cache is more about clippy / test runs
+      # than the first compile.
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Verify toolchain
+        run: |
+          set -eu
+          rustc --version
+          cargo --version
+          cargo fmt --version
+          cargo clippy --version
+
+      # rustfmt drift is cheap to catch and worthless to debug
+      # later when a refactor diff is buried in formatting noise.
+      # `--all` covers every workspace member.
+      - name: Check formatting (cargo fmt)
+        run: cargo fmt --all -- --check
+
+      # Treat warnings as errors so a new clippy lint can't sneak
+      # in silently. `--all-targets` covers libs, bins, tests, and
+      # examples; `--workspace` covers every crate.
+      - name: Lint (cargo clippy)
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      # `--locked` makes cargo fail rather than re-resolve if
+      # Cargo.lock doesn't match Cargo.toml --- catches forgotten
+      # `cargo update` runs and reproducibility regressions.
+      - name: Build (cargo build)
+        run: cargo build --workspace --all-targets --locked
+
+      # The main event: 46 unit tests in mole-asm + 9 goldens
+      # against the Phase 3 fixtures + 3 in mole-asm-cli + 1
+      # doctest in lib.rs. The `MOLEASM_PYTHON_PARITY` test stays
+      # `#[ignore]`d (no python on the runner) so this stays
+      # network/runtime independent.
+      - name: Test (cargo test)
+        run: cargo test --workspace --locked
+
+  book:
+    name: mdbook build (mole-asm tutorial)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      # Pin mdbook to a known-good version so a future mdbook
+      # release that tightens its parser can't silently fail CI on
+      # an unrelated change. Bump deliberately when we want the
+      # newer renderer.
+      - name: Install mdbook
+        uses: peaceiris/actions-mdbook@v2
+        with:
+          mdbook-version: '0.5.2'
+
+      - name: Verify toolchain
+        run: mdbook --version
+
+      # `mdbook build` exits non-zero on bad SUMMARY.md, missing
+      # chapters, or unresolved `[link]` references. Output lands
+      # in mole-asm/book/book/ which is gitignored; we don't
+      # publish it from CI.
+      - name: Build the book
+        run: mdbook build mole-asm/book
