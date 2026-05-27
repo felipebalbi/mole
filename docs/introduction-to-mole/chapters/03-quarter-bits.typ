@@ -71,10 +71,10 @@
 )[
   #code-panel(size: 15pt)[
 ```
-Q0:  SDA <- new value     SCL <- low
-Q1:  SDA  = held          SCL <- high
-Q2:  SDA  = held          SCL  = high   (sample)
-Q3:  SDA  = held          SCL <- low
+Q0:  SDA <- new value     SCL  = low
+Q1:  SDA  = held          SCL  = low
+Q2:  SDA  = held          SCL <- high   (rising edge, sample)
+Q3:  SDA  = held          SCL  = high
 ```
   ]
   #v(0.4em)

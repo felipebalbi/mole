@@ -27,10 +27,10 @@
 )[
 ```
         ; Drive quarter-by-quarter to violate setup / hold.
-        EMIT_QUARTER  sda=recessive scl=dominant    ; Q0: load, SCL low
-        EMIT_QUARTER  sda=recessive scl=recessive   ; Q1: SCL rises
-        EMIT_QUARTER  sda=dominant  scl=recessive   ; Q2: GLITCH
-        EMIT_QUARTER  sda=recessive scl=dominant    ; Q3: SCL falls
+        EMIT_QUARTER  sda=recessive scl=dominant    ; Q0: load,    SCL low
+        EMIT_QUARTER  sda=recessive scl=dominant    ; Q1: hold,    SCL low
+        EMIT_QUARTER  sda=dominant  scl=recessive   ; Q2: GLITCH,  SCL rises
+        EMIT_QUARTER  sda=recessive scl=recessive   ; Q3: recover, SCL high
 ```
 ]
 

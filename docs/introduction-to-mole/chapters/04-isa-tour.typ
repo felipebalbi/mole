@@ -55,7 +55,7 @@
   ]
   #v(0.8em)
   #bullets(
-    [Engine sets them. Next bearer opcode clears them.],
+    [Engine sets them. The next opcode that would write them clears them.],
     [That's why `BRANCH_ON MISMATCH` "just works".],
   )
 ]

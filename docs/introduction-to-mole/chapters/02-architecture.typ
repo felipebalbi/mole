@@ -16,15 +16,15 @@
     #v(0.2em)
     #text(size: 16pt, fill: muted)[Knows the spec.]
     #linebreak()
-    #text(size: 16pt, fill: muted)[Speaks `moleasm`.]
+    #text(size: 16pt, fill: muted)[Emits bytecode.]
   ][
     #tag("Layer 0", color: accent)
     #v(0.3em)
     #text(font: font-serif, size: 22pt, weight: "semibold")[Bit-cycle engine]
     #v(0.2em)
-    #text(size: 16pt, fill: muted)[Knows nothing.]
+    #text(size: 16pt, fill: muted)[Knows the wire.]
     #linebreak()
-    #text(size: 16pt, fill: muted)[Drives the wire.]
+    #text(size: 16pt, fill: muted)[Drives every quarter-bit.]
   ]
   #v(0.8em)
   #align(center)[

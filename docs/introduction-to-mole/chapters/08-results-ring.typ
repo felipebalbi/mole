@@ -5,21 +5,22 @@
 #section-slide("08", "Results ring")
 
 #content-slide(
-  "Four record types",
+  "One header, three records",
   kicker-text: "What the engine writes",
 )[
   #v(0.4em)
   #align(center)[
-    #pill("REVISION") #h(0.6em)
+    #pill("REVISION", color: muted) #h(0.8em)
+    #text(size: 14pt, fill: muted)[(32-bit prefix)] #h(1.2em)
     #pill("CAPTURE") #h(0.6em)
     #pill("MARK") #h(0.6em)
     #pill("HALT")
   ]
   #v(0.8em)
   #bullets(
-    [Bounded ring in FPGA RAM.],
-    [Host drains it over UART after `HALT`.],
-    [Wrap is detectable. History is honest.],
+    [Revision word at the base of the ring identifies the engine build.],
+    [Stream of records follows: bits sampled, breadcrumbs, end-of-run.],
+    [Bounded ring in FPGA RAM. Host drains it over UART after `HALT`.],
   )
 ]
 
