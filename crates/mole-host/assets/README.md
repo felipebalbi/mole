@@ -57,12 +57,21 @@ cat first_light.mole.bin > /dev/ttyUSB0
 **`first_light.mole.bin`** (scope on PMOD1A.1=SCL, PMOD1A.2=SDA,
 4.7 kΩ pull-ups to 3V3):
 
-- SCL: ~1 MHz square wave, 8 cycles per loop iteration, with a
-  ~2 µs gap between iterations during the idle / START quarters.
+- SCL: ~98.8 kHz square wave (100 kHz I2C Standard-mode target,
+  derated by ~1 % for the engine's 3-cycle Fetch overhead per bit),
+  8 cycles per loop iteration, with a brief gap during the idle /
+  START quarters between iterations.
 - SDA: holds high through the idle preamble, drops low for the
   START, then clocks out the bit pattern **1001_0000** (0x90,
   TMP108 7-bit address 0x48 << 1 with R/W=0) in sync with SCL
   falling edges, then repeats forever.
+
+The script defaults to 100 kHz via `LOAD_TIMING reg=0
+divider_word=59` prepended at PC 0; pass `bit_hz=400_000` (or any
+other rate the timer can express) to `first_light_program()` /
+`tmp108_program()` if you want faster. The branch back to the top
+of the loop targets the body, not the one-time
+`LOAD_TIMING` + `SET_BUS_MODE` setup pair.
 
 **`tmp108.mole.bin`**: the full 8192-byte ring drains back over
 the UART. First 4 bytes are the `Revision` word

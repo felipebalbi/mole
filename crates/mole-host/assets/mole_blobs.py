@@ -64,6 +64,27 @@ BM_I3C_OD = 1
 BM_I3C_PP = 6
 BM_HDR    = 7
 
+# -------- Active LOAD_TIMING register per BUS_MODE --------------------------
+# (engine wires reload from `timingRegs(busModeReg[1:0])`):
+#   i2c     wire 0b000 -> mode[1:0]=00 -> reg 0
+#   i3c-OD  wire 0b001 -> mode[1:0]=01 -> reg 1
+#   i3c-PP  wire 0b110 -> mode[1:0]=10 -> reg 2
+#   hdr-DDR wire 0b111 -> mode[1:0]=11 -> reg 3
+DIV_I2C    = 0
+DIV_I3C_OD = 1
+DIV_I3C_PP = 2
+DIV_HDR    = 3
+
+# -------- fabric frequency (matches MoleConfig.fabricFreqHz default) --------
+DEFAULT_FABRIC_HZ = 24_000_000
+
+# -------- default Phase-3 bringup bit rate ----------------------------------
+# Slow enough to satisfy I2C Standard-mode (100 kHz) timing even with
+# our crude EMIT_QUARTER-based START / STOP / Sr sequences, and slow
+# enough that any sluggish I2C slave (TMP108, generic EEPROMs, etc.)
+# ACKs reliably without hand-tuning per-target rise-time margins.
+DEFAULT_BIT_HZ = 100_000
+
 # -------- instruction encoders ---------------------------------------------
 
 def flag_triple(expect: bool, mask: bool, capture: bool) -> int:
@@ -105,6 +126,38 @@ def halt(status: int = 0) -> int:
 
 def set_bus_mode(mode_wire: int) -> int:
     return (OP_SET_BUS_MODE << 12) | (mode_wire << 9)
+
+
+def load_timing(reg: int, divider_word: int) -> int:
+    """`LOAD_TIMING reg word` --- write one of the four `timingRegs`
+    entries. Layout: [15:12]=opcode [11:10]=reg [9:0]=divider_word.
+    `divider_word = N` makes the quarter dwell `N + 1` enable cycles
+    (per `QuarterBitTimer` semantics), so the engine emits one tick
+    every `N + 1` cycles."""
+    assert 0 <= reg < 4
+    assert 0 <= divider_word < (1 << 10)
+    return (OP_LOAD_TIMING << 12) | (reg << 10) | divider_word
+
+
+def divider_for(bit_hz: int, fabric_hz: int = DEFAULT_FABRIC_HZ) -> int:
+    """Pick a `LOAD_TIMING.divider_word` that targets `bit_hz` on a
+    fabric of `fabric_hz`. Quarter dwell = `(fabric / bit_hz) / 4`
+    cycles; `divider_word = quarter_dwell - 1` per the timer's "R+1
+    cycles per tick" semantics.
+
+    The observed SCL frequency on `EMIT_BIT`-only sequences will be
+    slightly lower than `bit_hz` because of the ~3-fabric-cycle
+    `Fetch -> FetchWait -> Decode` overhead between adjacent bits.
+    For 100 kHz target on 24 MHz fabric: quarter dwell 60 cycles,
+    divider_word 59, observed ~98.8 kHz (within Standard I2C spec)."""
+    bit_cycles = fabric_hz // bit_hz
+    quarter_dwell = bit_cycles // 4
+    reload = quarter_dwell - 1
+    assert 0 < reload < (1 << 10), (
+        f"reload {reload} out of 10-bit range for bit_hz={bit_hz} "
+        f"at fabric={fabric_hz}"
+    )
+    return reload
 
 
 def branch_on(cond: int, pc_rel_offset: int) -> int:
@@ -181,7 +234,7 @@ def _selfcheck() -> None:
 #   it never executes HALT.
 # ---------------------------------------------------------------------------
 
-def first_light_program() -> list[int]:
+def first_light_program(bit_hz: int = DEFAULT_BIT_HZ) -> list[int]:
     addr = 0x90
     bits_msb_first = [(addr >> i) & 1 for i in range(7, -1, -1)]
     bit_insns = [emit_bit(TX_REC if b == 1 else TX_DOM) for b in bits_msb_first]
@@ -191,10 +244,23 @@ def first_light_program() -> list[int]:
         + [emit_quarter(TX_DOM, TX_DOM)] * 2
         + bit_insns
     )
-    # body sits at PC 1..N. Branch is at PC = 1+N. Want next PC = 1.
-    # next_pc = (1 + N) + 1 + offset = 1  =>  offset = -(1 + N)
-    branch_offset = -(1 + len(body))
-    return [set_bus_mode(BM_I2C)] + body + [branch_on(C_ALWAYS, branch_offset)]
+    # PC layout:
+    #   [0]            LOAD_TIMING (i2c divider for `bit_hz`)
+    #   [1]            SET_BUS_MODE i2c
+    #   [2 .. 1+N]     body (idle / START / SCL-down / 8 bits)
+    #   [2+N]          BRANCH back to PC=2 (skip the one-time setup)
+    # From the branch at PC=(2+N): next_pc = (2+N) + 1 + offset = 2,
+    # so offset = -(N+1).
+    n_body = len(body)
+    branch_offset = -(n_body + 1)
+    return (
+        [
+            load_timing(DIV_I2C, divider_for(bit_hz)),
+            set_bus_mode(BM_I2C),
+        ]
+        + body
+        + [branch_on(C_ALWAYS, branch_offset)]
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -262,8 +328,9 @@ def _stop_seq() -> list[int]:
     )
 
 
-def tmp108_program() -> list[int]:
+def tmp108_program(bit_hz: int = DEFAULT_BIT_HZ) -> list[int]:
     prog: list[int] = []
+    prog.append(load_timing(DIV_I2C, divider_for(bit_hz)))
     prog.append(set_bus_mode(BM_I2C))
     prog += _start_seq()
     prog += _send_byte(0x90)
