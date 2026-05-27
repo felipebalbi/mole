@@ -10,21 +10,21 @@ import spinal.core.sim._
   *   1. **Sim bypass (`useBlackBox = false`) functional test**: drive every
   *      legal `(driveLow, driveHigh)` combination on both lines and assert
   *      `read` follows the wired-AND truth table from the class scaladoc.
-  *      Catches a regression in the bypass-mode bus model that MoleTopSim
-  *      will rely on for the engine-driven smoke programs.
-  *   2. **BlackBox (`useBlackBox = true`) Verilog elaboration test**:
-  *      generate Verilog for the synth path and string-search the result
-  *      for `SB_IO` instantiations + `PIN_TYPE` parameter. Catches the
-  *      typo class where someone fixes the BlackBox port names but breaks
-  *      the generic name, or accidentally drops a generic so yosys emits a
-  *      naked SB_IO with default PIN_TYPE = no output.
+  *      Catches a regression in the bypass-mode bus model that MoleTopSim will
+  *      rely on for the engine-driven smoke programs.
+  *   2. **BlackBox (`useBlackBox = true`) Verilog elaboration test**: generate
+  *      Verilog for the synth path and string-search the result for `SB_IO`
+  *      instantiations + `PIN_TYPE` parameter. Catches the typo class where
+  *      someone fixes the BlackBox port names but breaks the generic name, or
+  *      accidentally drops a generic so yosys emits a naked SB_IO with default
+  *      PIN_TYPE = no output.
   *
   * The contention case (`driveLow && driveHigh`) is enforced by a SpinalHDL
-  * `assert(...)` in the Component; we deliberately do NOT exercise it from
-  * this sim, since a failing SpinalHDL assert aborts the run before the
-  * outer try/catch can intercept it. Coverage of the never-contention
-  * invariant lives in [[BitCycleEngineSmokeSim]], which sweeps every
-  * `(tx_symbol, BUS_MODE)` combination the engine can emit.
+  * `assert(...)` in the Component; we deliberately do NOT exercise it from this
+  * sim, since a failing SpinalHDL assert aborts the run before the outer
+  * try/catch can intercept it. Coverage of the never-contention invariant lives
+  * in [[BitCycleEngineSmokeSim]], which sweeps every `(tx_symbol, BUS_MODE)`
+  * combination the engine can emit.
   *
   * Run: `sbt "runMain mole.MoleIoBufUp5kSim"`
   */
@@ -45,11 +45,16 @@ object MoleIoBufUp5kSim extends App {
     dut.io.bus.scl.driveHigh #= false
     dut.clockDomain.waitSampling(2)
 
-    final case class Case(label: String, low: Boolean, high: Boolean, read: Boolean)
+    final case class Case(
+        label: String,
+        low: Boolean,
+        high: Boolean,
+        read: Boolean
+    )
     val cases = Seq(
-      Case("released",  low = false, high = false, read = true),
-      Case("driveLow",  low = true,  high = false, read = false),
-      Case("driveHigh", low = false, high = true,  read = true)
+      Case("released", low = false, high = false, read = true),
+      Case("driveLow", low = true, high = false, read = false),
+      Case("driveHigh", low = false, high = true, read = true)
     )
 
     for (line <- Seq("sda", "scl")) {
@@ -140,10 +145,10 @@ object MoleIoBufUp5kSim extends App {
   )
   val pinTypeEncodings = Seq(
     "6'b101000", // SpinalHDL canonical Bits-literal form
-    "6'h28",     // hex form (0x28 = 0b101000)
-    "'h28",      // hex form without explicit width
-    "101000",    // bare binary digits, e.g. inside a decimal string
-    "= 40"       // decimal 40 with a leading equals (defparam form)
+    "6'h28", // hex form (0x28 = 0b101000)
+    "'h28", // hex form without explicit width
+    "101000", // bare binary digits, e.g. inside a decimal string
+    "= 40" // decimal 40 with a leading equals (defparam form)
   )
   val pinTypeMatch = pinTypeEncodings.find(verilog.contains(_))
   assert(
