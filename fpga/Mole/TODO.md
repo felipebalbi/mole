@@ -36,6 +36,12 @@ stable contract" before changing either.
 - [x] **Step 4 --- UART sims.** Imported 8 sub-block sims; added top-level `UartSim` loopback.
 - [x] **Step 5 --- `SpramController`.** One-tile SPRAM wrapper with read-priority arbitration; `SB_SPRAM256KA` BlackBox + `Mem` sim path.
 - [x] **Step 6 --- `SpramControllerSim`.** 7 black-box cases against the `Mem` substitute: write/read coverage, read-priority arbitration (both writers), wrap-around, latency, same-address r/w.
+- [x] **Step 7 --- `Instruction` ISA scaffolding.** 12-opcode + 4-reserved-slot encoder/decoder with 16-bit fixed-width wire format; full round-trip + flag-triple invariant + range-reject sim under `sim-isa`.
+- [x] **Step 8 --- `BitCycleEngineCore` (minimal).** `EMIT_BIT` / `SET_BUS_MODE` / `HALT` decoded; quarter-bit pacing via shared `QuarterBitTimer`; `SymbolDecoder` + `SclWaveformGen` + `BusModeOps.isPpClass` as the engine's only protocol context; `Revision` word emitted as two 16-bit halves on `HALT`. Sim lands in Step 9.
+- [x] **Step 9 --- `BitCycleEngineSmokeSim`.** Per-cycle bus-driver trace under `i3c-OD` vs `i3c-PP`, asserting "released" vs "actively driven high" on the SCL high half + the SDA decode for `dominant` / `recessive` / `hiz`. Distinguishes pulled-high (pull-up) from driven-high (PP) by reading the engine's `driveHigh` directly. `sim-engine-smoke` uncommented; aggregate `sim` target picks it up.
+- [x] **Step 10 --- Async waits + stretch.** `EMIT_QUARTER` / `STRETCH_SCL` / `WAIT_ON cond, timeout` added to `BitCycleEngineCore`. Sticky flag set wired up (`MISMATCH_FLAG`, `TIMEOUT_FLAG`, `START_FLAG`, `STOP_FLAG` per AGENTS §3.15). Bus observer (2-FF sync on SDA/SCL + edge detectors). Reserved cond codes trap to halt.
+- [x] **Step 11 --- Control flow + bookkeeping + timing override.** `JMP` / `BRANCH_ON cond, offset` / `LOAD_TIMING reg word` / `MARK label` decoded; controller-side ISA complete for v0 (target-role opcodes still deferred to Step 19). CAPTURE bit on EMIT_BIT / EMIT_QUARTER wired through to a new ring-write path. Result-ring format pinned (Revision + record stream + reserved HALT slot at `resultLimit`). Single `enterHalt(status)` helper across all trap paths (HALT opcode, reserved opcode, reserved cond code, reserved tx_symbol, invalid `SET_BUS_MODE` wire value). 32-bit MARK timestamp counter reset on `io.start`.
+- [x] **Step 12 --- `BitCycleEngineSim`.** Full-ISA Verilator sim with 17 named tests under one `BitCycleEngineFullDut` compile (debug read mux over `SpramController` while the engine is idle). Covers JMP / BRANCH_ON ALWAYS + SDA_LOW + MISMATCH + TIMEOUT / WAIT_ON cond-hit + timeout-hit / MARK records + monotonic timestamps / CAPTURE record value / MISMATCH_FLAG tracking / LOAD_TIMING swap / STRETCH_SCL dwell / Revision word format / HALT status passthrough / reserved-opcode + invalid-BUS_MODE + reserved-tx_symbol traps / result-ring overflow. `sim-engine-full` uncommented; aggregate `sim` picks it up. `SAMPLE_BIT_ON_SCL` / `DRIVE_BIT_ON_SCL` deferred to Step 19.
 
 ---
 
@@ -396,291 +402,301 @@ and result-ring wrap-around.
 
 ## 🔲 Phase 1 --- Engine core
 
-### 🔲 Step 7 --- `Opcode` enum + `Instruction` bundle
+### ✅ Step 7 --- `Opcode` enum + `Instruction` bundle
 
-**Goal:** lock the externally visible 16-bit instruction encoding.
-This is the bytecode wire-format contract --- changing it later is
-a breaking change for every deployed Mole.
+**What landed:**
 
-**Files:** `src/hw/Instruction.scala`, `src/sim/InstructionSim.scala`.
+- **Files:** `src/hw/Instruction.scala` (new),
+  `src/sim/InstructionSim.scala` (new),
+  `Makefile` (`sim-isa` uncommented + added to `sim` aggregate +
+  `.PHONY`).
+- **Wire-format contract.** 16-bit fixed-width instructions,
+  opcode at `[15:12]`, flag triple `expect[2]/mask[1]/capture[0]`
+  on every bearer opcode (AGENTS §3.9 / §3.10). Pre-Phase-0 the
+  binary encoding is still mutable (AGENTS §3.17); once the Rust
+  host encoder ships its first tagged release, this becomes a
+  stable contract.
+- **Opcode assignment** (locked here as the wire-format binding):
 
-**Suggested IO:**
-- `Opcode` SpinalEnum with exactly the 12 opcodes listed in
-  ROADMAP §"ISA" (`EMIT_BIT`, `EMIT_QUARTER`, `STRETCH_SCL`,
-  `WAIT_ON`, `SET_BUS_MODE`, `SAMPLE_BIT_ON_SCL`,
-  `DRIVE_BIT_ON_SCL`, `JMP`, `BRANCH_ON`, `HALT`, `MARK`,
-  `LOAD_TIMING`). Reserved v0.5 opcodes (`WAIT_ADDRESSED`,
-  `MISMATCH_CLEAR`, `FLAG_CLEAR`, `CAPTURE_RUN`, `CALL`, `RET`)
-  occupy fixed encoding slots **but no implementation** in v0
-  (only four reserved opcode slots are available, so at most
-  four of the six v0.5 candidates can land before an ISA-width
-  bump).
-- `Instruction` bundle: opcode field + operand fields, packed to
-  16 bits.
+  ```
+  0x0 HALT             0x1 EMIT_BIT           0x2 EMIT_QUARTER
+  0x3 STRETCH_SCL      0x4 WAIT_ON            0x5 BRANCH_ON
+  0x6 JMP              0x7 SET_BUS_MODE       0x8 LOAD_TIMING
+  0x9 MARK             0xA SAMPLE_BIT_ON_SCL  0xB DRIVE_BIT_ON_SCL
+  0xC WAIT_ADDRESSED   0xD MISMATCH_CLEAR     0xE FLAG_CLEAR     0xF CAPTURE_RUN
+                       (the four 0xC..0xF slots are reserved for v0.5;
+                       round-trip via `ReservedV05` carrier; engine traps
+                       at fetch when Step 8 / 11 land.)
+  ```
 
-**TX symbol --- locked at 2 bits per line:**
-The per-line drive operand is **2 bits** carrying a symbolic
-intent (`tx_symbol`), not a raw electrical state. It appears in
-three opcodes:
-- `EMIT_BIT.tx_symbol` --- SDA only.
-- `EMIT_QUARTER.sda_symbol` + `EMIT_QUARTER.scl_symbol` --- both
-  lines (two 2-bit fields, 4 bits total).
-- `DRIVE_BIT_ON_SCL.tx_symbol` --- SDA only (target-side,
-  external SCL).
+  `HALT = 0x0` so a zero-initialized SPRAM word (or fetch off
+  end-of-program) traps cleanly instead of free-running as
+  `EMIT_BIT`.
+- **`TxSymbol` (2 bits)** `dominant=00`, `recessive=01`, `hiz=10`,
+  `reserved=11` per AGENTS §3.11. Reserved encoding round-trips
+  but the engine refuses to execute it in v0 --- it is the
+  `raw_override` slot held for v0.5.
+- **`BusMode` (3 bits)** deliberately non-sequential
+  (`i2c=0b000`, `i3c-OD=0b001`, `i3c-PP=0b110`, `hdr-ddr=0b111`)
+  so `mode[2]` directly carries the SCL high-half drive class
+  (0 = OD-release, 1 = PP-high) and `mode[1:0]` directly
+  indexes the active timing divider. Encoded as a SpinalEnum with
+  a named encoding (`busModeWire`).
+- **`CondCode` (4 bits, shared `BRANCH_ON` / `WAIT_ON` namespace
+  per AGENTS §3.14):** `ALWAYS`, `MISMATCH`, `NOT_MISMATCH`,
+  `START_SEEN`, `STOP_SEEN`, `SDA_LOW`, `SDA_HIGH`, `SCL_HIGH`,
+  `TIMEOUT`, `NOT_TIMEOUT` for codes 0..9; 0xA..0xF reserved
+  (round-trip cleanly, engine traps at fetch in Step 8 / 11).
+- **`Instruction` ADT.** Pure-Scala `sealed trait` + one case
+  class per opcode + a `ReservedV05(opcode, payload)` carrier for
+  the four 0xC..0xF slots. The carrier's constructor enforces
+  `!Opcode.isV0(opcode)` and `payload < 4096`. Operand fields use
+  `Int` for now (e.g. `LoadTiming.reg: Int`); promotion to a
+  typed enum (`TimingReg`) waits for the corresponding register
+  file in Step 11.
+- **`Instruction.encode` / `Instruction.decode`.** Pure-Scala
+  reference implementation; the future Rust host encoder is the
+  runtime authority, this pair is its sim-time twin and a
+  cross-validation oracle. Does **not** elaborate into RTL ---
+  input is Scala case classes, return is `scala.Int`, never
+  called from inside any `Component` body. `BranchOn` uses
+  two's-complement encoding on the wire and `signExtend8` on
+  decode to recover signed `-128..127` offsets.
+- **`InstructionWord` Bundle.** Thin opcode-plus-12-bit-payload
+  bundle, intentionally not per-opcode field-decomposed --- the
+  Step-8 fetch FSM slices `payload` per-opcode against the
+  layouts in the case-class doc comments.
+- **Divergence from the hint:**
+  - The hint says "`Instruction` bundle: opcode field + operand
+    fields, packed to 16 bits". The case-class ADT + a thin
+    `InstructionWord` Bundle is what shipped; per-opcode operand
+    Bundles would force every consumer to import a per-opcode
+    type and would bake the layout decision twice (Scala case
+    class + Bundle). Keeping `InstructionWord` as opcode +
+    raw payload lets each engine consumer slice it against its
+    own operand layout. If Step 8 finds the slice ergonomics
+    awkward, per-opcode Bundles can be added without touching
+    the wire format.
+  - The hint's cond-code list reads
+    "`ALWAYS, MISMATCH, NOT_MISMATCH, START_SEEN, STOP_SEEN,
+    SDA_LOW, SDA_HIGH, SCL_HIGH, TIMEOUT, NOT_TIMEOUT`" ---
+    exactly what shipped. A scratch draft had `NEVER` at slot 1
+    (a typed no-op) instead of `SDA_HIGH`; replaced before the
+    sim coverage was wired up so all 10 in-use slots match the
+    TODO spec.
+- **Sim:** `InstructionSim` runs as a plain Scala `App` (no
+  `SimConfig.compile` --- mirrors `MoleConfigSim` /
+  `OpenDrainBusSim`). Covers:
+  - exhaustive round-trip for `EMIT_BIT` (4 tx × 8 flag combos),
+    `EMIT_QUARTER` (4 sda × 4 scl × 8 flag combos),
+    `SAMPLE_BIT_ON_SCL` (8 flag combos), `DRIVE_BIT_ON_SCL`
+    (4 tx × 8 flag combos), `HALT` (16 statuses), all four
+    `SET_BUS_MODE` symbols, all 256 `MARK` labels, all 4096
+    `STRETCH_SCL` / `JMP` operand values;
+  - full signed-byte sweep `-128..127` on `BRANCH_ON` for every
+    cond code (16 × 256 round-trips); 6 timeout samples × 16
+    cond codes on `WAIT_ON`; 4 regs × 6 divider samples on
+    `LOAD_TIMING`; 4 reserved opcode slots × 6 payload samples
+    on `ReservedV05`;
+  - structural assertions: opcode at `[15:12]`, per-opcode
+    field positions per the docstring tables, reserved-bit
+    slices encode to zero, and a dedicated flag-triple-at-`[2:0]`
+    invariant block covering every bearer opcode (AGENTS §3.10);
+  - golden encodings (e.g. `EMIT_BIT(dom,0,0,0) = 0x1000`,
+    `BRANCH_ON(always,-1) = 0x50FF`, `ReservedV05(captureRun,
+    0xFFF) = 0xFFFF`) to catch silent field-shift regressions
+    that round-trip cleanly but produce wrong wire words;
+  - range-rejection: every encode that takes a numeric operand
+    has at least one `IllegalArgumentException` assertion for
+    its boundary +1 value.
+- **Makefile:** `sim-isa` uncommented; runs as part of `make sim`.
+- **Not landed here (deferred to later steps):**
+  - The engine's RTL fetch decoder + per-opcode semantics
+    (Step 8 onward).
+  - Engine-side trap behaviour for reserved opcodes and reserved
+    cond codes (Step 8 / 11).
+  - The `Instruction.scala` `Bits(16 bits)` Bundle decomposition
+    per opcode --- the current `InstructionWord` keeps the
+    payload raw and per-opcode slicing lives in the consumer.
 
-`EMIT_BIT` does **not** carry an SCL drive field. SCL is
-engine-generated from the `BUS_MODE` register per ROADMAP §"Bus
-mode register" and §"Canonical EMIT_BIT shape". The only path to
-per-quarter SCL control is dropping to `EMIT_QUARTER`. In target
-role the engine releases SCL entirely; `DRIVE_BIT_ON_SCL` /
-`SAMPLE_BIT_ON_SCL` pace off external SCL edges.
+### ✅ Step 8 --- `BitCycleEngineCore` + `QuarterBitTimer` + `BusMode` + `Revision`
 
-The 2-bit encoding:
+**What landed:**
 
-```
-tx_symbol[1:0]:
-  00 = dominant     pull bus toward dominant state
-  01 = recessive    release / drive bus toward recessive state
-  10 = hiz          driver disabled (true Hi-Z, no active drive)
-  11 = reserved     held for v0.5 raw_override escape hatch
-```
+- **Files:** `src/hw/Revision.scala`, `src/hw/QuarterBitTimer.scala`,
+  `src/hw/SclWaveformGen.scala`, `src/hw/BusMode.scala`,
+  `src/hw/BitCycleEngineCore.scala`. All new. No `Makefile`
+  change --- the smoke sim lands with Step 9.
+- **`Revision`** is a Scala `object` that reads
+  `-Drevision.{major,minor,patch}` from `sys.props` with defaults
+  matching `Makefile`'s `REVISION_*`. Exposes `wordLo` (low 16
+  bits) and `wordHi` (high 16 bits) as `Int`, plus `hwLo` / `hwHi`
+  as fixed `Bits(16 bits)` literals. The 32-bit word lands in the
+  result ring as two consecutive halves, low first (matches the
+  little-endian byte stream the host expects).
+- **`QuarterBitTimer`** is a `Component` with
+  `reload` / `load` / `enable` / `tick` IO. Counter width sized
+  from a constructor `maxReloadValue` (default `1023` = the
+  10-bit `LOAD_TIMING` divider field, so the same instance
+  survives Step 11 without re-elaboration). `load` (level)
+  forces the counter to `reload` next edge with no tick;
+  `enable` runs the counter down by one per cycle and pulses
+  `tick` on underflow (re-loading from `reload` the same edge).
+  Documented period: `reload + 1` enable cycles per tick.
+- **`SclWaveformGen`** is a pure-Scala `object` with one
+  combinational helper `apply(quarterIndex: UInt): TxSymbol.E`
+  that returns `dominant` for Q0/Q1 and `recessive` for Q2/Q3.
+  Returning a `TxSymbol.E` (and not a raw drive pair) is what
+  lets the engine route the SCL waveform through the same
+  `SymbolDecoder` as SDA, so the Q2/Q3 high half automatically
+  becomes OD-release under `i2c` / `i3c-OD` and PP-high under
+  `i3c-PP` / `hdr-ddr` with no duplicate logic.
+- **`BusMode.scala`** adds two engine-side helpers next to the
+  enum (which still lives in `Instruction.scala` as the host-side
+  wire-contract source of truth): `BusModeOps.isPpClass(busMode)`
+  for the `mode[2]` read, and `SymbolDecoder(txSymbol, busMode)`
+  as the *one* `(tx_symbol, BUS_MODE) → (driveLow, driveHigh)`
+  decoder per the ROADMAP §"TX symbol" table. Decoder is
+  structurally incapable of asserting both `driveLow` and
+  `driveHigh` together (bus contention) by inspection of the
+  table.
+- **`BitCycleEngineCore`** is a `Component(MoleConfig)` with one
+  `StateMachine` (`Idle → Fetch → FetchWait → Decode →
+  (EmitBit) → Fetch`, plus a parallel `Halt` exit that emits
+  the two `Revision` halves and returns to `Idle`). Bus pads
+  are `Reg(Bool())`s at component scope per the
+  `AGENTS.md` §"Bus-shaped FSM idiom"; SDA latches on entry to
+  `EmitBit` (held for the full bit by spec), SCL updates on
+  each timer tick. Between bits the regs hold their `Q3`
+  values --- which is the canonical "SCL stays high between
+  bits" behaviour.
+- **Trap policy (Step 8 only):** the decode `switch` covers
+  `HALT` / `SET_BUS_MODE` / `EMIT_BIT` explicitly and routes
+  *every other opcode* (including the four 0xC..0xF reserved
+  v0.5 slots) to the same `Halt` exit. Step 10 / 11 peel off
+  the real implementations; Step 11 also grows the `HALT`
+  word's status field that distinguishes "clean halt" from
+  "trap on unknown opcode".
+- **Result-ring writes** go to fixed addresses `programWordCount`
+  and `programWordCount + 1` in Step 8 --- there is no write
+  pointer yet. The proper ring pointer (with `MARK` records,
+  per-write increment, and overflow handling) lands in
+  Step 11.
+- **Quarter-bit pacing.** Per ROADMAP §"Quarter-bit timing", the
+  fabric clock is the quarter-bit clock --- the timer divides
+  the fabric clock by `quarterPeriodCyclesReset` (default 12 at
+  48 MHz → 4 MHz quarter rate → 1 MHz bit rate). Each `EMIT_BIT`
+  is therefore 4 × 12 = 48 fabric cycles plus the 3-cycle
+  fetch/decode overhead between bits. Step 11's `LOAD_TIMING`
+  swaps the divider word at runtime by driving `timer.io.reload`
+  from a per-`BusMode` register file.
 
-Symbol → electrical mapping is owned by `BUS_MODE` (see Step 8
-and ROADMAP §"TX symbol"); the engine knows nothing about which
-protocol applies. In OD modes `dominant`=OD-low,
-`recessive`=OD-release (Hi-Z + pull-up wins). In PP modes
-`dominant`=PP-drive-0, `recessive`=PP-drive-1. `hiz` is always
-driver-off. Do **not** repurpose the reserved `11` encoding ---
-it is the `raw_override` slot reserved for v0.5.
+**Divergence from the Step 8 hint block:**
 
-**SET_BUS_MODE encoding:** 3 bits of `mode[2:0]` = 3 bits
-operand. Encoder accepts symbolic `{i2c, i3c-OD, i3c-PP,
-hdr-ddr}` and maps to the right `mode[2:0]` per ROADMAP §"Bus
-mode register" table. All four combinations are used (was: 4th
-slot reserved in earlier drafts; `hdr-ddr` now occupies it).
+- **`BusMode.scala` does not redeclare the enum.** The
+  SpinalEnum lives once in `Instruction.scala` (so the host
+  encoder and engine RTL share the same wire encoding). This
+  file just adds engine-side helpers (`BusModeOps`,
+  `SymbolDecoder`).
+- **Trap-to-Halt for unrecognised opcodes** was not spelled out
+  in the hint; the alternative ("hold in Decode forever") would
+  produce a deadlock indistinguishable from a stuck FSM. The
+  trap path is the safer Step 8 placeholder.
+- **`HALT` writes two 16-bit halves**, not one. The Revision
+  word is 32 bits per `AGENTS.md` §"REVISION word convention";
+  the result ring is 16-bit-word-grained per `SpramController`.
+  Two writes (low first) is the natural split.
 
-**Engine flags + cond-code namespace:** `BRANCH_ON` and `WAIT_ON`
-share field shape (`[11:8]cond_code [7:0]operand`) and the same
-4-bit cond-code namespace; only operand semantics differ
-(signed-PC-offset vs unsigned-quarter-timeout). Codes 0..9 are
-in use (`ALWAYS`, `MISMATCH`, `NOT_MISMATCH`, `START_SEEN`,
-`STOP_SEEN`, `SDA_LOW`, `SDA_HIGH`, `SCL_HIGH`, `TIMEOUT`,
-`NOT_TIMEOUT`); 10..15 reserved for v0.5. See ROADMAP §"Engine
-flags --- unified condition codes". Sticky engine flags
-(`MISMATCH_FLAG`, `TIMEOUT_FLAG`, `START_FLAG`, `STOP_FLAG`)
-are set by the engine and cleared only by the next opcode that
-would write them (or by the future v0.5 `FLAG_CLEAR`).
+**Sim:** none in this step. The `BitCycleEngineSmokeSim` and the
+`sim-engine-smoke` Makefile target land with Step 9.
 
-**Encoding width: 16-bit fixed.** Every opcode is exactly one
-16-bit word. The flag triple (`expect`/`mask`/`capture`), where
-present, is at fixed bit positions `[2]=expect`, `[1]=mask`,
-`[0]=capture`. Symbol fields stay at the high end; reserved
-bits fill the middle. Locked per-opcode field layout (matches
-ROADMAP §"Encoding width"):
+**Open design decisions held for later:**
 
-```
-EMIT_BIT           [15:12]op [11:10]tx_symbol [9:3]reserved [2]expect [1]mask [0]capture
-EMIT_QUARTER       [15:12]op [11:10]sda_symbol [9:8]scl_symbol [7:3]reserved [2]expect [1]mask [0]capture
-STRETCH_SCL        [15:12]op [11:0]n_quarters
-WAIT_ON            [15:12]op [11:8]cond_code [7:0]timeout_quarters_unsigned
-SET_BUS_MODE       [15:12]op [11:9]mode [8:0]reserved
-SAMPLE_BIT_ON_SCL  [15:12]op [11:3]reserved [2]expect [1]mask [0]capture
-DRIVE_BIT_ON_SCL   [15:12]op [11:10]tx_symbol [9:3]reserved [2]expect [1]mask [0]capture
-JMP                [15:12]op [11:0]addr
-BRANCH_ON          [15:12]op [11:8]cond_code [7:0]pc_rel_offset_signed
-HALT               [15:12]op [11:8]status [7:0]reserved
-MARK               [15:12]op [11:4]label [3:0]reserved
-LOAD_TIMING        [15:12]op [11:10]reg [9:0]divider_word
-```
+- Sticky-flag clearing semantics for `WAIT_ON` (Step 10).
+- Result-ring write pointer + overflow handling + `MARK`
+  timestamp width (Step 11).
+- `HALT` status field encoding (clean / trap / overflow ---
+  Step 11 or Step 12).
 
-`JMP` operand is **12-bit absolute address** → 4096-instruction
-program limit (= 8 KB). `BRANCH_ON` operand is **8-bit signed
-PC-relative offset** → ±128 instructions. Long-range conditional
-branches expand to `BRANCH_ON cond, near_label` + `JMP
-far_label` in the SDK. Reject programs larger than 4096 insns
-at encode time with a clear error; a v1 "jumbo-address" opcode
-can lift the limit if a future workload demands it.
+### ✅ Step 9 --- `BitCycleEngineSmokeSim`
 
-**Rejected: 8-bit and variable-length encoding.** See ROADMAP
-§"Encoding width". Only `SET_BUS_MODE` (7 bits) would fit in
-8 bits; `EMIT_QUARTER` alone needs the full operand width and
-every wait / branch / timing opcode needs the full 16.
-Variable-length saves ~1 byte per `SET_BUS_MODE` at the cost of
-variable fetch, variable PC increment, branch-target alignment,
-and a substantially more complex decoder / sim / disassembler.
-The SPRAM headroom on UP5K (~16K instructions per bank vs
-~2,500 for a worst-case I3C SDR frame) makes the savings
-unspendable anyway.
+**What landed:**
 
-**Rejected: byte-level emits.** No `EMIT_BYTE`, `EMIT_WORD`, or
-any "emit N bits in one fetch" opcode. See ROADMAP §"Why no
-byte-level emit". Short version: a "byte" on the wire is **9
-bits, not 8**, and the 9th (ACK on I2C/I3C address+data, T-bit
-on I3C SDR data and CCC) is structurally different from the
-first 8 (different driver, different OD/PP, different
-`expect`). The SDK provides `write-byte` as a macro that
-expands to 9 `EMIT_BIT`s with the correct per-bit operands;
-`(map write-byte ...)` handles multi-byte bursts. Any future
-proposal to re-add a byte-level emit is a sign the SDK macro
-layer needs a new ergonomic instead.
+- **Files:** `src/sim/BitCycleEngineSmokeSim.scala` (new).
+- **DUT wrapper:** `BitCycleEngineSmokeDut` --- in-file
+  `case class` that wires a `BitCycleEngineCore` to a
+  `SpramController(useBlackBox = false)` and exposes
+  `loaderWrite` / `start` / `done` / `bus` to the test bench.
+  Lives in `src/sim/` so the `Makefile`'s `HW_SRCS` glob does not
+  pick it up at synthesis time. The wrapper is *not* a
+  `MoleTop` --- the UART loader / drainer integration is Phase 2.
+- **Program:** for each run, the sim hand-encodes 11 instructions
+  via `Instruction.encode` (the Scala sim oracle from Step 7):
+  one `SET_BUS_MODE`, then 9 `EMIT_BIT`s (the byte `0x55` MSB
+  first followed by a `hiz` ACK slot), then `HALT 0`. The bytes
+  drive the loader-write Stream into program memory one word
+  per handshake; `start` rises once the load completes.
+- **Two runs:** `i3c-OD` and `i3c-PP`. The byte is identical;
+  only the active `BUS_MODE` differs. That is the entire point ---
+  any engine that bakes "OD" into a hard-coded SCL waveform mux
+  fails the second run.
+- **Per-cycle trace.** From the moment `done` falls until it
+  re-rises, the sim records a `BusSample(sdaLow, sdaHigh, sclLow,
+  sclHigh)` tuple per fabric cycle. This is the level of
+  visibility you only get because we own the DUT --- a real-world
+  scope cannot tell "released" from "driven high" through a pull
+  resistor.
+- **Trace assertions:**
+  - Exactly 9 contiguous `sclLow = True` intervals (one per
+    `EMIT_BIT`). The engine drives SCL low only during `Q0 + Q1`;
+    `Q2 + Q3` and the fetch / decode gap between bits are always
+    `sclLow = False`.
+  - Each interval is `2 * quarterPeriodCyclesReset ± 2` fabric
+    cycles wide (default 24 ± 2 = 22..26). The ± 2 covers the
+    one-cycle aliasing of the sampler vs the SCL reg's update
+    edge.
+  - SDA in the middle of each low interval matches the symbol
+    decoder's expected `(driveLow, driveHigh)` for that bit's
+    `tx_symbol` under the active `BusMode` --- the sim mirrors the
+    decode table in a pure-Scala `expectedSda` oracle.
+  - Between every pair of consecutive low intervals,
+    `sclDriveHigh` matches the expected drive class: `False` for
+    every OD-class `BusMode`, `True` for every PP-class. This is
+    the "released vs driven high" check the Step 9 hint called
+    out.
+  - Bus contention (`driveLow && driveHigh` on the same line in
+    the same cycle) is asserted out on every cycle for both
+    lines. Structural property of `SymbolDecoder` (no decode row
+    asserts both); the assertion catches a future regression that
+    wires the decoder wrong.
+- **Makefile:** `sim-engine-smoke` uncommented as a top-level
+  target. Added to the aggregate `sim` target and to
+  `.PHONY`.
+- **What we deliberately do *not* assert.** Cycle-exact
+  duration of the trailing tail after the 9th SCL-low interval
+  (the engine sits in `HALT` result-ring writes for two cycles
+  plus arbitration with the loader port that is now idle; SDA /
+  SCL regs hold their `Q3` values throughout, which is correct
+  but verbose to assert on). A future Step 12 full-ISA sim
+  validates the result-ring writes properly.
 
-**Rejected: per-bit SCL drive in `EMIT_BIT`'s bitstream.** SCL
-drive style is a per-frame-phase choice (handful of times per
-transaction), not a per-bit choice --- so it lives in
-`BUS_MODE`, set by `SET_BUS_MODE`. The earlier design that put
-SCL drive in `EMIT_BIT` had an unresolvable contradiction (a
-single drive field cannot encode the canonical
-low/low/high/high waveform); see ROADMAP §"Canonical EMIT_BIT
-shape". `EMIT_QUARTER` retains per-quarter SCL drive via
-`scl_symbol` --- that is the only escape hatch for SCL
-glitching and is sufficient for compliance test purposes.
+**Divergence from the Step 9 hint block:**
 
-**Rejected: folding `tx_symbol` into `BUS_MODE`.** `BUS_MODE`
-owns the *mapping* (slow state: which electrical class
-`dominant`/`recessive` decode to). The bitstream carries the
-*value* (fast data: which symbol this particular bit is).
-Lumping the value into the mapping turns every bit-level
-driver flip into a `SET_BUS_MODE` churn. See ROADMAP §"Why SDA
-does *not* live in `BUS_MODE`" for the full argument.
+- **No `OpenDrainBusSim`-style wired-AND model in the trace.**
+  The hint suggested "a sim helper that distinguishes 'pulled
+  high by pull-up' from 'driven high by the DUT' on the wired
+  bus". We have something better: direct visibility into the
+  engine's `driveLow` / `driveHigh` registers. A pull-up model
+  on top of those would only obscure the distinction the engine
+  is responsible for making.
+- **Single program, two runs** instead of two distinct programs.
+  Same `0x55 + hiz` byte for both modes; only `SET_BUS_MODE`
+  changes. Makes the contrast between the two traces direct ---
+  any difference is attributable to the mode switch.
 
-**Kept (the dual question): `EMIT_BIT` survives the same
-scrutiny.** Could the same argument force a drop to
-`EMIT_QUARTER`-only? No. See ROADMAP §"Why not
-`EMIT_QUARTER`-only?". The asymmetry: a wire byte's 9-bit
-substructure is *structurally non-uniform* (9th bit always
-different), so no byte-level instruction can compress it
-losslessly. A wire bit's 4-quarter substructure is *structurally
-uniform* in normal operation (canonical SCL pulse + steady
-SDA), so `EMIT_BIT` compresses it losslessly --- and
-`EMIT_QUARTER` exists for the rare non-uniform case (glitch
-injection), exactly as per-bit `EMIT_BIT` chains exist for the
-rare non-uniform case inside a byte. `EMIT_BIT` is the smallest
-wire unit at which substructure becomes naturally uniform; that
-is what makes the grain non-arbitrary.
+**Sim run:** `make sim-engine-smoke`.
 
-**Sim notes:** round-trip encode/decode every legal opcode +
-operand range; round-trip all four `tx_symbol` values
-(`dominant`, `recessive`, `hiz`, reserved) for SDA in
-`EMIT_BIT` / `DRIVE_BIT_ON_SCL` and for both axes in
-`EMIT_QUARTER` --- assert the `reserved`/`raw_override`
-encoding round-trips but the engine refuses to decode it in v0.
-Round-trip all four `SET_BUS_MODE` symbols (`i2c`, `i3c-OD`,
-`i3c-PP`, `hdr-ddr`). Round-trip every in-use cond-code (0..9)
-on both `BRANCH_ON` and `WAIT_ON`; assert codes 10..15 round-
-trip but decode to a "trap" the engine refuses to execute.
-Assert the flag triple lives at `[2:0]` on every bearer opcode
-(unaligned positions are a regression).
-
-**Makefile:** uncomment `sim-isa`.
-
-### 🔲 Step 8 --- `BitCycleEngineCore` + `QuarterBitTimer` + `BusMode` + `Revision`
-
-**Goal:** the smallest engine that decodes `EMIT_BIT` +
-`SET_BUS_MODE` + `HALT` and nothing else. Drives the bus with
-quarter-bit timing derived from `MoleConfig.quarterPeriodCyclesReset`.
-Generates canonical SCL waveform internally per current `BUS_MODE`.
-Reports a fixed `REVISION` word on `HALT`.
-
-**Files:** `src/hw/QuarterBitTimer.scala`,
-`src/hw/BitCycleEngineCore.scala`, `src/hw/BusMode.scala`,
-`src/hw/SclWaveformGen.scala`, `src/hw/Revision.scala`.
-
-**Design notes:**
-- Bus drives are **registered**, not per-state combinational
-  (see `AGENTS.md` §"Bus-shaped FSM idiom").
-- **`BusMode` register (3 bits)** holds the current active mode
-  per ROADMAP §"Bus mode register": `mode[1:0]` = active timing
-  divider (`i2c` / `i3c-OD` / `i3c-PP` / `hdr-ddr`), `mode[2]`
-  = SCL high-half drive class (OD-release vs PP-high; `mode[2]`
-  follows from `mode[1:0]` per the named-symbol table but is
-  carried explicitly to keep the SCL-gen path independent of
-  the mode decode). One writer (`SET_BUS_MODE`), two readers
-  (timing-divider mux, `SclWaveformGen`). Reset value: `i2c`
-  (safe default --- OD release on idle bus).
-- **`SymbolDecoder`** is a pure combinational function
-  `(tx_symbol, BUS_MODE) → (driveLow, driveHigh)` per ROADMAP
-  §"TX symbol" decode table. Lives once in the engine; every
-  pad consumer (SDA-from-EMIT_BIT, SDA-from-EMIT_QUARTER,
-  SCL-from-EMIT_QUARTER, SDA-from-DRIVE_BIT_ON_SCL) routes
-  through it. No per-pad mode state.
-- **`SclWaveformGen`** emits the engine-generated SCL
-  `tx_symbol` stream during `EMIT_BIT`: `dominant` for Q0/Q1,
-  `recessive` for Q2/Q3. That stream then goes through the
-  shared `SymbolDecoder` with the current `BUS_MODE`, so the
-  Q2/Q3 high half automatically becomes OD-release under
-  `i2c`/`i3c-OD` and PP-high under `i3c-PP`/`hdr-ddr` without
-  duplicate decode logic.
-- **Canonical `EMIT_BIT` shape (Model A).** One `EMIT_BIT` = one
-  full wire bit = 4 quarters. SDA is held at the instruction's
-  `tx_symbol` across all 4 quarters; the symbol decodes against
-  the active `BUS_MODE`. SCL is driven by `SclWaveformGen` ---
-  *not* by the bitstream. The SDK emits one `EMIT_BIT` per
-  wire bit and never has to think about the SCL waveform. See
-  ROADMAP §"Canonical EMIT_BIT shape" for the contract.
-- **`EMIT_QUARTER` overrides `SclWaveformGen`.** When the
-  current instruction is `EMIT_QUARTER`, the SCL pad takes its
-  `tx_symbol` from the bitstream's `scl_symbol` field instead
-  of `SclWaveformGen`, for that single quarter. SDA likewise
-  takes `sda_symbol` from the bitstream. Both still flow
-  through `SymbolDecoder`. This is the only path to per-quarter
-  SCL control. **Target-role lint:** the SDK rejects
-  `EMIT_QUARTER` with `scl_symbol = recessive` when `BUS_MODE`
-  is PP class (would request PP-drive-1 of SCL --- target must
-  never do that). The engine ignores that combination as
-  defense in depth.
-- Pads are push-pull-capable (SB_IO push-pull mode) so the
-  PP-class `tx_symbol = recessive` decode (`driveHigh := True`)
-  actively drives high (for I3C PP). External pull-ups still
-  present so OD recessive works for I2C / I3C OD; push-pull
-  always wins against the pull-up.
-- Quarter-bit timer is a down-counter loaded with the current
-  active divider's `quarterPeriodCycles` value (selected by
-  `BUS_MODE.mode[1:0]`); the bit FSM advances one quarter-state
-  per timer underflow.
-- `Revision.scala` reads `sys.props.getOrElse("revision.major",
-  "0").toInt` etc. with defaults matching the Makefile.
-
-**Sim:** Step 9.
-
-### 🔲 Step 9 --- `BitCycleEngineSmokeSim`
-
-**Goal:** load a hand-encoded program that emits one byte (e.g.
-`0x55`) onto the sim bus, then `HALT`. Assert the wire trace
-matches the expected quarter-bit pattern.
-
-The program must cover both engine-generated SCL drive classes:
-
-**Run 1: `SET_BUS_MODE i3c-OD` + EMIT_BIT × 9.** Expected SCL
-trace per bit: pulled low Q0/Q1, **released** (Hi-Z, pull-up
-wins) Q2/Q3.
-
-**Run 2: `SET_BUS_MODE i3c-PP` + EMIT_BIT × 9.** Expected SCL
-trace per bit: pulled low Q0/Q1, **actively driven high (PP)**
-Q2/Q3.
-
-A sim helper that distinguishes "pulled high by pull-up" from
-"driven high by the DUT" on the wired bus is what catches an
-engine that ignores `BUS_MODE.mode[2]` or wires `SclWaveformGen`
-to a stuck mode.
-
-Also cover both `tx_symbol` encodings of "1" for SDA in
-`EMIT_BIT`:
-- **OD release** (`tx_symbol = recessive` under `i3c-OD`) ---
-  symbol decoder produces `(driveLow=0, driveHigh=0)`; bus
-  floats, sim pull-up wins.
-- **PP high** (`tx_symbol = recessive` under `i3c-PP`) --- symbol
-  decoder produces `(driveLow=0, driveHigh=1)`; DUT actively
-  drives the wired bus high; pull-up irrelevant.
-
-`tx_symbol = hiz` is also exercised on at least one bit (the ACK
-slot is the natural place): decoder produces `(0, 0)`
-regardless of `BUS_MODE`.
-
-**Files:** `src/sim/BitCycleEngineSmokeSim.scala`.
-
-**Makefile:** uncomment `sim-engine-smoke`.
-
-### 🔲 Step 10 --- Async waits + stretch
+### ✅ Step 10 --- Async waits + stretch
 
 **Goal:** implement `EMIT_QUARTER`, `STRETCH_SCL`, and the
 unified `WAIT_ON cond, timeout` opcode. These are the
@@ -707,44 +723,238 @@ on external bus state.
   §"Engine flags --- unified condition codes" for the full
   flag and code list.
 
-### 🔲 Step 11 --- Control flow + bookkeeping + timing override
+**What landed:**
+- Three new `decodeState` arms (`emitQuarter`, `stretchScl`,
+  `waitOn`) and three matching execute states in
+  `BitCycleEngineCore.scala`.
+- Four sticky flag regs (`mismatchFlag`, `timeoutFlag`,
+  `startFlag`, `stopFlag`) cleared on `io.start` per ROADMAP
+  §"Engine flags". MISMATCH compare runs at the Q2 → Q3 sample
+  point in `emitBitState` (and on the lone tick of
+  `emitQuarterState`) gated by the `[2:0]` flag triple's
+  `mask` bit; `mask=0` leaves the flag sticky.
+- Two-FF synchronizer on `io.bus.{sda,scl}.read` plus 1-cycle
+  history regs (`sdaSampledPrev`, `sclSampledPrev` init `True`
+  to match the recessive idle bus) drive the combinational
+  `startEdge` / `stopEdge` pulses. Edges only ever update
+  `start/stopFlag` while `waitOnState` is armed for the
+  matching cond --- the re-arm-on-entry write in the WAIT_ON
+  decode arm clears stale state per ROADMAP §"START_FLAG and
+  STOP_FLAG".
+- `STRETCH_SCL`: `n = 0` is a no-op (skip the state, PC++);
+  otherwise drive SCL dominant for `n` quarter-bit ticks and
+  release SCL to recessive (decoded against `BUS_MODE`) on the
+  final tick so a following `WAIT_ON SCL_HIGH` does not
+  deadlock waiting for the engine itself to release.
+- `WAIT_ON`: 8-bit timeout in quarters with `timeout = 0` as
+  the "wait forever" sentinel (captured in
+  `waitTimeoutInfinite`); cond-first / timeout-second priority
+  on the cycle they both fire. Reserved cond codes `0xA..0xF`
+  (v0.5 slots) trap to `HALT` at decode time --- a forward-
+  deployed v0.5 program against a v0 engine surfaces as a
+  clean halt rather than an infinite wait.
+
+**Deferred to Step 11:** the `capture` bit (writes the sampled
+SDA value to the result ring --- needs the ring write pointer)
+and `BRANCH_ON cond` reading these flags.
+
+**Deferred to Step 19:** target-role helpers
+`SAMPLE_BIT_ON_SCL` / `DRIVE_BIT_ON_SCL` and the AGENTS §3.13
+"target never PP-drives SCL" lint (no role register yet).
+
+**Sim runs:** the Step 9 smoke sim still passes unchanged
+(EMIT_BIT path runs with `mask=0` in every test, so the new
+MISMATCH wiring is dormant); systematic per-opcode coverage
+including WAIT_ON paths lands in Step 12.
+
+### ✅ Step 11 --- Control flow + bookkeeping + timing override
 
 **Goal:** implement `JMP`, `BRANCH_ON cond, offset`, `MARK`,
 `LOAD_TIMING`. After this step the controller-side engine is
 ISA-complete for v0 (target-side opcodes land in Step 19).
 
-**Files:** extend `BitCycleEngineCore.scala`.
+**Files:** extended `src/hw/BitCycleEngineCore.scala` (no new
+files --- `timingRegs` lives as a 4-entry `Vec` inside the engine).
 
-**Design notes:**
-- `BRANCH_ON cond, offset` shares its 4-bit cond-code namespace
-  with `WAIT_ON` (same encoder enum, same engine decoder). The
-  `MISMATCH` / `NOT_MISMATCH` codes key off the sticky
-  `MISMATCH_FLAG` set by the most recent `EMIT_*` /
-  `SAMPLE_BIT_ON_SCL` / `DRIVE_BIT_ON_SCL` against its
-  `expect`/`mask`. The flag is sticky --- only the next
-  sampling opcode (or v0.5 `FLAG_CLEAR`) clears it.
-- Offset is 8-bit signed PC-relative (±128). Long-range
-  conditional branches expand to `BRANCH_ON cond, near` +
-  `JMP far` in the SDK.
-- `JMP addr` is 12-bit absolute (4096-insn program limit).
-- `MARK label` writes a (label, implicit-timestamp) tuple into
-  the result ring.
-- `LOAD_TIMING reg word` updates the quarter-bit divider word
-  for the selected timing register (`pp-freq`, `od-freq`,
-  `i2c-freq`, `hdr-ddr-freq`). Takes effect on the **next**
-  `EMIT_*` (or sample/drive) instruction whose `BUS_MODE`
-  selects that divider.
+**What landed:**
 
-### 🔲 Step 12 --- `BitCycleEngineSim` (full ISA)
+- **`JMP addr`** --- 12-bit absolute, wraps modulo `2^pcWidth`.
+  The host SDK is responsible for valid targets; the engine does
+  not range-check (out-of-range fetches manifest as reads from
+  the result-ring SPRAM region and almost always trap to the
+  malformed-instruction HALT).
+- **`BRANCH_ON cond, offset`** --- 4-bit cond + 8-bit signed
+  PC-relative offset. On taken: `pc := pc + 1 + sign_ext(offset)`
+  modulo `2^pcWidth`. On not-taken: `pc := pc + 1`. Reserved
+  cond codes (`0xA..0xF`) trap to the malformed-instruction
+  HALT. Cond evaluation uses a *flag-only* mux
+  (`evalCondFlagOnly`); the live-edge OR is specific to
+  `waitOnState` (BRANCH_ON does not race in-flight edges).
+- **`LOAD_TIMING reg word`** --- writes one of four 10-bit
+  divider words held in `timingRegs(0..3)`. The timer's
+  `io.reload` is combinationally muxed from
+  `timingRegs(busModeReg[1:0])`, so swapping `BUS_MODE` switches
+  the next quarter-bit period without an extra opcode.
+- **`MARK label`** --- 3-word ring record (see "Result-ring
+  format" below). Timestamp is a 32-bit fabric-cycle counter
+  reset on `io.start` (wraps at ~89.5 s @ 48 MHz). Timestamp is
+  latched at decode, written across three states so multi-cycle
+  writes do not race the running counter.
+- **`HALT status`** --- the existing two-word Revision write is
+  now followed by a third **HALT status word** at the reserved
+  `resultLimit` slot. Format documented in the engine doc
+  comment block. `enterHalt(status: Bits)` is the single helper
+  used by every trap path so latches stay consistent across
+  `is(Opcode.halt)`, the `default` arm, and the reserved-cond /
+  reserved-`tx_symbol` / invalid-`BUS_MODE` traps.
+- **CAPTURE bit** --- previously deferred from Step 10. Both
+  `EMIT_BIT` and `EMIT_QUARTER` latch `sdaSampled` into
+  `captureValueReg` at the same Q2 sample point as MISMATCH and
+  route through a new `captureWriteState` that pushes a 1-word
+  CAPTURE record before refetching.
+- **Malformed-instruction traps** --- in addition to the
+  reserved cond codes from Step 10, the engine now traps:
+  - Reserved `tx_symbol` (`0b11`) on `EMIT_BIT` / `EMIT_QUARTER`
+    (per AGENTS §3.11 the encoding is held for a v0.5
+    `raw_override` escape and must not be silently accepted).
+  - Invalid `BUS_MODE` wire values --- only `{0, 1, 6, 7}` are
+    legal per ROADMAP §"Bus mode register"; anything else
+    traps.
+  - The pre-existing reserved-cond trap in `WAIT_ON` now uses
+    the same `enterHalt` helper as everyone else.
+- **`done` semantics unchanged** --- still rises one cycle after
+  the final result-ring write fires, but the final write is now
+  `haltWriteStatusState` instead of `haltWriteHiState`.
 
-**Goal:** systematic coverage of every opcode + every operand
-field. Includes branch-taken / branch-not-taken pairs, stretch
-under measured-vs-programmed timing, async waits with timeout,
-result-ring overflow, mismatch tracking across multiple `EMIT_*`.
+**Result-ring format (v0, pre-Phase-0):**
 
-**Files:** `src/sim/BitCycleEngineSim.scala`.
+The ring lives at `[resultBase, resultLimit]` where `resultLimit
+= resultBase + resultWordCount - 1`. Layout:
 
-**Makefile:** uncomment `sim-engine-full`.
+- `resultBase` / `resultBase + 1` --- 32-bit Revision (always
+  first; written as part of the HALT tail).
+- `resultBase + 2 ..= recordLimit` --- record stream
+  (`recordLimit = resultLimit - 1`). Each record is 1 or 3
+  words tagged by the high 2 bits of word 0.
+- `resultLimit` --- reserved exclusively for the HALT status
+  word. An overflowing record stream cannot overwrite the HALT.
+
+Record encodings (`tag = word[15:14]`):
+
+- `00` CAPTURE (1 word): `[13:1]=0`, `[0]=captured SDA`.
+- `01` reserved.
+- `10` MARK (3 words): w0 `[13:8]=0 [7:0]=label`, w1
+  `timestamp[15:0]`, w2 `timestamp[31:16]`.
+- `11` HALT (1 word at `resultLimit`): `[13]=overflow`,
+  `[12]=mismatchAtHalt`, `[11:8]=status`, `[7:0]=0`.
+
+`mismatchAtHalt` is the *final* value of `MISMATCH_FLAG` --- it
+does not track "any mismatch ever seen" (a passing compare
+clears the flag per spec). `overflow` latches `True` the first
+time the engine tried to write a record that would not fit
+below `recordLimit`; subsequent CAPTURE / MARK opcodes silently
+drop their writes.
+
+Status codes `0x0..0xC` are caller-defined via the [[Halt]]
+opcode. Codes `0xD..0xF` are reserved for engine traps; today
+only `0xF` (malformed-instruction) is used. Per AGENTS §3.17
+the wire format above is mutable pre-Phase-0; the v0
+host-readback decoder lands in Phase 2 and will pin these
+encodings down.
+
+**Divergence from the original plan:**
+
+- Result-ring overflow is "set the flag, drop the record"
+  rather than "drop newest". Functionally equivalent here, but
+  worth noting in case Step 12's tests pin the exact behaviour.
+- No separate `TimingRegisters.scala` --- the file would have
+  held a 4-entry `Vec` of regs and nothing else, so it lives
+  inline in the engine. If a future step grows the timing-reg
+  block (e.g. read-back over UART) it can move out cheaply.
+- The 32-bit MARK timestamp is wider than the original "24-bit
+  or whatever fits" sketch. Rubber-duck flagged that 16-bit
+  wraps every 1.36 ms @ 48 MHz, which is shorter than a typical
+  compliance trace; 32-bit gives ~89.5 s and round MARK records
+  to 3 words, which is cleaner than a 2-word format with a
+  partial timestamp.
+
+**Sim:** none added in this step --- the full per-opcode
+coverage lands in Step 12. Existing `sim-config` /
+`sim-engine-smoke` continue to pass.
+
+**Makefile:** unchanged (Step 12 uncomments `sim-engine-full`).
+
+### ✅ Step 12 --- `BitCycleEngineSim` (full ISA)
+
+**What landed:**
+
+- **Files:** `src/sim/BitCycleEngineSim.scala` (new). 17 named
+  tests under one lazy-compiled `BitCycleEngineFullDut`
+  elaboration; entry point `mole.BitCycleEngineSim` runs the
+  full suite. Compile-once, doSim-many keeps Verilator cost
+  amortised across cases.
+- **DUT shape:** `BitCycleEngineFullDut` is the smoke-sim DUT
+  plus a debug read port that mux-takes the SPRAM read interface
+  while the engine is idle. Engine wins arbitration while
+  running; the test wins while halted. Avoids touching
+  `SpramController` (whose `mem` lives inside an `else` block and
+  is not externally visible). Lives in `src/sim/`; never
+  elaborates to RTL.
+- **DSL helpers:** `emitBit`, `emitQuarter`, `setMode`, `halt`,
+  `jmp`, `branchOn`, `waitOn`, `stretch`, `loadTiming`, `mark`
+  each return the wire word. `haltAt(ring, addr)` decodes the
+  HALT word into a typed `HaltWord(overflow, mismatch, status)`
+  case class. `revisionAt(ring)` returns the `(lo, hi)` pair at
+  `resultBase` / `resultBase+1`.
+- **Coverage matrix:**
+  - `revision-written` --- HALT writes Revision lo/hi verbatim at
+    `resultBase`/`resultBase+1`.
+  - `halt-status-passthrough` --- caller's 4-bit status code
+    survives into HALT word `[11:8]`.
+  - `jmp-forward` --- `JMP addr` jumps over a poison HALT.
+  - `branch-always-taken` --- `BRANCH_ON ALWAYS, +2` lands on
+    the right HALT.
+  - `branch-sda-low-taken` --- pre-drive SDA low; an
+    `EMIT_QUARTER(hiz, hiz)` registers the level;
+    `BRANCH_ON SDA_LOW, +2` takes.
+  - `wait-cond-hit` --- bus high at start; test drops SDA
+    mid-wait; engine clears TIMEOUT and falls through.
+  - `wait-timeout-hit` --- bus stuck high; `WAIT_ON(SDA_LOW, 4)`
+    times out; `BRANCH_ON TIMEOUT, +1` picks the right HALT.
+  - `mark-records` --- two MARKs land at `resultBase+2` and
+    `resultBase+5` as 3-word records; labels survive verbatim;
+    timestamps are monotonic.
+  - `capture-record` --- one `EMIT_BIT(hiz, capture=true)`
+    against SDA pre-driven high produces a CAPTURE record
+    `[15:14]=00, [0]=1`.
+  - `mismatch-tracking` --- one `EMIT_BIT(hiz, expect=true,
+    mask=true)` against SDA=low sets MISMATCH; HALT word's
+    `mismatch` bit is true.
+  - `branch-on-mismatch` --- as above, with `BRANCH_ON MISMATCH`
+    in between; takes.
+  - `load-timing` --- writes divider=2 to the i2c slot; measured
+    SCL-low width drops into the `[4,8]`-cycle window (vs the
+    default `~24`-cycle width).
+  - `stretch-scl` --- `STRETCH_SCL 5` holds SCL low for
+    `5 * (divider+1) ± 4` cycles.
+  - `reserved-opcode-trap` --- opcode 0xC (sampleBitOnScl,
+    target-role, unimplemented) traps to HALT status 0xF.
+  - `invalid-busmode-trap` --- `SET_BUS_MODE` with wire value 2
+    (not in {0,1,6,7}) traps to 0xF.
+  - `reserved-tx-symbol-trap` --- `EMIT_BIT` with tx_symbol=0b11
+    traps to 0xF.
+  - `ring-overflow` --- 12 MARKs into a 29-word record area;
+    the 10th overflows; HALT word's `overflow` bit is true.
+- **`SAMPLE_BIT_ON_SCL` / `DRIVE_BIT_ON_SCL`:** intentionally
+  not covered. These are target-role and land in Step 19 with
+  the actual controller-driven SCL stim setup; covering them
+  here would duplicate that test rig before it exists.
+- **Per-test ring size:** uses a small cfg
+  (`resultRingByteCount = 64` → 32 ring words, `programWordCount
+  = 64`) so overflow is exercisable in a handful of MARKs.
+- **Makefile:** uncommented `sim-engine-full`; added to
+  `.PHONY`; added to the aggregate `sim:` target after
+  `sim-engine-smoke`.
 
 ---
 
