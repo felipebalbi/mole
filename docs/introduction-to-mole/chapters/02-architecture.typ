@@ -1,8 +1,25 @@
 #import "../lib.typ": *
+#import "../figures/architecture.typ": architecture-figure
 
 // Architecture.
 
 #section-slide("02", "Architecture")
+
+#content-slide(
+  "The three boxes.",
+  kicker-text: "What's on the desk",
+)[
+  #v(0.4em)
+  #align(center)[
+    #box(width: 95%)[#architecture-figure]
+  ]
+  #v(0.4em)
+  #align(center)[
+    #text(font: font-serif, size: 16pt, style: "italic", fill: muted)[
+      Your laptop, an FPGA, and the part you're trying to talk to.
+    ]
+  ]
+]
 
 #content-slide(
   "Two layers. One contract.",

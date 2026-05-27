@@ -1,4 +1,5 @@
 #import "../lib.typ": *
+#import "../figures/quarter-bit-timing.typ": quarter-bit-figure
 
 // Quarter-bit timing.
 
@@ -69,16 +70,19 @@
   "What `EMIT_BIT` emits.",
   kicker-text: "Canonical waveform",
 )[
-  #code-panel(size: 15pt)[
-```
-Q0:  SDA <- new value     SCL  = low
-Q1:  SDA  = held          SCL  = low
-Q2:  SDA  = held          SCL <- high   (rising edge, sample)
-Q3:  SDA  = held          SCL  = high
-```
+  #v(0.2em)
+  #align(center)[
+    #box(width: 92%)[
+      #quarter-bit-figure(
+        sda-bits: ("hi", "hi", "hi", "hi"),
+        capture: 2,
+      )
+    ]
   ]
-  #v(0.4em)
-  #text(font: font-serif, size: 15pt, style: "italic", fill: muted)[
-    Need finer control? `EMIT_QUARTER` overrides any quarter.
+  #v(0.6em)
+  #align(center)[
+    #text(font: font-serif, size: 15pt, style: "italic", fill: muted)[
+      SDA stable across the SCL edge. Need finer control? `EMIT_QUARTER` overrides any quarter.
+    ]
   ]
 ]

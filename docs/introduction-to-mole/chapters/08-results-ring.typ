@@ -1,4 +1,5 @@
 #import "../lib.typ": *
+#import "../figures/ring-layout.typ": ring-layout-figure
 
 // Result ring + post-processing.
 
@@ -8,17 +9,13 @@
   "One header, three records",
   kicker-text: "What the engine writes",
 )[
-  #v(0.4em)
+  #v(0.3em)
   #align(center)[
-    #pill("REVISION", color: muted) #h(0.8em)
-    #text(size: 14pt, fill: muted)[(32-bit prefix)] #h(1.2em)
-    #pill("CAPTURE") #h(0.6em)
-    #pill("MARK") #h(0.6em)
-    #pill("HALT")
+    #box(width: 96%)[#ring-layout-figure]
   ]
-  #v(0.8em)
+  #v(0.6em)
   #bullets(
-    [Revision word at the base of the ring identifies the engine build.],
+    [Revision header identifies the engine build at the ring's base.],
     [Stream of records follows: bits sampled, breadcrumbs, end-of-run.],
     [Bounded ring in FPGA RAM. Host drains it over UART after `HALT`.],
   )

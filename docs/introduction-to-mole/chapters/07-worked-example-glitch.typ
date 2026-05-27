@@ -1,4 +1,5 @@
 #import "../lib.typ": *
+#import "../figures/quarter-bit-timing.typ": quarter-bit-figure
 
 // Worked example 2: glitch injection -- uppercase mnemonics + `;`
 // comments to match the golden fixture style.
@@ -17,6 +18,24 @@
     #v(0.8em)
     #text(font: font-serif, size: 18pt, style: "italic", fill: muted)[
       Does the target NACK, hang, or shrug it off?
+    ]
+  ]
+]
+
+#content-slide(
+  "The shape on the wire",
+  kicker-text: "Q2 dips while SCL rises",
+)[
+  #v(0.3em)
+  #align(center)[
+    #box(width: 92%)[
+      #quarter-bit-figure(
+        sda-bits: ("hi", "hi", "glitch", "hi"),
+        capture: none,
+        title: [
+          A bit that should look recessive end-to-end has a deliberate dip on its sample edge.
+        ],
+      )
     ]
   ]
 ]
