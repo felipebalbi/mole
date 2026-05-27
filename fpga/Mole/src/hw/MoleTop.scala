@@ -160,6 +160,24 @@ case class MoleTop(
 
     /** Blue LED: heartbeat while idle. */
     val io_ledB = out Bool ()
+
+    /** Sim-only debug taps for engine bus drivers and key status signals.
+      *
+      * These are present only when `useBlackBox = false` (i.e. the sim-bypass
+      * elaboration path). MoleTopSim reads them through the standard IO
+      * boundary instead of reaching into `fabric.engine.io.bus` directly, which
+      * would violate SpinalHDL's hierarchy check.
+      *
+      * Synth bitstreams have `useBlackBox = true` and so do not pay for these
+      * outputs at all.
+      */
+    val sim_sdaDriveLow = (!useBlackBox) generate (out Bool ())
+    val sim_sdaDriveHigh = (!useBlackBox) generate (out Bool ())
+    val sim_sclDriveLow = (!useBlackBox) generate (out Bool ())
+    val sim_sclDriveHigh = (!useBlackBox) generate (out Bool ())
+    val sim_engineDone = (!useBlackBox) generate (out Bool ())
+    val sim_loaderLoaded = (!useBlackBox) generate (out Bool ())
+    val sim_loaderFault = (!useBlackBox) generate (out Bool ())
   }
   noIoPrefix()
 
@@ -433,5 +451,19 @@ case class MoleTop(
       heartbeatCounter := heartbeatCounter + 1
     }
     io.io_ledB := heartbeatCounter.msb && engine.io.done
+
+    // ----------------------------------------------------------------
+    // Sim debug taps (only present when useBlackBox = false)
+    // ----------------------------------------------------------------
+
+    if (!useBlackBox) {
+      io.sim_sdaDriveLow := engine.io.bus.sda.driveLow
+      io.sim_sdaDriveHigh := engine.io.bus.sda.driveHigh
+      io.sim_sclDriveLow := engine.io.bus.scl.driveLow
+      io.sim_sclDriveHigh := engine.io.bus.scl.driveHigh
+      io.sim_engineDone := engine.io.done
+      io.sim_loaderLoaded := loader.io.loaded
+      io.sim_loaderFault := loader.io.fault
+    }
   }
 }

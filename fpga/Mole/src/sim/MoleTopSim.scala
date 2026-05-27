@@ -111,16 +111,15 @@ case class MoleTopSimDut(cfg: MoleConfig) extends Component {
   simRx.io.rx := mole.io.io_uTx
   io.rxData << simRx.io.payload
 
-  // Internal taps. fabricCd uses the same wall-clock as the
-  // wrapper's default CD under PLL bypass, so the cross-domain
-  // tags are race-free in sim.
-  io.sdaDriveLow := mole.fabric.engine.io.bus.sda.driveLow
-  io.sdaDriveHigh := mole.fabric.engine.io.bus.sda.driveHigh
-  io.sclDriveLow := mole.fabric.engine.io.bus.scl.driveLow
-  io.sclDriveHigh := mole.fabric.engine.io.bus.scl.driveHigh
-  io.engineDone := mole.fabric.engine.io.done
-  io.loaderLoaded := mole.fabric.loader.io.loaded
-  io.loaderFault := mole.fabric.loader.io.fault
+  // Internal taps exposed by MoleTop's sim_* ports (only present
+  // because we elaborated MoleTop with useBlackBox = false).
+  io.sdaDriveLow := mole.io.sim_sdaDriveLow
+  io.sdaDriveHigh := mole.io.sim_sdaDriveHigh
+  io.sclDriveLow := mole.io.sim_sclDriveLow
+  io.sclDriveHigh := mole.io.sim_sclDriveHigh
+  io.engineDone := mole.io.sim_engineDone
+  io.loaderLoaded := mole.io.sim_loaderLoaded
+  io.loaderFault := mole.io.sim_loaderFault
 }
 
 /** End-to-end audit for [[MoleTop]].
