@@ -39,6 +39,8 @@ stable contract" before changing either.
 - [x] **Step 7 --- `Instruction` ISA scaffolding.** 12-opcode + 4-reserved-slot encoder/decoder with 16-bit fixed-width wire format; full round-trip + flag-triple invariant + range-reject sim under `sim-isa`.
 - [x] **Step 8 --- `BitCycleEngineCore` (minimal).** `EMIT_BIT` / `SET_BUS_MODE` / `HALT` decoded; quarter-bit pacing via shared `QuarterBitTimer`; `SymbolDecoder` + `SclWaveformGen` + `BusModeOps.isPpClass` as the engine's only protocol context; `Revision` word emitted as two 16-bit halves on `HALT`. Sim lands in Step 9.
 - [x] **Step 9 --- `BitCycleEngineSmokeSim`.** Per-cycle bus-driver trace under `i3c-OD` vs `i3c-PP`, asserting "released" vs "actively driven high" on the SCL high half + the SDA decode for `dominant` / `recessive` / `hiz`. Distinguishes pulled-high (pull-up) from driven-high (PP) by reading the engine's `driveHigh` directly. `sim-engine-smoke` uncommented; aggregate `sim` target picks it up.
+- [x] **Step 10 --- Async waits + stretch.** `EMIT_QUARTER` / `STRETCH_SCL` / `WAIT_ON cond, timeout` added to `BitCycleEngineCore`. Sticky flag set wired up (`MISMATCH_FLAG`, `TIMEOUT_FLAG`, `START_FLAG`, `STOP_FLAG` per AGENTS §3.15). Bus observer (2-FF sync on SDA/SCL + edge detectors). Reserved cond codes trap to halt.
+- [x] **Step 11 --- Control flow + bookkeeping + timing override.** `JMP` / `BRANCH_ON cond, offset` / `LOAD_TIMING reg word` / `MARK label` decoded; controller-side ISA complete for v0 (target-role opcodes still deferred to Step 19). CAPTURE bit on EMIT_BIT / EMIT_QUARTER wired through to a new ring-write path. Result-ring format pinned (Revision + record stream + reserved HALT slot at `resultLimit`). Single `enterHalt(status)` helper across all trap paths (HALT opcode, reserved opcode, reserved cond code, reserved tx_symbol, invalid `SET_BUS_MODE` wire value). 32-bit MARK timestamp counter reset on `io.start`.
 
 ---
 
@@ -764,33 +766,122 @@ and `BRANCH_ON cond` reading these flags.
 MISMATCH wiring is dormant); systematic per-opcode coverage
 including WAIT_ON paths lands in Step 12.
 
-### 🔲 Step 11 --- Control flow + bookkeeping + timing override
+### ✅ Step 11 --- Control flow + bookkeeping + timing override
 
 **Goal:** implement `JMP`, `BRANCH_ON cond, offset`, `MARK`,
 `LOAD_TIMING`. After this step the controller-side engine is
 ISA-complete for v0 (target-side opcodes land in Step 19).
 
-**Files:** extend `BitCycleEngineCore.scala`.
+**Files:** extended `src/hw/BitCycleEngineCore.scala` (no new
+files --- `timingRegs` lives as a 4-entry `Vec` inside the engine).
 
-**Design notes:**
-- `BRANCH_ON cond, offset` shares its 4-bit cond-code namespace
-  with `WAIT_ON` (same encoder enum, same engine decoder). The
-  `MISMATCH` / `NOT_MISMATCH` codes key off the sticky
-  `MISMATCH_FLAG` set by the most recent `EMIT_*` /
-  `SAMPLE_BIT_ON_SCL` / `DRIVE_BIT_ON_SCL` against its
-  `expect`/`mask`. The flag is sticky --- only the next
-  sampling opcode (or v0.5 `FLAG_CLEAR`) clears it.
-- Offset is 8-bit signed PC-relative (±128). Long-range
-  conditional branches expand to `BRANCH_ON cond, near` +
-  `JMP far` in the SDK.
-- `JMP addr` is 12-bit absolute (4096-insn program limit).
-- `MARK label` writes a (label, implicit-timestamp) tuple into
-  the result ring.
-- `LOAD_TIMING reg word` updates the quarter-bit divider word
-  for the selected timing register (`pp-freq`, `od-freq`,
-  `i2c-freq`, `hdr-ddr-freq`). Takes effect on the **next**
-  `EMIT_*` (or sample/drive) instruction whose `BUS_MODE`
-  selects that divider.
+**What landed:**
+
+- **`JMP addr`** --- 12-bit absolute, wraps modulo `2^pcWidth`.
+  The host SDK is responsible for valid targets; the engine does
+  not range-check (out-of-range fetches manifest as reads from
+  the result-ring SPRAM region and almost always trap to the
+  malformed-instruction HALT).
+- **`BRANCH_ON cond, offset`** --- 4-bit cond + 8-bit signed
+  PC-relative offset. On taken: `pc := pc + 1 + sign_ext(offset)`
+  modulo `2^pcWidth`. On not-taken: `pc := pc + 1`. Reserved
+  cond codes (`0xA..0xF`) trap to the malformed-instruction
+  HALT. Cond evaluation uses a *flag-only* mux
+  (`evalCondFlagOnly`); the live-edge OR is specific to
+  `waitOnState` (BRANCH_ON does not race in-flight edges).
+- **`LOAD_TIMING reg word`** --- writes one of four 10-bit
+  divider words held in `timingRegs(0..3)`. The timer's
+  `io.reload` is combinationally muxed from
+  `timingRegs(busModeReg[1:0])`, so swapping `BUS_MODE` switches
+  the next quarter-bit period without an extra opcode.
+- **`MARK label`** --- 3-word ring record (see "Result-ring
+  format" below). Timestamp is a 32-bit fabric-cycle counter
+  reset on `io.start` (wraps at ~89.5 s @ 48 MHz). Timestamp is
+  latched at decode, written across three states so multi-cycle
+  writes do not race the running counter.
+- **`HALT status`** --- the existing two-word Revision write is
+  now followed by a third **HALT status word** at the reserved
+  `resultLimit` slot. Format documented in the engine doc
+  comment block. `enterHalt(status: Bits)` is the single helper
+  used by every trap path so latches stay consistent across
+  `is(Opcode.halt)`, the `default` arm, and the reserved-cond /
+  reserved-`tx_symbol` / invalid-`BUS_MODE` traps.
+- **CAPTURE bit** --- previously deferred from Step 10. Both
+  `EMIT_BIT` and `EMIT_QUARTER` latch `sdaSampled` into
+  `captureValueReg` at the same Q2 sample point as MISMATCH and
+  route through a new `captureWriteState` that pushes a 1-word
+  CAPTURE record before refetching.
+- **Malformed-instruction traps** --- in addition to the
+  reserved cond codes from Step 10, the engine now traps:
+  - Reserved `tx_symbol` (`0b11`) on `EMIT_BIT` / `EMIT_QUARTER`
+    (per AGENTS §3.11 the encoding is held for a v0.5
+    `raw_override` escape and must not be silently accepted).
+  - Invalid `BUS_MODE` wire values --- only `{0, 1, 6, 7}` are
+    legal per ROADMAP §"Bus mode register"; anything else
+    traps.
+  - The pre-existing reserved-cond trap in `WAIT_ON` now uses
+    the same `enterHalt` helper as everyone else.
+- **`done` semantics unchanged** --- still rises one cycle after
+  the final result-ring write fires, but the final write is now
+  `haltWriteStatusState` instead of `haltWriteHiState`.
+
+**Result-ring format (v0, pre-Phase-0):**
+
+The ring lives at `[resultBase, resultLimit]` where `resultLimit
+= resultBase + resultWordCount - 1`. Layout:
+
+- `resultBase` / `resultBase + 1` --- 32-bit Revision (always
+  first; written as part of the HALT tail).
+- `resultBase + 2 ..= recordLimit` --- record stream
+  (`recordLimit = resultLimit - 1`). Each record is 1 or 3
+  words tagged by the high 2 bits of word 0.
+- `resultLimit` --- reserved exclusively for the HALT status
+  word. An overflowing record stream cannot overwrite the HALT.
+
+Record encodings (`tag = word[15:14]`):
+
+- `00` CAPTURE (1 word): `[13:1]=0`, `[0]=captured SDA`.
+- `01` reserved.
+- `10` MARK (3 words): w0 `[13:8]=0 [7:0]=label`, w1
+  `timestamp[15:0]`, w2 `timestamp[31:16]`.
+- `11` HALT (1 word at `resultLimit`): `[13]=overflow`,
+  `[12]=mismatchAtHalt`, `[11:8]=status`, `[7:0]=0`.
+
+`mismatchAtHalt` is the *final* value of `MISMATCH_FLAG` --- it
+does not track "any mismatch ever seen" (a passing compare
+clears the flag per spec). `overflow` latches `True` the first
+time the engine tried to write a record that would not fit
+below `recordLimit`; subsequent CAPTURE / MARK opcodes silently
+drop their writes.
+
+Status codes `0x0..0xC` are caller-defined via the [[Halt]]
+opcode. Codes `0xD..0xF` are reserved for engine traps; today
+only `0xF` (malformed-instruction) is used. Per AGENTS §3.17
+the wire format above is mutable pre-Phase-0; the v0
+host-readback decoder lands in Phase 2 and will pin these
+encodings down.
+
+**Divergence from the original plan:**
+
+- Result-ring overflow is "set the flag, drop the record"
+  rather than "drop newest". Functionally equivalent here, but
+  worth noting in case Step 12's tests pin the exact behaviour.
+- No separate `TimingRegisters.scala` --- the file would have
+  held a 4-entry `Vec` of regs and nothing else, so it lives
+  inline in the engine. If a future step grows the timing-reg
+  block (e.g. read-back over UART) it can move out cheaply.
+- The 32-bit MARK timestamp is wider than the original "24-bit
+  or whatever fits" sketch. Rubber-duck flagged that 16-bit
+  wraps every 1.36 ms @ 48 MHz, which is shorter than a typical
+  compliance trace; 32-bit gives ~89.5 s and round MARK records
+  to 3 words, which is cleaner than a 2-word format with a
+  partial timestamp.
+
+**Sim:** none added in this step --- the full per-opcode
+coverage lands in Step 12. Existing `sim-config` /
+`sim-engine-smoke` continue to pass.
+
+**Makefile:** unchanged (Step 12 uncomments `sim-engine-full`).
 
 ### 🔲 Step 12 --- `BitCycleEngineSim` (full ISA)
 
