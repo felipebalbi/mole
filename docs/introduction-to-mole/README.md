@@ -23,10 +23,10 @@ Requirements:
   `figures/`).
 - The [Aporetic](https://github.com/SaschaSommer/aporetic) font
   family installed on the OS font path (`Aporetic Sans`,
-  `Aporetic Serif`, `Aporetic Sans Mono`). The deck falls back
-  to Inter / EB Garamond / Cascadia Mono when those are absent
-  -- typst emits font-fallback warnings; pass `QUIET=1` to mute
-  them.
+  `Aporetic Serif`, `Aporetic Sans Mono`). The deck declares
+  Aporetic as a hard requirement; without it typst falls back to
+  its bundled default and emits one warning per family until you
+  install it.
 - GNU `make` for the convenience wrapper.
 
 From this directory:
@@ -37,7 +37,6 @@ make notes       # builds slides-notes.pdf (speaker notes inlined)
 make all         # both
 make watch       # auto-rebuild slides.pdf while editing
 make clean       # remove built PDFs
-make QUIET=1     # filter out harmless font-fallback warnings
 ```
 
 Or invoke Typst directly:

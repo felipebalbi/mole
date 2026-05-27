@@ -36,9 +36,17 @@
 #let muted-light = rgb("#a89682")
 #let divider-c   = rgb("#c5baa6")  // border
 
-#let font-sans  = ("Aporetic Sans", "Inter", "Helvetica Neue")
-#let font-serif = ("Aporetic Serif", "EB Garamond", "Georgia")
-#let font-mono  = ("Aporetic Sans Mono", "Cascadia Mono", "Consolas")
+// Font families. We list Aporetic alone -- typst 0.14 warns once
+// per unresolved family in a fallback chain, so a cross-platform
+// list like ("Aporetic Sans", "Inter", "Helvetica Neue") is just
+// noise on a box that has Aporetic installed (the common case) and
+// is *more* noise on a box that has none of them. The README makes
+// Aporetic a hard requirement; if it's missing, typst falls back to
+// its own default and emits one honest warning per family, which is
+// the correct outcome.
+#let font-sans  = ("Aporetic Sans",)
+#let font-serif = ("Aporetic Serif",)
+#let font-mono  = ("Aporetic Sans Mono",)
 
 // ---- Notes mode ----------------------------------------------------
 //
