@@ -42,6 +42,10 @@ stable contract" before changing either.
 - [x] **Step 10 --- Async waits + stretch.** `EMIT_QUARTER` / `STRETCH_SCL` / `WAIT_ON cond, timeout` added to `BitCycleEngineCore`. Sticky flag set wired up (`MISMATCH_FLAG`, `TIMEOUT_FLAG`, `START_FLAG`, `STOP_FLAG` per AGENTS §3.15). Bus observer (2-FF sync on SDA/SCL + edge detectors). Reserved cond codes trap to halt.
 - [x] **Step 11 --- Control flow + bookkeeping + timing override.** `JMP` / `BRANCH_ON cond, offset` / `LOAD_TIMING reg word` / `MARK label` decoded; controller-side ISA complete for v0 (target-role opcodes still deferred to Step 19). CAPTURE bit on EMIT_BIT / EMIT_QUARTER wired through to a new ring-write path. Result-ring format pinned (Revision + record stream + reserved HALT slot at `resultLimit`). Single `enterHalt(status)` helper across all trap paths (HALT opcode, reserved opcode, reserved cond code, reserved tx_symbol, invalid `SET_BUS_MODE` wire value). 32-bit MARK timestamp counter reset on `io.start`.
 - [x] **Step 12 --- `BitCycleEngineSim`.** Full-ISA Verilator sim with 17 named tests under one `BitCycleEngineFullDut` compile (debug read mux over `SpramController` while the engine is idle). Covers JMP / BRANCH_ON ALWAYS + SDA_LOW + MISMATCH + TIMEOUT / WAIT_ON cond-hit + timeout-hit / MARK records + monotonic timestamps / CAPTURE record value / MISMATCH_FLAG tracking / LOAD_TIMING swap / STRETCH_SCL dwell / Revision word format / HALT status passthrough / reserved-opcode + invalid-BUS_MODE + reserved-tx_symbol traps / result-ring overflow. `sim-engine-full` uncommented; aggregate `sim` picks it up. `SAMPLE_BIT_ON_SCL` / `DRIVE_BIT_ON_SCL` deferred to Step 19.
+- [x] **Step 13 --- `MoleTop`.** Synthesisable top-level. PLL bypass-selectable (`MolePllUp5k`) and SB_IO bypass-selectable (`MoleIoBufUp5k`). 3-state phase FSM (`acceptLoad` -> `running` -> `draining`) gates `engine.start`, SPRAM read-port ownership, and `acceptRx`. Reset bridge (`!pllLocked || !io_reset` async-asserts, 2-FF chain sync-deasserts). Closed-phase RX drain: during `running` / `draining` the UART RX stream is consumed silently so a stale-byte race can't seed the next frame on phase re-open. LEDs: R = pulse-stretched loader fault, G = `!engine.done`, B = 26-bit heartbeat gated by `engine.done`. Supporting blocks landed alongside: `MolePllUp5k`, `MoleIoBufUp5k`, `Crc16Xmodem`, `MoleLoaderFsm`, `MoleDrainerFsm`.
+- [x] **Step 14 --- `MoleTopSim`.** End-to-end Verilator sim under one `MoleTopSimDut` compile (sim-side `UartTx` / `UartRx` so the host pushes / pops bytes via Spinal Streams instead of bit-banging the wire). 4 cases: short-halt round-trip (HALT word + Revision asserts), bus-toggle (SDA driveLow + release observed during execution), bad-CRC recovery (loaderLoaded never pulses, engineDone never goes low, fault LED lights; then a good frame loads cleanly after the resync gap), back-to-back frames (phase FSM cycles cleanly twice). Small test config (`programWordCount=16`, `resultRingByteCount=32`) keeps each case under ~50 K cycles.
+- [x] **Step 15 --- `MoleTopVerilog`.** Canonical Verilog generation entrypoint. `useBlackBox = true` so yosys infers SB_PLL40_PAD + SB_IO as hard cells; `defaultClockDomainFrequency = 48 MHz` so derived dividers infer the right size. Output at `gen/MoleTop.v`; gitignored via `.gitignore`'s per-project rule.
+- [x] **Step 16 --- Flashable bitstream + synth chain.** `make gen` / `make all` / `make flash` enabled end-to-end. `nextpnr --freq 12` bumped to `--freq 48` (the actual fabric clock after the PLL); timing now reports against the real budget. Bring-up procedure (build, flash, talk, three smoke programs) documented in `BRINGUP.md`.
 
 ---
 
@@ -958,28 +962,38 @@ coverage lands in Step 12. Existing `sim-config` /
 
 ---
 
-## 🔲 Phase 2 --- Top integration
+## ✅ Phase 2 --- Top integration
 
-### 🔲 Step 13 --- `MoleTop`
+### ✅ Step 13 --- `MoleTop`
 
 **Goal:** wire UART RX → SPRAM loader → engine → result-ring →
 UART TX. Add status LEDs and a heartbeat. This is the
 synthesisable top-level.
 
-**Files:** `src/hw/MoleTop.scala`.
+**Files:** `src/hw/MoleTop.scala`, plus supporting blocks
+`src/hw/MolePllUp5k.scala`, `src/hw/MoleIoBufUp5k.scala`,
+`src/hw/Crc16Xmodem.scala`, `src/hw/MoleLoaderFsm.scala`,
+`src/hw/MoleDrainerFsm.scala`.
 
-**Suggested IO:** matches `icebreaker.pcf` (clock, reset, UART
-RX/TX, SDA, SCL, three status LEDs).
+**What landed:**
+- PLL bypass selectable via `useBlackBox` so sim doesn't need to
+  elaborate `SB_PLL40_PAD`; SB_IO same pattern.
+- Loader frame: `[len_lo, len_hi, w0_lo, w0_hi, ..., w(N-1)_lo,
+  w(N-1)_hi, crc_lo, crc_hi]` little-endian, CRC-16/XMODEM over
+  payload; rejects `len=0` / `len > programWordCount`; idle-gap
+  resync (≥ 20 UART bit times). Spec lives in `WIRE_FORMAT.md`.
+- Phase FSM: `acceptLoad` -> `running` -> `draining`. Gates
+  `engine.start`, the SPRAM read-port ownership mux, and the
+  closed-phase UART RX drain so stale bytes can't seed the next
+  frame on phase re-open.
+- Reset bridge: `resetAsync = !pllLocked || !io_reset` async-
+  asserts a 2-FF chain in `bootCd`; the chain's output drives the
+  fabric domain's synchronous reset.
+- LEDs: R = pulse-stretched loader fault (~87 ms at 48 MHz so
+  faults are visible), G = `!engine.done`, B = 26-bit heartbeat
+  gated by `engine.done` (~0.7 Hz blink while idle).
 
-**Design notes:**
-- Loader: simple length-prefixed framing over UART (`[len_lo,
-  len_hi, opcode_words..., crc16]`); rejects malformed frames.
-- Result ring drains to UART TX continuously; back-pressure
-  surfaces to the engine as a "ring full" fault on `MARK` /
-  capture writes.
-- LEDs: R = fault, G = running, B = idle/heartbeat.
-
-### 🔲 Step 14 --- `MoleTopSim`
+### ✅ Step 14 --- `MoleTopSim`
 
 **Goal:** end-to-end sim: push a hand-encoded program over the
 sim UART, observe wire activity on the sim bus, drain the sim
@@ -987,31 +1001,63 @@ UART and decode the result ring.
 
 **Files:** `src/sim/MoleTopSim.scala`.
 
-**Makefile:** uncomment `sim-top`.
+**Makefile:** `sim-top` uncommented; aggregate `sim` picks it up.
 
-### 🔲 Step 15 --- `MoleTopVerilog`
+**What landed:**
+- `MoleTopSimDut` wraps `MoleTop` with sim-side `UartTx` /
+  `UartRx` so the host pushes / pops bytes via Spinal Streams
+  instead of bit-banging the wire.
+- Internal taps (sda/sclDriveLow/High, engineDone, loaderLoaded,
+  loaderFault) exposed on the wrapper IO so the cases can
+  observe the engine's pad drive without modelling the SB_IO.
+- Small test cfg: `programWordCount=16`, `resultRingByteCount=32`,
+  keeps every case under ~50 K cycles.
+- 4 cases: short-halt round-trip (HALT word + Revision asserts),
+  bus-toggle (SDA driveLow + release observed during execution),
+  bad-CRC recovery (loaderLoaded never pulses, engineDone never
+  goes low, fault LED lights; then a good frame loads cleanly
+  after the resync gap), back-to-back frames (phase FSM cycles
+  cleanly through `acceptLoad -> running -> draining ->
+  acceptLoad` twice).
+
+### ✅ Step 15 --- `MoleTopVerilog`
 
 **Goal:** the canonical Verilog-generation entrypoint. Generated
 module name is `MoleTop`.
 
 **Files:** `src/hw/MoleTopVerilog.scala`.
 
-**Makefile:** uncomment `gen`. After this lands, `make all`
-produces `gen/MoleTop.bin`.
+**Makefile:** `gen` uncommented. `make all` produces
+`gen/MoleTop.bin` via the Spinal -> yosys -> nextpnr -> icepack
+chain.
 
-### 🔲 Step 16 --- Flashable bitstream + smoke
+**What landed:**
+- `useBlackBox = true` so yosys infers SB_PLL40_PAD and SB_IO as
+  hard cells; the bypass models exist only for `MoleTopSim`.
+- `defaultClockDomainFrequency = 48 MHz` so any
+  `CounterFreeRun`-style helper infers the right divider without
+  per-instance config.
+- Output at `gen/MoleTop.v`; gitignored via the per-project rule
+  added in `.gitignore`.
+
+### ✅ Step 16 --- Flashable bitstream + smoke
 
 **Goal:** prove the toolchain end-to-end: `make all`, `make
-flash`, blinking LED via a hand-encoded program loaded over
-`/dev/ttyUSB0`.
+flash`, smoke programs loaded over `/dev/ttyUSB0`.
 
 **Files:** none new --- this is a process step.
 
-**Bring-up:**
-- `make flash` programs the iCEbreaker via channel B.
-- `cat blink.mole.bin > /dev/ttyUSB0` loads the program.
-- LED toggles at the expected rate; UART echoes back the
-  result-ring trailer.
+**What landed:**
+- `nextpnr --freq` bumped from `12` (the package-pin clock) to
+  `48` (the actual fabric clock after the PLL multiply); timing
+  reports against the real budget.
+- Bring-up procedure (build, flash, talk, three smoke programs:
+  short halt for UART round-trip, infinite loop for green-LED
+  proof, bus toggle for the scope) documented in
+  [`BRINGUP.md`](BRINGUP.md).
+- Wire format the host has to speak is in
+  [`WIRE_FORMAT.md`](WIRE_FORMAT.md) (added during Step 13's
+  loader bring-up).
 
 ---
 

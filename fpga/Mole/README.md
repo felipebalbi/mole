@@ -9,8 +9,10 @@ For the product-wide design and rationale, see
 live in [`../../AGENTS.md`](../../AGENTS.md); this project's
 specifics are in [`AGENTS.md`](AGENTS.md).
 
-Status: **scaffold only.** No HDL yet --- the bring-up plan lives
-in [`TODO.md`](TODO.md).
+Status: **Phase 2 done** --- end-to-end UART loader -> bit engine
+-> drainer integration ships as `MoleTop`; smoke procedure in
+[`BRINGUP.md`](BRINGUP.md). Outstanding work tracked in
+[`TODO.md`](TODO.md).
 
 ## What this is
 
@@ -57,6 +59,7 @@ HDR-DDR, peripheral emulation) live in the host-side Scheme SDK
 Mole/
   README.md         this file
   AGENTS.md         project-specific conventions
+  BRINGUP.md        end-to-end smoke procedure (build, flash, talk)
   TODO.md           phased bring-up plan + design notes per block
   WIRE_FORMAT.md    host link wire format (UART program upload + drain)
   Makefile
@@ -69,20 +72,20 @@ Mole/
 
 ## Quickstart
 
-Once there's something to build (see `TODO.md` for the first
-milestone that produces a flashable bitstream):
-
 ```sh
 cd fpga/Mole
-make           # bitstream
+make           # bitstream (Spinal -> yosys -> nextpnr -> icepack)
 make sim       # run all sims
-make flash     # program the iCEbreaker
+make flash     # program the iCEbreaker (FT2232H channel B)
 ```
 
-`make help` lists every target.
+`make help` lists every target. The Verilog top-level module is
+`MoleTop`; the Scala entrypoint that generates it is
+`mole.MoleTopVerilog`.
 
-The Verilog top-level module is `MoleTop`; the Scala entrypoint
-that generates it is `mole.MoleTopVerilog`.
+For the first end-to-end smoke of a freshly built bitstream
+(connect a UART terminal, send a frame, watch the result drain),
+follow [`BRINGUP.md`](BRINGUP.md).
 
 ## Hardware notes
 
