@@ -193,6 +193,8 @@ case class MoleTop(
     val sim_spramReadRespValid = (!useBlackBox) generate (out Bool ())
     val sim_spramReadRespData =
       (!useBlackBox) generate (out Bits (16 bits))
+    val sim_uartTxDataFire = (!useBlackBox) generate (out Bool ())
+    val sim_uartTxLine = (!useBlackBox) generate (out Bool ())
   }
   noIoPrefix()
 
@@ -491,6 +493,8 @@ case class MoleTop(
       io.sim_spramReadCmdAddr := spram.io.readCmd.payload.resize(16 bits)
       io.sim_spramReadRespValid := spram.io.readResp.valid
       io.sim_spramReadRespData := spram.io.readResp.payload
+      io.sim_uartTxDataFire := uartTx.io.data.fire
+      io.sim_uartTxLine := uartTx.io.tx
     }
   }
 }

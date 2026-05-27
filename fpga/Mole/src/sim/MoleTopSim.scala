@@ -80,6 +80,8 @@ case class MoleTopSimDut(cfg: MoleConfig) extends Component {
     val spramReadCmdAddr = out UInt (16 bits)
     val spramReadRespValid = out Bool ()
     val spramReadRespData = out Bits (16 bits)
+    val uartTxDataFire = out Bool ()
+    val uartTxLine = out Bool ()
 
     /** Pad ports passed straight through to MoleTop's `io_sda` / `io_scl` inout
       * pads. Verilator otherwise rejects MoleTop's instantiation with
@@ -159,6 +161,8 @@ case class MoleTopSimDut(cfg: MoleConfig) extends Component {
   io.spramReadCmdAddr := mole.io.sim_spramReadCmdAddr
   io.spramReadRespValid := mole.io.sim_spramReadRespValid
   io.spramReadRespData := mole.io.sim_spramReadRespData
+  io.uartTxDataFire := mole.io.sim_uartTxDataFire
+  io.uartTxLine := mole.io.sim_uartTxLine
 }
 
 /** End-to-end audit for [[MoleTop]].
@@ -320,12 +324,16 @@ object MoleTopSim extends App {
     var drainTriggerPulses = 0
     var phaseRunningCycles = 0
     var phaseDrainingCycles = 0
+    var uartTxDataFires = 0
+    var uartTxLineLowSeen = false
+    var cycleCount = 0
     val resultWrites = mutable.Buffer.empty[(Int, Int)]
     val drainReads = mutable.Buffer.empty[Int]
     val drainResps = mutable.Buffer.empty[Int]
     val watcherFork = fork {
       while (true) {
         dut.clockDomain.waitSampling()
+        cycleCount += 1
         if (dut.io.loaderLoaded.toBoolean) loadedPulses += 1
         if (dut.io.loaderFault.toBoolean) faultPulses += 1
         if (!dut.io.engineDone.toBoolean) engineDoneFalseSeen = true
@@ -348,6 +356,8 @@ object MoleTopSim extends App {
             drainResps += dut.io.spramReadRespData.toInt
           }
         }
+        if (dut.io.uartTxDataFire.toBoolean) uartTxDataFires += 1
+        if (!dut.io.uartTxLine.toBoolean) uartTxLineLowSeen = true
       }
     }
 
@@ -355,9 +365,11 @@ object MoleTopSim extends App {
     // from the drainer is visible to the engine, and we don't have
     // a single mega-stall on the host side.
     val received = mutable.Buffer.empty[Int]
+    val recvCycles = mutable.Buffer.empty[Int]
     val drainFork = fork {
       while (received.size < cfg.resultRingByteCount) {
         received += recvByte(dut)
+        recvCycles += cycleCount
       }
     }
 
@@ -396,6 +408,17 @@ object MoleTopSim extends App {
     println(
       s"   drainResps (first 16): " +
         drainResps.take(16).map(d => f"0x$d%04x").mkString(" ")
+    )
+    println(
+      s"   uart: dataFires=$uartTxDataFires lineLowSeen=$uartTxLineLowSeen " +
+        s"totalCycles=$cycleCount"
+    )
+    println(
+      s"   recvCycles (first 8): " + recvCycles.take(8).mkString(" ")
+    )
+    println(
+      s"   recvCycles (last 4): " +
+        recvCycles.takeRight(4).mkString(" ")
     )
     assert(
       expected == cfg.resultRingByteCount,
