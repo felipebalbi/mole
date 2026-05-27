@@ -382,7 +382,7 @@ object MoleTopFlowControlSim extends App {
   println("--- MoleTopFlowControlSim: all cases passed ---")
 
   private def fail(msg: String): Nothing = {
-    assert(cond = false, msg)
+    assert(false, msg)
     throw new AssertionError(msg)
   }
 }
