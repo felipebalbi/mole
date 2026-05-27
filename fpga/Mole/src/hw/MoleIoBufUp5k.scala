@@ -1,6 +1,7 @@
 package mole
 
 import spinal.core._
+import spinal.lib._
 
 /** SB_IO pad wrappers for Mole's bidirectional bus (sda + scl) on iCE40 UP5K.
   *
