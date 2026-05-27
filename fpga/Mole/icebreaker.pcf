@@ -22,10 +22,22 @@ set_io io_reset      10
 set_io io_uRx         6
 set_io io_uTx         9
 
-# I3C / I2C bus, brought out on PMOD1A. Both lines are open-drain;
-# the SB_IO primitives are configured bidirectional (drive low or
-# Hi-Z) and external pull-ups on the PMOD adapter hold the bus
-# high. The bit engine *never* drives these lines actively high.
+# I3C / I2C bus, brought out on PMOD1A. The pad layer is an explicit
+# SB_IO per line (see src/hw/MoleIoBufUp5k.scala) with PIN_TYPE
+# 6'b101000 (PIN_OUTPUT_TRISTATE | PIN_INPUT, unregistered): the
+# wrapper drives OUTPUT_ENABLE := driveLow || driveHigh and
+# D_OUT_0   := driveHigh, so the pad can sit in three states under
+# program control:
+#   - driveLow  -> NMOS pulls the line to GND (I2C / I3C-OD low)
+#   - driveHigh -> PMOS drives the line to VIO (I3C-PP / HDR-DDR high)
+#   - both off  -> output tristated; external pull-up wins (OD release)
+#
+# External pull-ups on the PMOD adapter (4.7 kΩ for I2C, ~1 kΩ for
+# the I3C-OD windows that need it) are still required: OD-class
+# BUS_MODEs decode "recessive" as both drivers off, and the line
+# must rise to VIO without a PP drive in those modes. The pad CAN
+# drive actively high; the symbol decoder (src/hw/BusMode.scala) is
+# what gates that to PP-class BUS_MODEs only.
 #
 # PMOD1A pin map (iCEbreaker rev 1.x):
 #   PMOD1A.1 (FPGA pin 4) → io_scl
