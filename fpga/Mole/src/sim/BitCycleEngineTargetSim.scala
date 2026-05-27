@@ -176,7 +176,9 @@ object BitCycleEngineTargetSim {
     */
   private def testTargetSampleEightBits(): Unit =
     runTest("target-sample-eight-bits") { dut =>
-      val program = (0 until 8).map(_ => sampleBit(capture = true)) :+ halt(0)
+      val program =
+        (0 until 8).map(_ => sampleBit(capture = true)) ++
+          Seq(mark(0xa5), halt(0))
       dut.clockDomain.forkStimulus(period = 10)
       quiet(dut)
       dut.clockDomain.waitSampling(5)
@@ -197,8 +199,14 @@ object BitCycleEngineTargetSim {
       }
       assert(dut.io.done.toBoolean, "target sample: engine never halted")
       val ring = drainRing(dut)
+      // Captures are records between Revision (ring[0..1]) and the
+      // sentinel MARK word 0 (tag 0b10, label = 0xa5 in [11:4]).
+      // Stop at the sentinel so uninit ring slots (also 0x0000)
+      // are not miscounted as zero-valued captures.
+      val sentinel = (2 << 14) | (0xa5 << 4)
       val captures = (2 until ring.length)
         .map(ring(_))
+        .takeWhile(w => w != sentinel)
         .takeWhile(w => (w >>> 14) == 0x0)
       assert(
         captures.length == 8,
