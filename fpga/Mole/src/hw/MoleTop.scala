@@ -183,6 +183,16 @@ case class MoleTop(
     val sim_drainTrigger = (!useBlackBox) generate (out Bool ())
     val sim_phaseRunning = (!useBlackBox) generate (out Bool ())
     val sim_phaseDraining = (!useBlackBox) generate (out Bool ())
+    val sim_resultWriteAddr =
+      (!useBlackBox) generate (out UInt (16 bits))
+    val sim_resultWriteData =
+      (!useBlackBox) generate (out Bits (16 bits))
+    val sim_spramReadCmdFire = (!useBlackBox) generate (out Bool ())
+    val sim_spramReadCmdAddr =
+      (!useBlackBox) generate (out UInt (16 bits))
+    val sim_spramReadRespValid = (!useBlackBox) generate (out Bool ())
+    val sim_spramReadRespData =
+      (!useBlackBox) generate (out Bits (16 bits))
   }
   noIoPrefix()
 
@@ -474,6 +484,13 @@ case class MoleTop(
       io.sim_drainTrigger := drainTriggerComb
       io.sim_phaseRunning := phase.isActive(phase.runningState)
       io.sim_phaseDraining := phase.isActive(phase.drainingState)
+      io.sim_resultWriteAddr := engine.io.resultWrite.payload.addr
+        .resize(16 bits)
+      io.sim_resultWriteData := engine.io.resultWrite.payload.data
+      io.sim_spramReadCmdFire := spram.io.readCmd.fire
+      io.sim_spramReadCmdAddr := spram.io.readCmd.payload.resize(16 bits)
+      io.sim_spramReadRespValid := spram.io.readResp.valid
+      io.sim_spramReadRespData := spram.io.readResp.payload
     }
   }
 }

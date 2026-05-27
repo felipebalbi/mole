@@ -74,6 +74,12 @@ case class MoleTopSimDut(cfg: MoleConfig) extends Component {
     val drainTrigger = out Bool ()
     val phaseRunning = out Bool ()
     val phaseDraining = out Bool ()
+    val resultWriteAddr = out UInt (16 bits)
+    val resultWriteData = out Bits (16 bits)
+    val spramReadCmdFire = out Bool ()
+    val spramReadCmdAddr = out UInt (16 bits)
+    val spramReadRespValid = out Bool ()
+    val spramReadRespData = out Bits (16 bits)
 
     /** Pad ports passed straight through to MoleTop's `io_sda` / `io_scl` inout
       * pads. Verilator otherwise rejects MoleTop's instantiation with
@@ -147,6 +153,12 @@ case class MoleTopSimDut(cfg: MoleConfig) extends Component {
   io.drainTrigger := mole.io.sim_drainTrigger
   io.phaseRunning := mole.io.sim_phaseRunning
   io.phaseDraining := mole.io.sim_phaseDraining
+  io.resultWriteAddr := mole.io.sim_resultWriteAddr
+  io.resultWriteData := mole.io.sim_resultWriteData
+  io.spramReadCmdFire := mole.io.sim_spramReadCmdFire
+  io.spramReadCmdAddr := mole.io.sim_spramReadCmdAddr
+  io.spramReadRespValid := mole.io.sim_spramReadRespValid
+  io.spramReadRespData := mole.io.sim_spramReadRespData
 }
 
 /** End-to-end audit for [[MoleTop]].
@@ -308,6 +320,9 @@ object MoleTopSim extends App {
     var drainTriggerPulses = 0
     var phaseRunningCycles = 0
     var phaseDrainingCycles = 0
+    val resultWrites = mutable.Buffer.empty[(Int, Int)]
+    val drainReads = mutable.Buffer.empty[Int]
+    val drainResps = mutable.Buffer.empty[Int]
     val watcherFork = fork {
       while (true) {
         dut.clockDomain.waitSampling()
@@ -315,10 +330,24 @@ object MoleTopSim extends App {
         if (dut.io.loaderFault.toBoolean) faultPulses += 1
         if (!dut.io.engineDone.toBoolean) engineDoneFalseSeen = true
         if (dut.io.engineStart.toBoolean) engineStartHighCycles += 1
-        if (dut.io.engineResultWriteFire.toBoolean) resultWriteFires += 1
+        if (dut.io.engineResultWriteFire.toBoolean) {
+          resultWriteFires += 1
+          resultWrites += ((
+            dut.io.resultWriteAddr.toInt,
+            dut.io.resultWriteData.toInt
+          ))
+        }
         if (dut.io.drainTrigger.toBoolean) drainTriggerPulses += 1
         if (dut.io.phaseRunning.toBoolean) phaseRunningCycles += 1
-        if (dut.io.phaseDraining.toBoolean) phaseDrainingCycles += 1
+        if (dut.io.phaseDraining.toBoolean) {
+          phaseDrainingCycles += 1
+          if (dut.io.spramReadCmdFire.toBoolean) {
+            drainReads += dut.io.spramReadCmdAddr.toInt
+          }
+          if (dut.io.spramReadRespValid.toBoolean) {
+            drainResps += dut.io.spramReadRespData.toInt
+          }
+        }
       }
     }
 
@@ -355,6 +384,18 @@ object MoleTopSim extends App {
     println(
       s"   phase: runningCycles=$phaseRunningCycles " +
         s"drainingCycles=$phaseDrainingCycles"
+    )
+    println(
+      s"   resultWrites (addr,data): " +
+        resultWrites.map { case (a, d) => f"($a%d,0x$d%04x)" }.mkString(" ")
+    )
+    println(
+      s"   drainReads (first 16): " +
+        drainReads.take(16).mkString(" ")
+    )
+    println(
+      s"   drainResps (first 16): " +
+        drainResps.take(16).map(d => f"0x$d%04x").mkString(" ")
     )
     assert(
       expected == cfg.resultRingByteCount,
