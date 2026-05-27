@@ -6,15 +6,14 @@ import spinal.core._
   *
   * This file is the Scala-side **reference implementation** of the bytecode
   * wire format. It is consumed by simulation (round-trip audits, engine tests)
-  * and by the engine's RTL fetch path, which slices the 16-bit instruction
-  * word directly from the `instrReg` register. It is **not** the host's
-  * runtime encoder: the host compiler is the (future) Rust crate under
-  * `../../crates/`, which emits pre-assembled bytes that travel raw over UART
-  * into the engine's SPRAM. Once the Rust crate exists, the Scala
-  * `encode`/`decode` pair below doubles as a cross-validation oracle ---
-  * "every legal instruction encodes to the same 16-bit word in both
-  * implementations" is the cheapest strong-signal correctness check for a
-  * wire-format contract.
+  * and by the engine's RTL fetch path, which slices the 16-bit instruction word
+  * directly from the `instrReg` register. It is **not** the host's runtime
+  * encoder: the host compiler is the (future) Rust crate under `../../crates/`,
+  * which emits pre-assembled bytes that travel raw over UART into the engine's
+  * SPRAM. Once the Rust crate exists, the Scala `encode`/`decode` pair below
+  * doubles as a cross-validation oracle --- "every legal instruction encodes to
+  * the same 16-bit word in both implementations" is the cheapest strong-signal
+  * correctness check for a wire-format contract.
   *
   * Wire-format scope. Per `../../AGENTS.md` §3.9 the instruction width is fixed
   * at 16 bits; §3.10 locks the `expect`/`mask`/`capture` flag triple at bit

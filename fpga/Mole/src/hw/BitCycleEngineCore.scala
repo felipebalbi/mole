@@ -163,13 +163,13 @@ case class BitCycleEngineCore(cfg: MoleConfig) extends Component {
   /** Latched instruction word from the last completed fetch. */
   val instrReg = Reg(Bits(Instruction.WORD_WIDTH bits)) init (0)
 
-  /** Combinational opcode view of [[instrReg]] --- sliced directly from the
-    * top 4 bits. Every other operand field in the FSM is sliced from
-    * `instrReg` by hand (e.g. `instrReg(11 downto 10)` for the tx_symbol
-    * field of EMIT_BIT, `instrReg(11 downto 9)` for the mode field of
-    * SET_BUS_MODE). Keeping the opcode on the same convention means there is
-    * one slicing style across the whole fetch path and no Bundle
-    * field-ordering surprise sitting between the encoder and the decoder.
+  /** Combinational opcode view of [[instrReg]] --- sliced directly from the top
+    * 4 bits. Every other operand field in the FSM is sliced from `instrReg` by
+    * hand (e.g. `instrReg(11 downto 10)` for the tx_symbol field of EMIT_BIT,
+    * `instrReg(11 downto 9)` for the mode field of SET_BUS_MODE). Keeping the
+    * opcode on the same convention means there is one slicing style across the
+    * whole fetch path and no Bundle field-ordering surprise sitting between the
+    * encoder and the decoder.
     */
   val opcode = Opcode()
   opcode.assignFromBits(instrReg(15 downto 12))
