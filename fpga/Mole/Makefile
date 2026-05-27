@@ -73,7 +73,7 @@ sim: sim-config sim-opendrain sim-baud-gen sim-rx-sync \
      sim-tx-shiftreg sim-rx-shiftreg sim-tx-fsm sim-rx-fsm \
      sim-uart-tx sim-uart-rx sim-uart sim-spram sim-isa \
      sim-engine-smoke sim-engine-full sim-pll sim-crc sim-iobuf \
-     sim-loader-fsm sim-drainer-fsm ## Run all simulations
+     sim-loader-fsm sim-drainer-fsm sim-top ## Run all simulations
 
 # Per-block sim / gen targets land here once their hint blocks in
 # TODO.md flip from 🔲 to ✅. The naming contract is fixed:
@@ -164,8 +164,8 @@ sim-loader-fsm: ## Run MoleLoaderFsm frame-parser audit (Step 13)
 sim-drainer-fsm: ## Run MoleDrainerFsm result-ring sweep audit (Step 13)
 	$(SBT) -batch "runMain $(PACKAGE).MoleDrainerFsmSim"
 
-# sim-top: ## End-to-end MoleTop sim: UART load -> engine -> UART results (Step 14)
-# 	$(SBT) -batch "runMain $(PACKAGE).MoleTopSim"
+sim-top: ## End-to-end MoleTop sim: UART load -> engine -> UART results (Step 14)
+	$(SBT) -batch "runMain $(PACKAGE).MoleTopSim"
 
 # gen target -- the canonical Verilog entrypoint is MoleTopVerilog;
 # generated module is MoleTop. Lands with Step 15.
@@ -201,4 +201,4 @@ help: ## Show this help (every target with a ## description)
         sim-tx-shiftreg sim-rx-shiftreg sim-tx-fsm sim-rx-fsm \
         sim-uart-tx sim-uart-rx sim-uart sim-spram sim-isa \
         sim-engine-smoke sim-engine-full sim-pll sim-crc sim-iobuf \
-        sim-loader-fsm sim-drainer-fsm waves flash clean distclean help
+        sim-loader-fsm sim-drainer-fsm sim-top waves flash clean distclean help
