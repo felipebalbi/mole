@@ -509,7 +509,7 @@ object Instruction {
 
     case SetBusMode(mode) =>
       (Opcode.setBusMode.position << OPCODE_LO) |
-        (mode.position << 9)
+        (busModeWireValue(mode) << 9)
 
     case LoadTiming(reg, dividerWord) =>
       require(
@@ -610,7 +610,16 @@ object Instruction {
         Jmp(addr = word & 0xfff)
 
       case Opcode.setBusMode =>
-        SetBusMode(mode = BusMode.elements((word >> 9) & 0x7))
+        val wireBits = (word >> 9) & 0x7
+        SetBusMode(
+          mode = busModeFromWire.getOrElse(
+            wireBits,
+            throw new IllegalArgumentException(
+              f"SET_BUS_MODE word 0x$word%04X: undefined mode bits " +
+                f"$wireBits%d (legal wire values: 0, 1, 6, 7)"
+            )
+          )
+        )
 
       case Opcode.loadTiming =>
         LoadTiming(
@@ -646,6 +655,26 @@ object Instruction {
   // --------------------------------------------------------------
   // Internal helpers
   // --------------------------------------------------------------
+
+  /** Wire encoding for [[BusMode]] --- mirrors the SpinalEnumEncoding
+    * `busModeWire` declared on the enum itself. The wire codes are
+    * deliberately non-sequential per ROADMAP §"Bus mode register":
+    * `mode[2]` (the SCL drive class) sits high while `mode[1:0]` (the
+    * timing-divider selector) sits low, so `mode` bits read directly as
+    * "drive-class then divider". The host encoder MUST use these wire
+    * codes (not the SpinalEnumElement `.position` declaration index) so
+    * the Scala reference and the engine RTL agree at the bit level.
+    */
+  private val busModeWireValue: Map[BusMode.E, Int] = Map(
+    BusMode.i2c -> 0,
+    BusMode.i3cOd -> 1,
+    BusMode.i3cPp -> 6,
+    BusMode.hdrDdr -> 7
+  )
+
+  /** Inverse of [[busModeWireValue]], used by [[decode]]. */
+  private val busModeFromWire: Map[Int, BusMode.E] =
+    busModeWireValue.map(_.swap)
 
   /** Pack the (expect, mask, capture) triple into bits `[2:0]` of the word.
     * Used by every bearer opcode. Locked layout per AGENTS §3.10.

@@ -375,19 +375,48 @@ object InstructionSim extends App {
 
   println("--- InstructionSim: SET_BUS_MODE round-trip ---")
 
+  // SET_BUS_MODE wire encoding is non-sequential per ROADMAP
+  // §"Bus mode register": `mode[2]` is the SCL drive class, `mode[1:0]`
+  // is the timing-divider selector. The host encoder uses the wire
+  // codes (0, 1, 6, 7), NOT the SpinalEnumElement `.position`
+  // declaration index (0, 1, 2, 3). Mirror that here so the field
+  // check stays correct after any future re-ordering of the enum.
+  val busModeWire: Map[BusMode.E, Int] = Map(
+    BusMode.i2c -> 0,
+    BusMode.i3cOd -> 1,
+    BusMode.i3cPp -> 6,
+    BusMode.hdrDdr -> 7
+  )
+
   for (mode <- allBusModes) {
     val insn = SetBusMode(mode)
     val word = roundTrip(insn)
     assertOpcode(word, Opcode.setBusMode, "SET_BUS_MODE")
     assert(
-      field(word, 11, 9) == mode.position,
-      f"SET_BUS_MODE mode field mismatch ($mode, word=0x$word%04X)"
+      field(word, 11, 9) == busModeWire(mode),
+      f"SET_BUS_MODE mode field mismatch ($mode, " +
+        f"got=${field(word, 11, 9)}%d expected=${busModeWire(mode)}%d, " +
+        f"word=0x$word%04X)"
     )
     assertReservedZero(word, 8, 0, "SET_BUS_MODE")
   }
-  // Golden: SET_BUS_MODE(i2c) = 0x7000 (mode wire code 0b000).
-  assert(encode(SetBusMode(BusMode.i2c)) == 0x7000, "SET_BUS_MODE(i2c) golden mismatch")
-  // Golden: SET_BUS_MODE(hdrDdr) = 0x7000 | (0b111 << 9) = 0x7e00.
+  // Goldens: every BusMode against its wire-encoded operand.
+  // i2c    -> mode = 0b000 = 0 -> 0x7000 | (0 << 9) = 0x7000
+  // i3c-OD -> mode = 0b001 = 1 -> 0x7000 | (1 << 9) = 0x7200
+  // i3c-PP -> mode = 0b110 = 6 -> 0x7000 | (6 << 9) = 0x7c00
+  // hdr-ddr-> mode = 0b111 = 7 -> 0x7000 | (7 << 9) = 0x7e00
+  assert(
+    encode(SetBusMode(BusMode.i2c)) == 0x7000,
+    "SET_BUS_MODE(i2c) golden mismatch"
+  )
+  assert(
+    encode(SetBusMode(BusMode.i3cOd)) == 0x7200,
+    "SET_BUS_MODE(i3cOd) golden mismatch"
+  )
+  assert(
+    encode(SetBusMode(BusMode.i3cPp)) == 0x7c00,
+    "SET_BUS_MODE(i3cPp) golden mismatch"
+  )
   assert(
     encode(SetBusMode(BusMode.hdrDdr)) == 0x7e00,
     "SET_BUS_MODE(hdrDdr) golden mismatch"
