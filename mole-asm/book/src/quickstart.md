@@ -67,9 +67,18 @@ chapter (and a future crate); for now the [`stty`/`cat`] approach
 from the BRINGUP guide works:
 
 ```sh
-stty -F /dev/ttyUSB1 1000000 raw -echo
+stty -F /dev/ttyUSB1 1000000 cs8 -cstopb -parenb \
+    crtscts -ixon -ixoff -ixany raw -echo
 cat hello.mole.bin > /dev/ttyUSB1
 ```
+
+`crtscts` enables the FT2232H RTS#/CTS# hardware flow control
+Mole speaks (the engine deasserts CTS# while running so the host
+stops sending), and `-ixon -ixoff -ixany` disables any software
+flow control (Mole speaks none, and accidentally enabling it
+turns arbitrary frame bytes into XON/XOFF and breaks the
+link). See `fpga/Mole/BRINGUP.md` §3 for the full wiring
+contract.
 
 Mole accepts the frame, validates the CRC, copies the program into
 SPRAM, and starts executing. With a single-`HALT` program, the

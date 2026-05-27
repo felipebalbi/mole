@@ -10,9 +10,26 @@ The wire format is **raw binary on the UART**. There is no ASCII
 escaping, no SLIP framing, no start-of-frame byte. Frames are
 delimited by **idle time** on the line (see §"Resync rule").
 
-UART settings: **1 000 000 baud, 8N1**, no flow control. The
-iCEbreaker's FT2232H channel A is `/dev/ttyUSB0` on Linux and
-typically `COM3` or higher on Windows.
+UART settings: **1 000 000 baud, 8N1, RTS/CTS hardware flow
+control** (active-low, FT2232H convention). The iCEbreaker's
+FT2232H channel A is `/dev/ttyUSB0` on Linux and typically `COM3`
+or higher on Windows.
+
+Flow control: `io_uCts` (PMOD1A pin 18, MoleTop OUT -> FT2232H
+CTS#) is asserted (LOW) only while the top-level phase FSM is in
+`acceptLoadState`. A host driver with `crtscts` enabled
+therefore holds its TX off whenever Mole is running a program or
+draining the result ring --- this is what enforces the spec
+invariant *"while program is not HALTED, don't accept data"*.
+`io_uRts` (PMOD1A pin 19, MoleTop IN <- FT2232H RTS#) is
+asserted (LOW) when the host's USB pipe has room. The drainer's
+TX stream is gated on this, so when the host falls behind the
+drainer stops issuing new bytes --- but, per standard
+HW-flow-control semantics, an in-flight UART frame completes on
+the wire regardless. The FPGA pin enables an internal pull-up
+so an unwired board reads HIGH = RTS#-deasserted = drainer
+halted (visible failure rather than metastable garbage). See
+[`BRINGUP.md`](BRINGUP.md) §3 for a working `stty` line.
 
 ---
 
