@@ -32,7 +32,7 @@
 
 #content-slide("Your three options today")[
   #bullets(
-    [*Sealed compliance rig* --- gold standard, gated price.],
+    [*Sealed compliance rig* --- gold standard, behind a paywall.],
     [*Logic analyzer* --- observes, never injects.],
     [*MCU bit-banger* --- too slow, too flaky.],
   )
@@ -45,7 +45,7 @@
 ]
 
 #stat-slide(
-  "$80",
-  "iCEBreaker",
-  caption: [One open-hardware board. \$5 of FPGA. That's the bet.],
+  "2",
+  "resistors",
+  caption: [Plus one icebreaker and the DUT. That's the entire BoM for v0.],
 )

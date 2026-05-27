@@ -45,8 +45,8 @@ slides.typ            ; entry point: page setup, fonts, chapter
                       ;   include list.
 chapters/             ; one .typ file per logical section.
   00-cover.typ        ; title slide + agenda.
-  01-problem.typ      ; what compliance testing is, why existing
-                      ;   tools cost too much.
+  01-problem.typ      ; what compliance testing is, and why
+                      ;   today's tools don't reach every desk.
   02-architecture.typ ; engine + compiler split.
   03-quarter-bits.typ ; the timing model.
   04-isa-tour.typ     ; the 14-opcode ISA.

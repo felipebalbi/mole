@@ -13,7 +13,7 @@ PDF   := slides.pdf
 
 all: $(PDF)
 
-$(PDF): $(SRC) chapters/*.typ figures/*.typ
+$(PDF): $(SRC) $(wildcard chapters/*.typ) $(wildcard figures/*.typ)
 	$(TYPST) compile $(SRC) $(PDF)
 
 watch:
