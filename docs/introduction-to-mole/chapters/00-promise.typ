@@ -34,12 +34,12 @@
 ]
 
 #stat-slide(
-  "2",
-  "resistors",
-  caption: [Plus one iCEBreaker and the DUT. That's the entire BoM for v0.],
+  "1",
+  "iCEBreaker",
+  caption: [Plus 2 resistors and the DUT. That's the entire BoM for v0.],
 )
 
-#try-it-slide(
+#provocation-slide(
   [How would you test a \$5 I2C EEPROM on your desk #emph[today]?
 
   Not just \"does it ACK?\" -- does it survive a setup/hold violation? Does it
