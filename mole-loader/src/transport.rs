@@ -47,9 +47,16 @@ pub const DEFAULT_BAUD: u32 = 1_000_000;
 /// [`Transport::with_timeout`].
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
-/// Default result-ring size in bytes (matches `MoleConfig` Verde
-/// default of 2048 words = 4096 bytes).
-pub const DEFAULT_RING_BYTES: usize = 4096;
+/// Default result-ring size in bytes (matches
+/// `MoleConfig.resultRingByteCount` Verde default: 8192 bytes =
+/// 4096 words). The drainer always streams exactly this many bytes
+/// per HALT, so an under-sized request leaves the HALT word in the
+/// kernel buffer and the next decode sees a record header at the
+/// tail; an over-sized request will block the read waiting for
+/// bytes the engine will never send. If you have rebuilt the
+/// engine with a non-default `resultRingByteCount`, pass
+/// `--ring-bytes` to match.
+pub const DEFAULT_RING_BYTES: usize = 8192;
 
 /// Maximum I/O chunk size for incremental writes / reads. Small
 /// enough to give `indicatif` a smooth animation; large enough that

@@ -1,9 +1,9 @@
 //! Result-ring decoder.
 //!
 //! After a Mole program halts, the engine drains a fixed-size
-//! buffer (`MoleConfig.resultRingByteCount` bytes, default 4096) back
-//! to the host. This module turns that raw byte buffer into typed
-//! Rust values.
+//! buffer (`MoleConfig.resultRingByteCount` bytes, Verde default
+//! 8192 = 4096 words) back to the host. This module turns that raw
+//! byte buffer into typed Rust values.
 //!
 //! # Ring layout
 //!
@@ -585,9 +585,9 @@ mod tests {
 
     #[test]
     fn full_default_ring_size_round_trip() {
-        // Verde default ring = 4096 bytes = 2048 words. Smoke-test
+        // Verde default ring = 8192 bytes = 4096 words. Smoke-test
         // that the decoder is happy at the full size.
-        let bytes = build_ring((0x1234, 0x5678), &[], 0xC000, 2048);
+        let bytes = build_ring((0x1234, 0x5678), &[], 0xC000, 4096);
         let ring = decode_ring(&bytes).unwrap();
         assert_eq!(
             ring.revision,
@@ -599,7 +599,7 @@ mod tests {
         );
         // All inter-rev / pre-halt slots are zero in our builder,
         // so they decode as CAPTURE { sda: false }.
-        assert_eq!(ring.records.len(), 2048 - 3);
+        assert_eq!(ring.records.len(), 4096 - 3);
         assert!(
             ring.records
                 .iter()

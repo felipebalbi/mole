@@ -8,7 +8,7 @@
 //! mole-loader [OPTIONS] <FRAME>
 //!     -p, --port <PATH>                Serial port (e.g. /dev/ttyUSB0)
 //!     -b, --baud <RATE>                Baud rate [default: 1000000]
-//!         --ring-bytes <BYTES>         Result-ring size [default: 4096]
+//!         --ring-bytes <BYTES>         Result-ring size [default: 8192]
 //!         --expect-revision <X.Y.Z>    Assert engine revision
 //!         --timeout <SECS>             Per-op I/O timeout [default: 30]
 //!         --no-verify-frame            Skip CRC pre-flight
@@ -60,7 +60,10 @@ struct Cli {
 
     /// Result-ring size in bytes the engine will drain back. Default
     /// matches `MoleConfig.resultRingByteCount` on the Verde build
-    /// (2048 words = 4096 bytes). Must match the engine bitstream.
+    /// (4096 words = 8192 bytes). Must match the engine bitstream:
+    /// under-sized leaves the HALT word in the kernel buffer and the
+    /// next decode trips on a mid-ring record; over-sized blocks the
+    /// read on bytes the engine will never send.
     #[arg(long = "ring-bytes", default_value_t = DEFAULT_RING_BYTES)]
     ring_bytes: usize,
 
