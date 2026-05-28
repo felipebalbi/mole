@@ -1,10 +1,13 @@
 # Target Role
 
-Mole's bit-cycle engine plays one of two roles per bitstream:
-**controller** (drives SCL, sources bits on its own clock) or
-**target** (slaves to an external SCL). The role is a
-compile-time toggle in `MoleConfig.role`; one bitstream targets
-one role.
+Mole's bit-cycle engine plays one of two roles, **controller**
+(drives SCL, sources bits on its own clock) or **target**
+(slaves to an external SCL). The role is **runtime-selectable
+via the `SET_ROLE` opcode**: a single bitstream covers both
+roles, and a program switches between them as needed.
+`MoleConfig.role` only seeds the power-on default for the
+`roleReg` register; `SET_ROLE` rewrites it any time after
+boot.
 
 Most of moleasm is role-agnostic. Two opcodes plus one
 behavioural change cover what you need to know to write
@@ -128,5 +131,5 @@ then post-processing on the host. Both shapes are valid.
 | Exercise a controller-role driver  | target     |
 | DAA-arbitration tests              | target     |
 
-Two bitstreams; same Mole hardware; pick at synthesis time
-via `MoleConfig.role`.
+One bitstream; same Mole hardware; switch roles at runtime
+with `SET_ROLE`.

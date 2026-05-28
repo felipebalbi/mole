@@ -159,8 +159,8 @@ case class MoleLoaderFsm(
   val wordIndex = Reg(UInt(wordIndexWidth bits)) init U(0, wordIndexWidth bits)
   // Pre-registered "the word about to be written is the last word of the
   // frame" predicate. Spelt out as a Reg, not a combinational
-  // `wordIndex + 1 === frameLen`, because the latter is a 13-bit add +
-  // 13-bit equality chain (for the default programWordCount=4096), and on
+  // `wordIndex + 1 === frameLen`, because the latter is a 12-bit add +
+  // 12-bit equality chain (for the default programWordCount=2048), and on
   // the iCE40 UP5K (Mole Verde) that chain plus the FSM next-state mesh
   // that consumes it was the worst path through `idleCounter.SR` in the
   // first synth pass --- with the wordIndex carry chain dominating.

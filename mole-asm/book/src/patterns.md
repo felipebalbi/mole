@@ -233,8 +233,8 @@ reserved-v0.5 mnemonic, an experiment with the reserved tx code
 `0b11`). `.dw` is the escape:
 
 ```text
-; Reserved v0.5 FLAG_CLEAR (opcode 0xC, encoding TBD)
-.dw 0xC000
+; Reserved v0.5 FLAG_CLEAR (opcode 0x11, encoding TBD)
+.dw 0x8800
 ```
 
 There are exactly two reasons to do this:

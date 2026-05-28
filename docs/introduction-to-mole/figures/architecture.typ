@@ -38,7 +38,7 @@
   content((8.5, 1.45),
     text(font: font-serif, size: 13pt, fill: ink)[Bit-cycle engine])
   content((8.5, 1.0),
-    text(font: font-mono, size: 9pt, fill: ink-soft)[14 opcodes])
+    text(font: font-mono, size: 9pt, fill: ink-soft)[15 opcodes])
   content((8.5, 0.55),
     text(font: font-mono, size: 9pt, fill: ink-soft)[~1700 LUTs])
 

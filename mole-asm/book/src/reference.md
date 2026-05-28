@@ -7,23 +7,24 @@ them.
 
 ## Opcode summary
 
-| Opcode              | OP nibble | Operand shape                              | What it does                                              |
+| Opcode              | OP code   | Operand shape                              | What it does                                              |
 |---------------------|-----------|--------------------------------------------|-----------------------------------------------------------|
-| `HALT`              | `0x0`     | `[status=0..15]`                           | Stop engine; record 4-bit status.                         |
-| `EMIT_BIT`          | `0x1`     | `tx=... [expect=..] [mask=..] [capture=..]`| Emit one bit on the bus (controller role).                |
-| `EMIT_QUARTER`      | `0x2`     | `sda=... scl=... [expect/mask/capture]`    | Drive one quarter-bit edge with independent SDA/SCL.      |
-| `STRETCH_SCL`       | `0x3`     | `n_quarters (0..4095)`                     | Hold current state for `n` extra quarters.                |
-| `WAIT_ON`           | `0x4`     | `cond, timeout (0..255)`                   | Wait for cond, or set TIMEOUT_FLAG.                       |
-| `BRANCH_ON`         | `0x5`     | `cond, target (label or signed-8 offset)`  | PC-relative branch on cond.                               |
-| `JMP`               | `0x6`     | `addr (label or 0..4095)`                  | Absolute jump.                                            |
-| `SET_BUS_MODE`      | `0x7`     | `<bus-mode>`                               | Switch the active bus-mode register.                      |
-| `LOAD_TIMING`       | `0x8`     | `reg, divider (0..1023)`                   | Write 10-bit divider into a timing register.              |
-| `MARK`              | `0x9`     | `label=0..255`                             | Push an 8-bit marker into the result ring.                |
-| `SAMPLE_BIT_ON_SCL` | `0xA`     | `[expect/mask/capture]`                    | Target-role: sample SDA, slaved to controller SCL.        |
-| `DRIVE_BIT_ON_SCL`  | `0xB`     | `tx=... [expect/mask/capture]`             | Target-role: drive SDA while slaved to controller SCL.    |
-| `LOAD_LOOP`         | `0xC`     | `<lcr0|lcr1>, imm (0..255)`                | Prime loop counter LCR[reg] with 8-bit immediate.         |
-| `DEC_BRANCH`        | `0xD`     | `<lcr0|lcr1>, target (label or signed-8)`  | Decrement LCR[reg]; PC-relative branch if non-zero.       |
-| (reserved v0.5)     | `0xE..0xF`| --- (rejected, reach via `.dw`)            | Reserved: `FLAG_CLEAR`, `CAPTURE_RUN`.                    |
+| `HALT`              | `0x00`    | `[status=0..15]`                           | Stop engine; record 4-bit status.                         |
+| `EMIT_BIT`          | `0x01`    | `tx=... [expect=..] [mask=..] [capture=..]`| Emit one bit on the bus (controller role).                |
+| `EMIT_QUARTER`      | `0x02`    | `sda=... scl=... [expect/mask/capture]`    | Drive one quarter-bit edge with independent SDA/SCL.      |
+| `STRETCH_SCL`       | `0x03`    | `n_quarters (0..2047)`                     | Hold current state for `n` extra quarters.                |
+| `WAIT_ON`           | `0x04`    | `cond, timeout (0..127)`                   | Wait for cond, or set TIMEOUT_FLAG.                       |
+| `BRANCH_ON`         | `0x05`    | `cond, target (label or signed-7 offset)`  | PC-relative branch on cond.                               |
+| `JMP`               | `0x06`    | `addr (label or 0..2047)`                  | Absolute jump.                                            |
+| `SET_BUS_MODE`      | `0x07`    | `<bus-mode>`                               | Switch the active bus-mode register.                      |
+| `LOAD_TIMING`       | `0x08`    | `reg, divider (0..511)`                    | Write 9-bit divider into a timing register.               |
+| `MARK`              | `0x09`    | `label=0..255`                             | Push an 8-bit marker into the result ring.                |
+| `SAMPLE_BIT_ON_SCL` | `0x0A`    | `[expect/mask/capture]`                    | Target-role: sample SDA, slaved to controller SCL.        |
+| `DRIVE_BIT_ON_SCL`  | `0x0B`    | `tx=... [expect/mask/capture]`             | Target-role: drive SDA while slaved to controller SCL.    |
+| `LOAD_LOOP`         | `0x0C`    | `<lcr0|lcr1>, imm (0..255)`                | Prime loop counter LCR[reg] with 8-bit immediate.         |
+| `DEC_BRANCH`        | `0x0D`    | `<lcr0|lcr1>, target (label or signed-8)`  | Decrement LCR[reg]; PC-relative branch if non-zero.       |
+| `SET_ROLE`          | `0x10`    | `controller|target` (or `0|1`)             | Select engine role at runtime (default = `MoleConfig.role`).|
+| (reserved v0.5)     | `0x0E..0x0F`, `0x11..0x1F` | --- (rejected, reach via `.dw`) | Reserved: `FLAG_CLEAR`, `CAPTURE_RUN`, etc.       |
 
 ## Instruction word layout
 
@@ -31,7 +32,7 @@ All opcodes share these field positions:
 
 | Field        | Bits   | Notes                                                            |
 |--------------|--------|------------------------------------------------------------------|
-| `opcode`     | 15:12  | 4-bit opcode (14 used + 2 reserved-v0.5).                        |
+| `opcode`     | 15:11  | 5-bit opcode (15 used + 17 reserved-v0.5).                       |
 | `expect`     | 2      | Present on `EMIT_BIT`, `EMIT_QUARTER`, `SAMPLE_BIT_ON_SCL`, `DRIVE_BIT_ON_SCL`. |
 | `mask`       | 1      | Same opcodes as `expect`.                                        |
 | `capture`    | 0      | Same opcodes as `expect`.                                        |
@@ -126,7 +127,7 @@ writes them (or until a future v0.5 `FLAG_CLEAR`).
 | `mole_asm::assemble(src, fn)` | `Result<Vec<u16>>`       | Assemble; words in PC order.                |
 | `mole_asm::assemble_to_frame` | `Result<Vec<u8>>`        | Frame the assembled program for UART.       |
 | `mole_asm::frame::pack_bytecode` | `Vec<u8>`              | Pack words little-endian (no frame).        |
-| `mole_asm::frame::build_frame` | `Result<Vec<u8>>`       | `len`, words, CRC. `1..=4096` words.        |
+| `mole_asm::frame::build_frame` | `Result<Vec<u8>>`       | `len`, words, CRC. `1..=2048` words.        |
 | `mole_asm::crc::xmodem`        | `u16`                    | CRC-16/XMODEM, poly `0x1021`.               |
 
 ## Error kinds
@@ -135,7 +136,7 @@ writes them (or until a future v0.5 `FLAG_CLEAR`).
 |--------------|--------------------------------------------------------------------------------------------|
 | `Lex`        | Unknown / mis-cased / reserved-v0.5 mnemonic; unknown directive; malformed label or directive. |
 | `Symbol`     | Duplicate label, duplicate `.equ`, undefined name, label-vs-equate confusion, reserved-name collision. |
-| `Range`      | Numeric overflow; branch offset out of `-128..+127`; program exceeds 4096-word budget; `.dw` value > 0xFFFF. |
+| `Range`      | Numeric overflow; `BRANCH_ON` offset out of `-64..+63` (or `DEC_BRANCH` out of `-128..+127`); program exceeds 2048-word budget; `.dw` value > 0xFFFF. |
 | `Operand`    | Missing required key; unknown operand key; duplicate key; `expect=X` with `mask=1`; arity mismatch. |
 
 `AsmError::FrameTooLarge` sits outside this taxonomy because the

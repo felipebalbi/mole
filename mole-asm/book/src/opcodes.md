@@ -1,13 +1,13 @@
 # Opcodes
 
-The Mole engine implements **14 v0 opcodes**, each encoded as a
+The Mole engine implements **15 v0 opcodes**, each encoded as a
 16-bit word. This chapter walks through them in roughly the order
 you will reach for them as a new user. Each section gives the
 mnemonic, its operands, a short description, the wire encoding
 (reproduced from `Instruction.scala` for reference), and at least
 one realistic example.
 
-The opcode field is bits `[15:12]` of every instruction. The
+The opcode field is bits `[15:11]` of every instruction. The
 encodings are reproduced verbatim from the FPGA --- they are the
 contract you would have to honor if you ever wanted to write
 bytecode by hand.
@@ -18,8 +18,8 @@ Stops the engine and records a 4-bit status code.
 
 | Field   | Bits     | Description                                         |
 |---------|----------|-----------------------------------------------------|
-| opcode  | `[15:12]`| `0x0`                                               |
-| status  | `[11:8]` | Caller-defined 4-bit value, surfaced to the host.   |
+| opcode  | `[15:11]`| `0x0`                                               |
+| status  | `[10:7]` | Caller-defined 4-bit value, surfaced to the host.   |
 
 ```text
 HALT status=0        ; completed normally
@@ -40,8 +40,8 @@ two-quarters-low / two-quarters-high pattern for the active
 
 | Field   | Bits     | Description                                              |
 |---------|----------|----------------------------------------------------------|
-| opcode  | `[15:12]`| `0x1`                                                    |
-| tx      | `[11:10]`| tx symbol (`dominant`/`recessive`/`hiz`/reserved).       |
+| opcode  | `[15:11]`| `0x1`                                                    |
+| tx      | `[10:9]` | tx symbol (`dominant`/`recessive`/`hiz`/reserved).       |
 | expect  | `[2]`    | Expected SDA value (only meaningful when `mask=1`).      |
 | mask    | `[1]`    | If 1, set `MISMATCH_FLAG` on `read != expect`.           |
 | capture | `[0]`    | If 1, push the read bit to the result ring.              |
@@ -66,9 +66,9 @@ name it.
 
 | Field   | Bits     | Description                                              |
 |---------|----------|----------------------------------------------------------|
-| opcode  | `[15:12]`| `0x2`                                                    |
-| sda     | `[11:10]`| tx symbol for SDA this quarter.                          |
-| scl     | `[9:8]`  | tx symbol for SCL this quarter.                          |
+| opcode  | `[15:11]`| `0x2`                                                    |
+| sda     | `[10:9]` | tx symbol for SDA this quarter.                          |
+| scl     | `[8:7]`  | tx symbol for SCL this quarter.                          |
 | expect  | `[2]`    | (same as `EMIT_BIT`)                                     |
 | mask    | `[1]`    | (same as `EMIT_BIT`)                                     |
 | capture | `[0]`    | (same as `EMIT_BIT`)                                     |
@@ -100,8 +100,8 @@ arbitrary delay measured in quarters.
 
 | Field        | Bits     | Description                            |
 |--------------|----------|----------------------------------------|
-| opcode       | `[15:12]`| `0x3`                                  |
-| n_quarters   | `[11:0]` | Hold duration in quarters (0..4095).   |
+| opcode       | `[15:11]`| `0x3`                                  |
+| n_quarters   | `[10:0]` | Hold duration in quarters (0..2047).   |
 
 ```text
 STRETCH_SCL 12        ; pause 12 quarters in the current state
@@ -119,12 +119,12 @@ events.
 
 | Field    | Bits     | Description                                    |
 |----------|----------|------------------------------------------------|
-| opcode   | `[15:12]`| `0x4`                                          |
-| cond     | `[11:8]` | Cond code (see [Reference](./reference.md)).  |
-| timeout  | `[7:0]`  | Max quarters to wait (0..255). 0 = no timeout. |
+| opcode   | `[15:11]`| `0x4`                                          |
+| cond     | `[10:7]` | Cond code (see [Reference](./reference.md)).  |
+| timeout  | `[6:0]`  | Max quarters to wait (0..127). 0 = no timeout. |
 
 ```text
-WAIT_ON START_SEEN, 200     ; up to 200 quarters for a START on the bus
+WAIT_ON START_SEEN, 100     ; up to 100 quarters for a START on the bus
 WAIT_ON SDA_LOW,     64     ; wait for SDA to be sampled low
 WAIT_ON ALWAYS,       0     ; degenerate: condition is immediately true
 ```
@@ -139,9 +139,9 @@ namespace is shared with `WAIT_ON`.
 
 | Field    | Bits     | Description                                                 |
 |----------|----------|-------------------------------------------------------------|
-| opcode   | `[15:12]`| `0x5`                                                       |
-| cond     | `[11:8]` | Cond code.                                                  |
-| offset   | `[7:0]`  | Signed 8-bit PC offset (`-128..+127`).                      |
+| opcode   | `[15:11]`| `0x5`                                                       |
+| cond     | `[10:7]` | Cond code.                                                  |
+| offset   | `[6:0]`  | Signed 7-bit PC offset (`-64..+63`).                        |
 
 The offset is *relative* to the instruction after the branch:
 `offset = target_pc - branch_pc - 1`. When you use a label name, the
@@ -157,7 +157,7 @@ abort:
     HALT          status=1
 ```
 
-Offsets outside `-128..+127` are rejected at assemble time --- the
+Offsets outside `-64..+63` are rejected at assemble time --- the
 fix is to either rearrange your program or jump via `JMP`.
 
 ## `JMP`
@@ -166,8 +166,8 @@ Absolute jump within the program-memory budget.
 
 | Field   | Bits     | Description                                                 |
 |---------|----------|-------------------------------------------------------------|
-| opcode  | `[15:12]`| `0x6`                                                       |
-| addr    | `[11:0]` | Absolute PC target (0..4095).                              |
+| opcode  | `[15:11]`| `0x6`                                                       |
+| addr    | `[10:0]` | Absolute PC target (0..2047).                              |
 
 ```text
 JMP loop          ; named target
@@ -185,8 +185,8 @@ Switches the active `BUS_MODE`. This re-defines what `recessive` and
 
 | Field    | Bits     | Description                                  |
 |----------|----------|----------------------------------------------|
-| opcode   | `[15:12]`| `0x7`                                        |
-| mode_wire| `[11:9]` | Encoded bus-mode value (0, 1, 6, or 7).      |
+| opcode   | `[15:11]`| `0x7`                                        |
+| mode_wire| `[10:8]` | Encoded bus-mode value (0, 1, 6, or 7).      |
 
 ```text
 SET_BUS_MODE i2c          ; recessive = Hi-Z, timing reg 0
@@ -202,14 +202,14 @@ to discourage confusion with `_div`-style register aliases.
 
 ## `LOAD_TIMING`
 
-Writes a 10-bit divider into one of four per-mode timing registers.
+Writes a 9-bit divider into one of four per-mode timing registers.
 The active timing register is selected by the current `BUS_MODE`.
 
 | Field        | Bits     | Description                              |
 |--------------|----------|------------------------------------------|
-| opcode       | `[15:12]`| `0x8`                                    |
-| reg          | `[11:10]`| Timing register index (0..3).            |
-| divider_word | `[9:0]`  | 10-bit divider value (0..1023).          |
+| opcode       | `[15:11]`| `0x8`                                    |
+| reg          | `[10:9]` | Timing register index (0..3).            |
+| divider_word | `[8:0]`  | 9-bit divider value (0..511).            |
 
 The register index can be a numeric literal (`0`) or one of the four
 named aliases:
@@ -243,8 +243,8 @@ program.
 
 | Field   | Bits     | Description                              |
 |---------|----------|------------------------------------------|
-| opcode  | `[15:12]`| `0x9`                                    |
-| label   | `[11:4]` | 8-bit label.                             |
+| opcode  | `[15:11]`| `0x9`                                    |
+| label   | `[10:3]` | 8-bit label.                             |
 
 ```text
 MARK label=1     ; "everything after this came from the ACK path"
@@ -260,7 +260,7 @@ as `EMIT_BIT`.
 
 | Field   | Bits     | Description                                       |
 |---------|----------|---------------------------------------------------|
-| opcode  | `[15:12]`| `0xA`                                             |
+| opcode  | `[15:11]`| `0xA`                                             |
 | expect  | `[2]`    | Expected SDA value (only meaningful when `mask=1`).|
 | mask    | `[1]`    | Set `MISMATCH_FLAG` if read != expect.            |
 | capture | `[0]`    | Push read bit into the ring.                      |
@@ -279,8 +279,8 @@ is high. The flag triple is the same as `EMIT_BIT`.
 
 | Field   | Bits     | Description                                       |
 |---------|----------|---------------------------------------------------|
-| opcode  | `[15:12]`| `0xB`                                             |
-| tx      | `[11:10]`| tx symbol to drive.                               |
+| opcode  | `[15:11]`| `0xB`                                             |
+| tx      | `[10:9]` | tx symbol to drive.                               |
 | expect  | `[2]`    | Expected SDA value (only meaningful when `mask=1`).|
 | mask    | `[1]`    | Set `MISMATCH_FLAG` if read != expect.            |
 | capture | `[0]`    | Push read bit into the ring.                      |
@@ -300,9 +300,9 @@ slot.
 
 | Field    | Bits     | Description                                       |
 |----------|----------|---------------------------------------------------|
-| opcode   | `[15:12]`| `0xC`                                             |
-| reg      | `[11]`   | `0` = `lcr0`, `1` = `lcr1`.                       |
-| reserved | `[10:8]` | Must be `0` in v1; reserved for a future widening.|
+| opcode   | `[15:11]`| `0xC`                                             |
+| reg      | `[10]`   | `0` = `lcr0`, `1` = `lcr1`.                       |
+| reserved | `[9:8]`  | Must be `0` in v1; reserved for a future widening.|
 | imm      | `[7:0]`  | Unsigned 8-bit initial value (0..255).            |
 
 ```text
@@ -316,8 +316,8 @@ runs a full 256 passes. The assembler warns when it sees a
 literal `0`; if you really need a 256-iteration loop, prefer
 `LOAD_LOOP r, 0` with a comment explaining the intent.
 
-The `[10:8]` reserved bits stay zero in v1. A future 16-LCR
-widening will use those three bits as additional reg-id bits with
+The `[9:8]` reserved bits stay zero in v1. A future 4-LCR
+widening will use those two bits as additional reg-id bits with
 no wire-format break.
 
 ## `DEC_BRANCH`
@@ -325,13 +325,15 @@ no wire-format break.
 Decrements one of the LCRs and branches by a signed 8-bit
 PC-relative offset (±128 instructions) if the post-decrement
 value is non-zero. The branch target is usually a label; the
-assembler computes the offset for you.
+assembler computes the offset for you. Intentionally wider than
+[`BRANCH_ON`](#branch_on)'s 7-bit offset because tight inner
+loops benefit from longer back-edges.
 
 | Field    | Bits     | Description                                                |
 |----------|----------|------------------------------------------------------------|
-| opcode   | `[15:12]`| `0xD`                                                      |
-| reg      | `[11]`   | `0` = `lcr0`, `1` = `lcr1`.                                |
-| reserved | `[10:8]` | Must be `0` in v1.                                         |
+| opcode   | `[15:11]`| `0xD`                                                      |
+| reg      | `[10]`   | `0` = `lcr0`, `1` = `lcr1`.                                |
+| reserved | `[9:8]`  | Must be `0` in v1.                                         |
 | offset   | `[7:0]`  | Signed 8-bit PC-relative offset (target = PC + 1 + offset).|
 
 Semantics, per fetch:
@@ -350,6 +352,38 @@ DEC_BRANCH  lcr0, bit_loop                    ; back-edge while lcr0 != 0
 (`MISMATCH_FLAG`, `TIMEOUT_FLAG`, `START_FLAG`, `STOP_FLAG`),
 so it composes cleanly with the `BRANCH_ON MISMATCH ...`
 fail-fast idiom inside the loop body.
+
+## `SET_ROLE`
+
+Selects the engine's role at runtime. `role = 0` puts the engine
+in controller role (it drives SCL via `EMIT_BIT` / `EMIT_QUARTER`);
+`role = 1` puts it in target role (it slaves to the external
+controller's SCL via `SAMPLE_BIT_ON_SCL` / `DRIVE_BIT_ON_SCL`).
+The power-on default is taken from `MoleConfig.role`, so a
+program that never issues `SET_ROLE` keeps the historical
+compile-time-style behaviour.
+
+| Field    | Bits     | Description                                                |
+|----------|----------|------------------------------------------------------------|
+| opcode   | `[15:11]`| `0x10`                                                     |
+| role     | `[10]`   | `0` = controller, `1` = target.                            |
+| reserved | `[9:0]`  | Must be `0` in v1.                                         |
+
+```text
+SET_ROLE controller         ; explicit; matches the v0 default
+SET_ROLE target             ; switch to follower
+```
+
+The decode arm releases all bus drivers (`sdaDriveLow/High`,
+`sclDriveLow/High := False`) before writing the role register, so
+a mid-program role switch always leaves the bus in a clean Hi-Z
+state regardless of which role was driving last. There is no
+"must be first" check --- the SDK convention is to issue
+`SET_ROLE` near the top of every program, but the engine accepts
+the opcode at any PC.
+
+The short forms `controller`/`target` are case-insensitive; the
+numeric forms `0`/`1` are also accepted.
 
 ## A note on the reserved-v0.5 mnemonics
 

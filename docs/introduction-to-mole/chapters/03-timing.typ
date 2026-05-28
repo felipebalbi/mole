@@ -124,6 +124,6 @@
     [Four quarters give setup, sample, and hold each their own slot.],
     [Even the fastest target spec is comfortable on the smallest iCE40.],
   ),
-  next: [the 14-opcode ISA that consumes those quarter-bits.],
+  next: [the 15-opcode ISA that consumes those quarter-bits.],
   deeper: [`mole-asm/book/src/mental-model.md` -- "Quarter-bit time" section.],
 )

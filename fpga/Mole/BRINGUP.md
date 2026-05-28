@@ -111,7 +111,7 @@ Hex (little-endian on the wire, including the framing):
 
 ```
 02 00                      ; len = 2
-00 70                      ; SET_BUS_MODE i2c   (opcode 0x7, i2c.position=0, encoded as (7<<12)|(0<<9) = 0x7000 -> 00 70)
+00 38                      ; SET_BUS_MODE i2c   (opcode 0x7, i2c.position=0, encoded as (7<<11)|(0<<8) = 0x3800 -> 00 38)
 00 00                      ; HALT 0             (opcode 0x0, status=0, encoded as 0x0000 -> 00 00)
 <crc lo> <crc hi>          ; CRC-16/XMODEM over the 6 payload bytes
 ```

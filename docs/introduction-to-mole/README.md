@@ -62,7 +62,7 @@ chapters/             ; one .typ file per part.
   02-architecture.typ ; three boxes, two layers, contract.
   03-timing.typ       ; quarter-bit time and why four.
   04-isa-and-moleasm.typ
-                      ; 14 opcodes, BUS_MODE, sticky flags,
+                      ; 15 opcodes, BUS_MODE, sticky flags,
                       ;   the assembly syntax.
   05-first-test.typ   ; worked I2C single-byte write.
   06-breaking-it.typ  ; same write with a deliberate glitch.

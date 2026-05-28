@@ -205,13 +205,13 @@ faraway:
 Result:
 
 ```text
-file.moleasm:1: BRANCH_ON offset 199 out of signed 8-bit range
+file.moleasm:1: BRANCH_ON offset 199 out of signed 7-bit range
                 (branch_pc=0)
 ```
 
-Fix: replace the `BRANCH_ON` with a `JMP faraway` (12-bit absolute
+Fix: replace the `BRANCH_ON` with a `JMP faraway` (11-bit absolute
 target, no range issue), or rearrange the program so the target is
-within `-128..+127`.
+within `-64..+63`.
 
 ### Operand value too large
 
@@ -242,19 +242,19 @@ file.moleasm:1: .dw value 0x10000 out of 16-bit range
 
 Fix: split into two `.dw` values or shrink the constant.
 
-### Program exceeds the 4096-word budget
+### Program exceeds the 2048-word budget
 
-The engine has 4096 program-memory slots; anything past slot 4095 is
+The engine has 2048 program-memory slots; anything past slot 2047 is
 rejected:
 
 ```text
-; ... 4097 HALTs ...
+; ... 2049 HALTs ...
 ```
 
 Result:
 
 ```text
-file.moleasm:4097: program exceeds 4096 instruction slots (PC overflow)
+file.moleasm:2049: program exceeds 2048 instruction slots (PC overflow)
 ```
 
 Fix: shrink the program, or split it across multiple frames if your
@@ -362,16 +362,16 @@ don't have a source location.
 Result:
 
 ```text
-frame must contain 1..=4096 words, got 0
+frame must contain 1..=2048 words, got 0
 ```
 
 or
 
 ```text
-frame must contain 1..=4096 words, got 5000
+frame must contain 1..=2048 words, got 5000
 ```
 
-Fix: build a frame from 1..=4096 words. An empty program is
+Fix: build a frame from 1..=2048 words. An empty program is
 deliberately rejected (the engine has no useful behaviour when fed
 zero words).
 

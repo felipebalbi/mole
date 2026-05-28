@@ -12,11 +12,12 @@ wire level.
 The architecture is two layers:
 
 - **Layer 0** --- a tiny, protocol-agnostic bit-cycle engine in the
-  FPGA (**14 opcodes, 2 reserved slots, 16-bit fixed-width
+  FPGA (**15 opcodes, 17 reserved slots, 16-bit fixed-width
   instructions**) that drives quarter-bit patterns on SDA / SCL
   and compares them against expectations. Knows nothing about I2C
   or I3C; per-bit drive is a bus-agnostic `tx_symbol` decoded
-  against the active `BUS_MODE`. Plays controller *or* target.
+  against the active `BUS_MODE`. Plays controller *or* target
+  (runtime-selectable via `SET_ROLE`; single bitstream for both).
   Two 8-bit loop counter registers (`LCR0`/`LCR1`) plus
   `LOAD_LOOP` / `DEC_BRANCH` give bounded loops and one level
   of nesting at the engine level.

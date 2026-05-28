@@ -46,18 +46,19 @@ rule in `../../AGENTS.md` §3.4.
 
 ## ISA is a stable contract
 
-The **14-opcode ISA** --- `EMIT_BIT`, `EMIT_QUARTER`,
+The **15-opcode ISA** --- `EMIT_BIT`, `EMIT_QUARTER`,
 `STRETCH_SCL`, `WAIT_ON`, `SET_BUS_MODE`, `SAMPLE_BIT_ON_SCL`,
 `DRIVE_BIT_ON_SCL`, `JMP`, `BRANCH_ON`, `HALT`, `MARK`,
-`LOAD_TIMING`, `LOAD_LOOP`, `DEC_BRANCH` (plus two reserved
-opcode slots) --- and its **16-bit fixed-width** encoding are
-externally visible: the host compiler emits exactly this byte
-format and every deployed Mole decodes it. Reordering opcodes,
-shrinking fields, repurposing reserved bits, moving the flag
-triple off `[2:0]`, *or changing the fixed 16-bit width* (to
-8-bit, to variable-length, or anything else) is a wire-format
-break that requires a bytecode-version bump. See ROADMAP §"ISA"
-and §"Encoding width" for the per-opcode field budget and why
+`LOAD_TIMING`, `LOAD_LOOP`, `DEC_BRANCH`, `SET_ROLE` (plus 17
+reserved opcode slots in the 5-bit opcode field at `[15:11]`)
+--- and its **16-bit fixed-width** encoding are externally
+visible: the host compiler emits exactly this byte format and
+every deployed Mole decodes it. Reordering opcodes, shrinking
+fields, repurposing reserved bits, moving the flag triple off
+`[2:0]`, *or changing the fixed 16-bit width* (to 8-bit, to
+variable-length, or anything else) is a wire-format break that
+requires a bytecode-version bump. See ROADMAP §"ISA" and
+§"Encoding width" for the per-opcode field budget and why
 narrower widths were rejected.
 
 If the ISA truly needs to change:
@@ -277,6 +278,19 @@ WAIT-SCL-RELEASE wired-in vs gated out) use a Scala-time `if` so
 the optional logic disappears entirely from the synthesised
 design when the toggle is `false`. A Spinal `when(...)` would
 still emit the gating and the sense wire.
+
+**Exception: `MoleConfig.role`.** Role is the one `MoleConfig`
+field that intentionally departs from this convention. It is the
+power-on default for the runtime `roleReg` register
+(`BitCycleEngineCore.scala`, see the `roleReg` declaration
+comment), not a Scala-time strip. Both controller-role and
+target-role FSM arms elaborate unconditionally, and `SET_ROLE`
+flips `roleReg` at any PC. The departure is deliberate: it lets
+a single bitstream serve both roles, which matters more here
+than the LUT savings a Scala-time strip would have bought. Other
+`MoleConfig` fields keep the Scala-`if` discipline; do not
+generalise the runtime-register pattern to them without an
+equivalent justification.
 
 ## REVISION word convention
 

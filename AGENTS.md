@@ -30,7 +30,7 @@ model, and the compile-time error-injection contract.
 ### One-paragraph architecture
 
 A small **bit-cycle engine** in the FPGA ("Layer 0") executes a
-**14-opcode ISA** (16-bit fixed-width instructions, 2 reserved
+**15-opcode ISA** (16-bit fixed-width instructions, 17 reserved
 opcode slots) over quarter-bit-resolution SDA/SCL patterns. The
 engine is **literally bus-agnostic**: per-bit / per-quarter drive
 fields are 2-bit `tx_symbol = {dominant, recessive, hiz,
@@ -40,8 +40,9 @@ as a **Scheme SDK** ("Layer 1") that compiles down to that
 bytecode. Spec-compliant primitives live in `i2c/`, `i3c/`,
 `ccc/`, `hdr-ddr/` namespaces; raw bit-level escape hatches live
 in `raw/` and require explicit opt-in. The engine plays
-controller *or* target via a config bit; target-role bytes use
-`SAMPLE_BIT_ON_SCL` / `DRIVE_BIT_ON_SCL` to slave to the
+controller *or* target, selected at runtime by `SET_ROLE`
+(power-on default from `MoleConfig.role`); target-role bytes
+use `SAMPLE_BIT_ON_SCL` / `DRIVE_BIT_ON_SCL` to slave to the
 external controller's SCL. Bounded loops use a two-register loop
 counter (`LCR0`/`LCR1`) primed by `LOAD_LOOP` and counted down by
 `DEC_BRANCH`. Error injection is decided at compile time (PRNG
@@ -125,7 +126,7 @@ don't co-exist cleanly in one workspace. Do not merge them.
    Never add `Signed-off-by:` from an agent --- only humans certify
    the DCO.
 9. **Instruction width is fixed 16 bits.** Opcode is always
-   `[15:12]` (4 bits, 16 slots, 12 in use + 4 reserved). Don't
+   `[15:11]` (5 bits, 32 slots, 15 in use + 17 reserved). Don't
    widen instructions, don't relocate the opcode field, don't
    add a multi-word opcode form.
 10. **The flag triple is at `[2:0]`.** On every opcode that
@@ -156,8 +157,8 @@ don't co-exist cleanly in one workspace. Do not merge them.
     `scl_symbol = hiz` (release) are always legal in target
     role. Legal target `BUS_MODE`s are `i2c` and `i3c-OD`.
 14. **`BRANCH_ON` and `WAIT_ON` share encoding and
-    cond-code namespace.** Shape is `[11:8]cond_code
-    [7:0]operand`; only operand semantics differ
+    cond-code namespace.** Shape is `[10:7]cond_code
+    [6:0]operand`; only operand semantics differ
     (signed-PC-offset vs unsigned-quarter-timeout). The
     cond-code namespace is shared: codes 0..9 are in use, 10..15
     reserved for v0.5. Don't fork the two opcodes. Don't
@@ -266,7 +267,7 @@ don't co-exist cleanly in one workspace. Do not merge them.
 - Comments: **why, not what.** Datasheet / spec page references in
   source headers are encouraged --- they don't go stale.
 - **Engine invariants when implementing Layer 0:** 16-bit fixed
-  instruction width (opcode `[15:12]`, flag triple `[2:0]` on
+  instruction width (opcode `[15:11]`, flag triple `[2:0]` on
   bearer opcodes); the fabric clock *is* the quarter-bit clock
   (no PLL-multiplied sub-quarter divisions); pads are
   push-pull-capable with external pull-ups so OD `recessive`

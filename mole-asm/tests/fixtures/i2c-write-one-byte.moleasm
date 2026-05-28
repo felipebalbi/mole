@@ -31,7 +31,7 @@
 
         ; -- ACK slot: release SDA, expect target to pull low --
         EMIT_BIT      tx=hiz expect=0 mask=1 capture=1
-        BRANCH_ON     MISMATCH, nak         ; PC-relative, ±128 insn
+        BRANCH_ON     MISMATCH, nak         ; PC-relative, ±64 insn
 
         ; -- Data byte 0xAB = 1010_1011 --
         EMIT_BIT      tx=recessive          ; bit 7 = 1

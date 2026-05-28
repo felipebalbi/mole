@@ -69,7 +69,7 @@ program lives on the same quarter-tick grid.
 
 **Frame.** The wire format the on-target loader expects:
 `len_lo, len_hi, words(LE), crc_lo, crc_hi`. CRC-16/XMODEM over
-everything except itself. 1..=4096 words per frame.
+everything except itself. 1..=2048 words per frame.
 
 **Halt.** Stop the engine. The `HALT` opcode's status field is the
 caller-defined exit code surfaced to the host.
@@ -86,7 +86,7 @@ driving. Used during ACK sampling and target-role release.
 **I3C-PP.** I3C *Push-Pull* mode. `recessive` actively drives the
 line high.
 
-**Instruction.** A 16-bit word. Opcode in `[15:12]`; the rest of the
+**Instruction.** A 16-bit word. Opcode in `[15:11]`; the rest of the
 layout depends on the opcode.
 
 **Label.** A name bound to a PC value. Defined with `name:`. Cannot
@@ -135,8 +135,8 @@ to ship over UART.
 line floats high through an external pull-up. The model for I2C and
 I3C-OD electrical behaviour.
 
-**Opcode.** The 4-bit field at `[15:12]` of every instruction. 14
-v0 opcodes plus two reserved-v0.5 slots.
+**Opcode.** The 5-bit field at `[15:11]` of every instruction. 15
+v0 opcodes plus 17 reserved-v0.5 slots.
 
 **Pass 1 / Pass 2.** The two phases of the assembler. Pass 1 lexes,
 builds the symbol table, and assigns PC values. Pass 2 encodes each

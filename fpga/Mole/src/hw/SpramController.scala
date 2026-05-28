@@ -75,9 +75,9 @@ case class SpramController(cfg: MoleConfig, useBlackBox: Boolean = true)
   // Phase 0 simplifies to a single 16k-word tile. The UP5K has
   // four; the multi-tile arbiter lands in a Step 8+ follow-up
   // when the engine actually needs more memory. With the v0
-  // defaults (4096 program + 4096 result words = 8192) we use half
-  // of one tile; users can push the result ring up to
-  // ~24 KiB before hitting this cap.
+  // defaults (2048 program + 2048 result words = 4096) we use a
+  // quarter of one tile; users can push the result ring up to
+  // ~28 KiB before hitting this cap.
   require(
     totalWords <= 16384,
     s"SPRAM total ($totalWords words) exceeds one tile (16384 words). Multi-tile support is Step 8+; bump programWordCount or resultRingByteCount down for now."

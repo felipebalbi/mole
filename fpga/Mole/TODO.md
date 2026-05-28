@@ -16,13 +16,28 @@ bring-up plan (TBD).
 Each completed step gets a "What landed" entry so the design
 rationale survives independently of the source.
 
-The 14-opcode ISA (`EMIT_BIT`, `EMIT_QUARTER`, `STRETCH_SCL`,
+**Note on historical "What landed" entries.** These are
+point-in-time records of what shipped at each step. Concrete
+values (`programWordCount`, opcode-field bit positions, BRANCH /
+WAIT operand widths, etc.) may have been superseded by later
+steps. Two notable retroactive deltas: Step 21 widened the
+opcode field from 4 bits at `[15:12]` to 5 bits at `[15:11]` (so
+operand-bearing positions shifted: `[11:0]` operands became
+`[10:0]`, `[11:8]cond [7:0]operand` became `[10:7]cond
+[6:0]operand`), and `programWordCount`'s cap dropped from 4096
+to 2048 as `JMP`'s addr field narrowed from 12 bits to 11. Step
+22 added `SET_ROLE` and made the engine role a runtime register.
+See code (`src/hw/Instruction.scala`, `src/hw/MoleConfig.scala`,
+`src/hw/BitCycleEngineCore.scala`) for current values.
+
+The 15-opcode ISA (`EMIT_BIT`, `EMIT_QUARTER`, `STRETCH_SCL`,
 `WAIT_ON`, `SET_BUS_MODE`, `SAMPLE_BIT_ON_SCL`,
 `DRIVE_BIT_ON_SCL`, `JMP`, `BRANCH_ON`, `HALT`, `MARK`,
-`LOAD_TIMING`, `LOAD_LOOP`, `DEC_BRANCH`; two reserved opcode
-slots) and its 16-bit fixed-width encoding are the externally
-visible contract. See `../../ROADMAP.md` §"Layer 0" and
-`AGENTS.md` §"ISA is a stable contract" before changing either.
+`LOAD_TIMING`, `LOAD_LOOP`, `DEC_BRANCH`, `SET_ROLE`; 17
+reserved opcode slots in a 5-bit opcode field at `[15:11]`) and
+its 16-bit fixed-width encoding are the externally visible
+contract. See `../../ROADMAP.md` §"Layer 0" and `AGENTS.md`
+§"ISA is a stable contract" before changing either.
 
 ---
 

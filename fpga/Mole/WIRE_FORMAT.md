@@ -60,7 +60,7 @@ Worked-out examples:
    len = 2   -> frame_size =  8 bytes
    len = 4   -> frame_size = 12 bytes
    len = 16  -> frame_size = 36 bytes
-   len = 4096 (max) -> frame_size = 8196 bytes
+   len = 2048 (max) -> frame_size = 4100 bytes
 ```
 
 ### 1.1 The `len` field
@@ -68,10 +68,10 @@ Worked-out examples:
 - `len` is the **number of 16-bit opcode words** in the program.
 - `len` does **not** include itself.
 - `len` does **not** include the trailing CRC.
-- Valid range: `1 <= len <= 4096`. `len = 0` is rejected (no
-  program to run). `len > 4096` is rejected (exceeds
-  `MoleConfig.programWordCount`, which is itself capped at 4096
-  by the 12-bit `JMP` absolute-address field; see
+- Valid range: `1 <= len <= 2048`. `len = 0` is rejected (no
+  program to run). `len > 2048` is rejected (exceeds
+  `MoleConfig.programWordCount`, which is itself capped at 2048
+  by the 11-bit `JMP` absolute-address field; see
   `../../ROADMAP.md` §"Encoding width").
 - Encoded **little-endian**: the low byte (`len & 0xFF`) goes on
   the wire first, then the high byte (`(len >> 8) & 0xFF`).
@@ -352,8 +352,8 @@ def crc16_xmodem(data: bytes) -> int:
     return crc
 
 def build_frame(words: list[int]) -> bytes:
-    if not (1 <= len(words) <= 4096):
-        raise ValueError("len must be in 1..4096")
+    if not (1 <= len(words) <= 2048):
+        raise ValueError("len must be in 1..2048")
     payload = struct.pack("<H", len(words))
     for w in words:
         if not (0 <= w <= 0xFFFF):

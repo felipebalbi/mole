@@ -17,20 +17,21 @@ Status: **Phase 2 done** --- end-to-end UART loader -> bit engine
 ## What this is
 
 A SpinalHDL implementation of Layer 0 of the Mole architecture: a
-small, register-mapped engine that executes a **14-opcode ISA**
+small, register-mapped engine that executes a **15-opcode ISA**
 (`EMIT_BIT`, `EMIT_QUARTER`, `STRETCH_SCL`, `WAIT_ON`,
 `SET_BUS_MODE`, `SAMPLE_BIT_ON_SCL`, `DRIVE_BIT_ON_SCL`, `JMP`,
 `BRANCH_ON`, `HALT`, `MARK`, `LOAD_TIMING`, `LOAD_LOOP`,
-`DEC_BRANCH`; two reserved opcode slots) and drives SDA / SCL
-with quarter-bit-resolution timing. Per-bit / per-quarter drive
-is a bus-agnostic 2-bit `tx_symbol` (`dominant` / `recessive` /
-`hiz` / reserved) decoded against the
-active `BUS_MODE` register --- the engine has zero protocol
+`DEC_BRANCH`, `SET_ROLE`; 17 reserved opcode slots) and drives
+SDA / SCL with quarter-bit-resolution timing. Per-bit /
+per-quarter drive is a bus-agnostic 2-bit `tx_symbol`
+(`dominant` / `recessive` / `hiz` / reserved) decoded against
+the active `BUS_MODE` register --- the engine has zero protocol
 knowledge. The same engine plays controller (engine drives SCL)
 or target (engine slaves to external SCL via `SAMPLE_BIT_ON_SCL`
-/ `DRIVE_BIT_ON_SCL`). Protocol semantics (I2C, I3C, CCC,
-HDR-DDR, peripheral emulation) live in the host-side Scheme SDK
-(Layer 1).
+/ `DRIVE_BIT_ON_SCL`), runtime-selectable via `SET_ROLE` so a
+single bitstream serves both roles. Protocol semantics (I2C,
+I3C, CCC, HDR-DDR, peripheral emulation) live in the host-side
+Scheme SDK (Layer 1).
 
 ## What's in scope (v0)
 
@@ -40,7 +41,9 @@ HDR-DDR, peripheral emulation) live in the host-side Scheme SDK
   programs live in on-die SPRAM.
 - I2C (all modes) and I3C SDR up to the fabric ceiling (~6 MHz SCL
   on the UP5K's 24 MHz fabric --- see ROADMAP §"Clocks").
-- Same engine plays controller *or* target (selected by host).
+- Same engine plays controller *or* target (runtime-selectable
+  via `SET_ROLE` opcode; `MoleConfig.role` is the power-on
+  default).
 - Custom `MoleBus` bundle on SDA / SCL (`driveLow` + `driveHigh`
   + `read`), backing push-pull-capable iCE40 `SB_IO` pads with
   external pull-ups. OD vs PP is decoded at runtime from the

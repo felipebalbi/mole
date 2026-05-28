@@ -26,7 +26,7 @@ already on the icebreaker).
 The architecture is a **bit-stream + Scheme SDK** design:
 
 - **FPGA hosts a tiny, protocol-agnostic bit-cycle engine** ("Layer 0"):
-  ~14 opcodes, ~1700 LUTs, no knowledge of I2C / I3C, just drives
+  ~15 opcodes, ~1700 LUTs, no knowledge of I2C / I3C, just drives
   quarter-bit patterns on SDA/SCL and compares them against expects.
 - **Host hosts a Scheme SDK** ("Layer 1"): all of I2C and I3C lives
   here as Scheme source --- spec-compliant primitives (`sdr/write-byte`,
@@ -40,9 +40,11 @@ Five consequences worth naming explicitly:
 1. **Same engine drives both I2C and I3C.** At the wire layer the buses
    are identical; the difference is which Scheme namespace your test
    imports.
-2. **Same engine plays both controller and target.** Role is a config
-   bit; the SDK exposes `i3c/controller/*` and `i3c/target/*`
-   namespaces over a shared set of primitives. In target role the
+2. **Same engine plays both controller and target.** Role is a
+   runtime register selected by the `SET_ROLE` opcode; the SDK
+   exposes `i3c/controller/*` and `i3c/target/*` namespaces over
+   a shared set of primitives, and a single bitstream serves
+   both. In target role the
    engine does **not** drive SCL --- it samples SCL edges driven
    by the external controller and reacts via dedicated
    `WAIT_ON START_SEEN`, `WAIT_ON STOP_SEEN`,
@@ -85,7 +87,7 @@ Five consequences worth naming explicitly:
    |    v                                            |
    | Bit-cycle engine (Layer 0)                      |
    |   - quarter-bit FSM                             |
-   |   - 14-opcode decoder                           |
+   |   - 15-opcode decoder                           |
    |   - expect comparator                           |
    |   - capture path                                |
    |   - timing dividers (pp/od/i2c-freq)            |
@@ -152,7 +154,7 @@ Every protocol-aware shortcut we resist baking into the engine is a
 place where "fix a spec bug" becomes "edit Scheme" instead of
 "respin the bitstream". This is the architectural win.
 
-### ISA (v0 --- 14 opcodes, 16-bit encoding)
+### ISA (v0 --- 15 opcodes, 16-bit encoding)
 
 The ISA splits into five buckets:
 
@@ -184,9 +186,12 @@ The ISA splits into five buckets:
   (do not touch sticky engine flags). One level of nesting
   without spilling to scratch.
 
-Role is a config bit, not an opcode: the same program may issue
-both role-agnostic ops and either-role helpers, but in practice
-a given test runs the engine in one role or the other.
+Role is a runtime register, selected by the `SET_ROLE` opcode
+(or left at the `MoleConfig.role` power-on default if a program
+never issues it): the same program may issue both role-agnostic
+ops and either-role helpers, and a single bitstream serves both
+roles. In practice a given test runs the engine in one role at
+a time, with `SET_ROLE` near the top of the program.
 
 Wire engine --- role-agnostic primitives:
 
@@ -287,10 +292,10 @@ appropriate to the test.
 
 Control flow:
 
-- `JMP addr` --- unconditional jump to absolute 12-bit
-  instruction address (4096-instruction range, whole program).
+- `JMP addr` --- unconditional jump to absolute 11-bit
+  instruction address (2048-instruction range, whole program).
 - `BRANCH_ON cond, offset` --- conditional jump to a
-  PC-relative signed 8-bit offset (±128 instructions, local
+  PC-relative signed 7-bit offset (±64 instructions, local
   loops). `cond` is a 4-bit condition code drawn from the
   shared namespace described under "Engine flags --- unified
   condition codes" below. The unified branch opcode replaces
@@ -307,13 +312,14 @@ Bookkeeping:
   Pure --- does not change the active mode (use `SET_BUS_MODE`
   for that).
 
-Total: 14 opcodes. The 4-bit opcode field holds 16 codes; two
-slots remain reserved (0xE / 0xF). Slots 0xC and 0xD originally
-held `WAIT_ADDRESSED` and `MISMATCH_CLEAR` as v0.5 reservations
-and graduated to v0 as `LOAD_LOOP` and `DEC_BRANCH` --- see
-"Reserved for v0.5" for the displacement rationale. The
-remaining slots are ample headroom for `FLAG_CLEAR`,
-`CAPTURE_RUN`, or whatever v0.5 actually demands.
+Total: 15 opcodes. The 5-bit opcode field holds 32 codes; 17
+slots remain reserved (0x0F..0x1F minus `SET_ROLE` at 0x10).
+Slots 0xC and 0xD originally held `WAIT_ADDRESSED` and
+`MISMATCH_CLEAR` as v0.5 reservations and graduated to v0 as
+`LOAD_LOOP` and `DEC_BRANCH` --- see "Reserved for v0.5" for
+the displacement rationale. The remaining slots are ample
+headroom for `FLAG_CLEAR`, `CAPTURE_RUN`, or whatever v0.5
+actually demands.
 
 #### Bounded loops --- `LOAD_LOOP` + `DEC_BRANCH`
 
@@ -350,8 +356,8 @@ fail:
 ```
 
 Slot mapping (`0xC` = `LOAD_LOOP`, `0xD` = `DEC_BRANCH`) is
-locked. The 3-bit `[10:8]` pad on both opcodes is reserved
-(=0) for a future 16-LCR widening with no wire-format break.
+locked. The 2-bit `[9:8]` pad on both opcodes is reserved
+(=0) for a future 4-LCR widening with no wire-format break.
 
 #### Replacement mapping (WAIT_* → WAIT_ON)
 
@@ -368,22 +374,22 @@ spellings of `WAIT_ON cond, timeout`:
 There is no v0 bytecode in the wild yet, so no compatibility
 shim is needed; this is a clean break before Phase 0.
 
-The `timeout` operand is **8-bit unsigned (1..255 quarters)**
+The `timeout` operand is **7-bit unsigned (1..127 quarters)**
 with two special values: `timeout = 0` means "wait forever"
-(no timeout) and `timeout = 0xFF` is the maximum bounded wait
-(255 quarters). Long waits use a loop idiom built from
+(no timeout) and `timeout = 0x7F` is the maximum bounded wait
+(127 quarters). Long waits use a loop idiom built from
 `BRANCH_ON TIMEOUT, offset`:
 
 ```moleasm
 big_wait:
-        WAIT_ON     SCL_HIGH, 0xFF
+        WAIT_ON     SCL_HIGH, 0x7F
         BRANCH_ON   TIMEOUT, big_wait    ; loop while still waiting
         ;; SCL went high (or program proceeds when cond fires)
 ```
 
-At a 12.5 MHz quarter clock (~80 ns), 255 quarters ≈ 20 µs ---
+At a 12.5 MHz quarter clock (~80 ns), 127 quarters ≈ 10 µs ---
 comfortably above bus-event latencies for tight loops. The
-branch costs 4 quarters per iteration → ~1.5 % time-resolution
+branch costs 4 quarters per iteration → ~3 % time-resolution
 loss in the long-wait idiom. Acceptable; the explicit loop also
 makes the long-wait behavior auditable in disassembly.
 #### Encoding width --- 16-bit fixed
@@ -392,24 +398,25 @@ The instruction word is **16 bits fixed-width**. Per-opcode field
 budget (post-SCL-move, locked):
 
 ```
-EMIT_BIT           [15:12]op [11:10]tx_symbol [9:3]reserved [2]expect [1]mask [0]capture
-EMIT_QUARTER       [15:12]op [11:10]sda_symbol [9:8]scl_symbol [7:3]reserved [2]expect [1]mask [0]capture
-STRETCH_SCL        [15:12]op [11:0]n_quarters
-WAIT_ON            [15:12]op [11:8]cond_code [7:0]timeout_quarters_unsigned
-SET_BUS_MODE       [15:12]op [11:9]mode [8:0]reserved
-SAMPLE_BIT_ON_SCL  [15:12]op [11:3]reserved [2]expect [1]mask [0]capture
-DRIVE_BIT_ON_SCL   [15:12]op [11:10]tx_symbol [9:3]reserved [2]expect [1]mask [0]capture
-JMP                [15:12]op [11:0]addr
-BRANCH_ON          [15:12]op [11:8]cond_code [7:0]pc_rel_offset_signed
-HALT               [15:12]op [11:8]status [7:0]reserved
-MARK               [15:12]op [11:4]label [3:0]reserved
-LOAD_TIMING        [15:12]op [11:10]reg [9:0]divider_word
-LOAD_LOOP          [15:12]op [11]reg [10:8]reserved [7:0]imm8
-DEC_BRANCH         [15:12]op [11]reg [10:8]reserved [7:0]pc_rel_offset_signed
+EMIT_BIT           [15:11]op [10:9]tx_symbol [8:3]reserved [2]expect [1]mask [0]capture
+EMIT_QUARTER       [15:11]op [10:9]sda_symbol [8:7]scl_symbol [6:3]reserved [2]expect [1]mask [0]capture
+STRETCH_SCL        [15:11]op [10:0]n_quarters
+WAIT_ON            [15:11]op [10:7]cond_code [6:0]timeout_quarters_unsigned
+SET_BUS_MODE       [15:11]op [10:8]mode [7:0]reserved
+SAMPLE_BIT_ON_SCL  [15:11]op [10:3]reserved [2]expect [1]mask [0]capture
+DRIVE_BIT_ON_SCL   [15:11]op [10:9]tx_symbol [8:3]reserved [2]expect [1]mask [0]capture
+JMP                [15:11]op [10:0]addr
+BRANCH_ON          [15:11]op [10:7]cond_code [6:0]pc_rel_offset_signed
+HALT               [15:11]op [10:7]status [6:0]reserved
+MARK               [15:11]op [10:3]label [2:0]reserved
+LOAD_TIMING        [15:11]op [10:9]reg [8:0]divider_word
+LOAD_LOOP          [15:11]op [10]reg [9:8]reserved [7:0]imm8
+DEC_BRANCH         [15:11]op [10]reg [9:8]reserved [7:0]pc_rel_offset_signed
+SET_ROLE           [15:11]op [10]role [9:0]reserved
 ```
 
-`WAIT_ON` and `BRANCH_ON` share field shape (`[11:8]cond_code
-[7:0]operand`); only the operand semantics differ ---
+`WAIT_ON` and `BRANCH_ON` share field shape (`[10:7]cond_code
+[6:0]operand`); only the operand semantics differ ---
 unsigned-timeout vs signed-PC-offset. The shared `cond_code`
 namespace is described under "Engine flags --- unified
 condition codes" below. `SAMPLE_BIT_ON_SCL` mirrors the
@@ -417,17 +424,21 @@ condition codes" below. `SAMPLE_BIT_ON_SCL` mirrors the
 `DRIVE_BIT_ON_SCL` reuses the 2-bit `tx_symbol` field **and**
 the `expect`/`mask`/`capture` triple (the simultaneous drive +
 sample is what enables I3C DAA arbitration --- see "Engine
-flags" and the target-side examples). No new decoder shapes,
-just two control verbs (wait-for-condition vs.
+flags" and the target-side examples). `SET_ROLE` selects the
+engine's role at runtime: `role=0` → controller, `role=1` →
+target; the power-on default is `MoleConfig.role` so a program
+that never issues `SET_ROLE` keeps the historical
+compile-time-style behaviour (AGENTS §3.13). No new decoder
+shapes, just two control verbs (wait-for-condition vs.
 wait-for-divider) and the inversion of who sources SCL.
 
 Two smaller widths were considered and rejected:
 
-- **8-bit fixed.** Only `SET_BUS_MODE` (7 bits) fits.
-  `EMIT_QUARTER` alone needs **13** bits (4 op + 3 SDA + 3 SCL + 3
-  expect/mask/capture), `EMIT_BIT` needs 10, and every
-  control-flow / timing / wait opcode needs the full 16 (4 op +
-  12-bit operand). Half the ISA would need multi-word encoding,
+- **8-bit fixed.** Only `SET_BUS_MODE` (8 bits) fits.
+  `EMIT_QUARTER` alone needs **14** bits (5 op + 2 SDA + 2 SCL + 3
+  expect/mask/capture + 2 reserved), `EMIT_BIT` needs 10, and every
+  control-flow / timing / wait opcode needs the full 16 (5 op +
+  11-bit operand). Half the ISA would need multi-word encoding,
   which kills the single-cycle decoder.
 - **Variable-length (8 + 16 hybrid, RISC-V "C"-style).** The only
   opcode that could realistically go short is `EMIT_BIT`, and only
@@ -437,7 +448,7 @@ Two smaller widths were considered and rejected:
   variable PC increment, alignment handling at branch targets,
   and a substantially more complex decoder, sim, and
   disassembler. Cost ≫ benefit.
-- **12-bit fixed.** `EMIT_QUARTER` still does not fit (13 bits);
+- **12-bit fixed.** `EMIT_QUARTER` still does not fit (14 bits);
   branch/wait operands have no headroom.
 
 The SPRAM headroom on UP5K (256 Kbit = 16 K instructions at
@@ -445,15 +456,15 @@ The SPRAM headroom on UP5K (256 Kbit = 16 K instructions at
 SDR 256-byte payload is ~2,500 instructions ≈ 15 % of one SPRAM
 bank. We are not memory-bound.
 
-**JMP / BRANCH address space.** `JMP` carries a 12-bit absolute
-address: **4096 instructions = 8 KB program max**. Comfortably
-fits ~80 typical compliance tests (~50--100 insn each) in one
-program. `BRANCH_ON` carries an 8-bit **signed PC-relative
-offset** (±128 instructions) --- intentionally narrow: branches
+**JMP / BRANCH address space.** `JMP` carries an 11-bit absolute
+address: **2048 instructions = 4 KB program max**. Comfortably
+fits ~40 typical compliance tests (~50--100 insn each) in one
+program. `BRANCH_ON` carries a 7-bit **signed PC-relative
+offset** (±64 instructions) --- intentionally narrow: branches
 are local loops (address compare, DAA polling, retry on
 mismatch), not cross-program jumps. Long-distance control flow
 goes through `JMP`. If a future workload ever needs more than
-4096-instruction absolute range, a v1 "jumbo-address" opcode is
+2048-instruction absolute range, a v1 "jumbo-address" opcode is
 a follow-up, not a v0 blocker. The fixed-width encoding is part
 of the wire-format stability contract --- changing it counts as
 a bytecode-version bump, same as reordering opcodes.
@@ -506,7 +517,7 @@ The "long timeout via loop" idiom relies on `TIMEOUT_FLAG`:
 
 ```moleasm
 big_wait:
-        WAIT_ON     SCL_HIGH, 0xFF       ; 255 quarters max
+        WAIT_ON     SCL_HIGH, 0x7F       ; 127 quarters max
         BRANCH_ON   TIMEOUT, big_wait    ; cycle while still waiting
         ;; fall through when SCL went high
 ```
@@ -673,9 +684,9 @@ that is the only path to per-quarter SCL control.
 compiles to a single 16-bit instruction:
 
 ```
-[15:12] opcode      = EMIT_BIT
-[11:10] tx_symbol   = dominant (if sda-value=0) or recessive (if sda-value=1)
-[9:3]   reserved    (7 bits free for future expect/mask growth or raw_override)
+[15:11] opcode      = EMIT_BIT
+[10:9]  tx_symbol   = dominant (if sda-value=0) or recessive (if sda-value=1)
+[8:3]   reserved    (6 bits free for future expect/mask growth or raw_override)
 [2]     expect      = sda-value (compared after BUS_MODE symbol-decode)
 [1]     mask        = 1
 [0]     capture_en  = 0
@@ -1165,8 +1176,10 @@ the syntax down here keeps tooling honest.
   `sda=<symbol> scl=<symbol> ...`. Defaults `expect=X`
   (don't-care), `mask=0`, `capture=0` are omitted when unset.
 - Branch targets are labels (`name:`); the assembler resolves
-  them to absolute 12-bit addresses (`JMP`) or signed 8-bit
-  PC-relative offsets (`BRANCH_ON`) per opcode.
+  them to absolute 11-bit addresses (`JMP`) or signed 7-bit
+  PC-relative offsets (`BRANCH_ON`) per opcode. `DEC_BRANCH`
+  takes a wider signed 8-bit PC-relative offset (tight inner
+  loops benefit from the extra reach).
 
 I2C write of byte `0xAB` to 7-bit address `0x50` (address byte
 on the wire = `(0x50 << 1) | 0 = 0xA0`, MSB first, R/W = 0):
@@ -1194,7 +1207,7 @@ on the wire = `(0x50 << 1) | 0 = 0xA0`, MSB first, R/W = 0):
 
 	;; -- ACK slot: release SDA, expect target to pull low --
 	EMIT_BIT      tx=hiz expect=0 mask=1 capture=1
-	BRANCH_ON     MISMATCH, nak	    ; PC-relative, ±128 insn
+	BRANCH_ON     MISMATCH, nak	    ; PC-relative, ±64 insn
 
 	;; -- Data byte 0xAB = 1010_1011 --
 	EMIT_BIT      tx=recessive	    ; bit 7 = 1
@@ -1227,7 +1240,7 @@ Observations:
 
 - The whole transaction is **32 instructions = 64 bytes** of
   bytecode. A 256-byte payload extrapolates linearly to ~280
-  instructions, well inside the 4096-instruction `JMP` range
+  instructions, well inside the 2048-instruction `JMP` range
   and a tiny fraction of one SPRAM bank.
 - Eight address bits and eight data bits are literal
   `EMIT_BIT`s --- this is what justifies `EMIT_BIT` being the
@@ -1267,7 +1280,7 @@ is the readable surface.
 | Block                                 | LUT estimate |
 |---------------------------------------|--------------|
 | Quarter-bit FSM + timing dividers     | ~250         |
-| 14-opcode decoder + dispatch          | ~170         |
+| 15-opcode decoder + dispatch          | ~180         |
 | PC + JMP / branch logic               | ~120         |
 | Expect comparator + capture path      | ~250         |
 | Result ring controller                | ~250         |
@@ -1550,7 +1563,7 @@ substitute for the formal CTS lab.
 
 ### v0 --- pocket prototype on icebreaker (no Pico, no flash, no PCB)
 
-- **Phase 0 --- ISA + compiler skeleton**: finalize the 14-opcode ISA
+- **Phase 0 --- ISA + compiler skeleton**: finalize the 15-opcode ISA
   encoding (controller-role + target-role + control flow). Write a
   host-side bytecode encoder in Rust. Hand-assemble one tiny
   controller test program *and* one tiny target test program.

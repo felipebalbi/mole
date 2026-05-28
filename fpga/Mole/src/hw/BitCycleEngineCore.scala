@@ -153,7 +153,7 @@ case class BitCycleEngineCore(cfg: MoleConfig) extends Component {
   val recordLimit: Int = resultLimit - 1
 
   // Elaboration require: ring must hold at least Revision lo + Revision hi +
-  // HALT (3 words). Defaults give 4096 words; checked here so a config that
+  // HALT (3 words). Defaults give 2048 words; checked here so a config that
   // shrinks `resultRingByteCount` past the minimum fails loudly at compile.
   require(
     resultWordCount >= 3,

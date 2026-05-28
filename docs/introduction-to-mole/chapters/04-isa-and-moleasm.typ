@@ -2,16 +2,16 @@
 #import "../figures/bus-mode-table.typ": bus-mode-table-figure
 #import "../figures/sticky-flag-lifecycle.typ": sticky-flag-lifecycle-figure
 
-// Part 4: The ISA + moleasm. Tour the 14 opcodes, the bus-agnostic
+// Part 4: The ISA + moleasm. Tour the 15 opcodes, the bus-agnostic
 // symbol vocabulary, the BUS_MODE indirection, sticky flags, and the
 // assembly syntax that wraps it all.
 
 #section-slide("04", "The instruction set")
 
 #stat-slide(
-  "14",
+  "15",
   "opcodes",
-  caption: [Sixteen bits each. Opcode always in `[15:12]`. Two slots reserved.],
+  caption: [Sixteen bits each. Opcode always in `[15:11]`. 17 slots reserved.],
 )
 
 #let isa-row(op, desc) = (
@@ -39,10 +39,12 @@
     ..isa-row("DEC_BRANCH",        "decrement + branch"),
     ..isa-row("SET_BUS_MODE",      "switch electrical class"),
     ..isa-row("JMP",               "unconditional branch"),
-    ..isa-row("LOAD_TIMING",       "set quarter divider"),
+    ..isa-row("SET_ROLE",          "switch engine role"),
     ..isa-row("MARK",              "push host breadcrumb"),
-    ..isa-row("STRETCH_SCL",       "target: hold SCL low"),
+    ..isa-row("LOAD_TIMING",       "set quarter divider"),
     ..isa-row("HALT",              "stop the engine"),
+    ..isa-row("STRETCH_SCL",       "target: hold SCL low"),
+    [], [],
   )
   #note[
     Four loose families: drive, observe, control flow, and setup. The
@@ -153,7 +155,7 @@ EMIT_BIT  tx=recessive capture=1
 #recap-slide(
   "What Part 4 leaves you with",
   (
-    [14 opcodes, 4 loose families. You can already skim someone else's moleasm.],
+    [15 opcodes, 4 loose families. You can already skim someone else's moleasm.],
     [`tx_symbol` is the engine's vocabulary; `BUS_MODE` is the dictionary.],
     [Sticky flags + branch-on-condition is how control flow works.],
   ),

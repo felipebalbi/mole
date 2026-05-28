@@ -44,7 +44,7 @@
     #text(font: font-serif, size: 18pt, fill: ink)[Knows the wire.]
     #v(0.2em)
     #text(size: 15pt, fill: muted)[
-      14 opcodes. Drives every quarter-bit. No protocol awareness.
+      15 opcodes. Drives every quarter-bit. No protocol awareness.
     ]
   ],
   verdict: [The 16-bit bytecode between them is the contract.],

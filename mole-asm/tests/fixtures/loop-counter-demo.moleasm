@@ -19,20 +19,20 @@
 ;
 ;   pc  word    insn
 ;   --  ----    ----
-;    0  0x8024  LOAD_TIMING i2c_freq, 36       ; ~166 kHz @ 24 MHz Verde
-;    1  0x7000  SET_BUS_MODE i2c
-;    2  0x9010  MARK 1                         ; "byte begins"
-;    3  0xC008  LOAD_LOOP lcr0, 8              ; count down 8 data bits
-;    4  0x1000  EMIT_BIT  tx=dominant          ; SDA low for one bit
-;    5  0xD0FF  DEC_BRANCH lcr0, bit_loop      ; offset -1 -> pc=4
-;    6  0x9020  MARK 2                         ; "byte ends"
-;    7  0xC903  LOAD_LOOP lcr1, 3              ; outer rows = 3
-;    8  0x9030  MARK 3                         ; "row begin"
-;    9  0xC004  LOAD_LOOP lcr0, 4              ; inner cols = 4
-;   10  0x9040  MARK 4                         ; "(row, col)"
-;   11  0xD0FF  DEC_BRANCH lcr0, col_loop      ; pc=10, 4 iters of col
-;   12  0x9050  MARK 5                         ; "row end"
-;   13  0xD8FB  DEC_BRANCH lcr1, row_loop      ; offset -5 -> pc=8, 3 rows
+;    0  0x4024  LOAD_TIMING i2c_freq, 36       ; ~166 kHz @ 24 MHz Verde
+;    1  0x3800  SET_BUS_MODE i2c
+;    2  0x4808  MARK 1                         ; "byte begins"
+;    3  0x6008  LOAD_LOOP lcr0, 8              ; count down 8 data bits
+;    4  0x0800  EMIT_BIT  tx=dominant          ; SDA low for one bit
+;    5  0x68FE  DEC_BRANCH lcr0, bit_loop      ; offset -2 -> pc=4
+;    6  0x4810  MARK 2                         ; "byte ends"
+;    7  0x6403  LOAD_LOOP lcr1, 3              ; outer rows = 3
+;    8  0x4818  MARK 3                         ; "row begin"
+;    9  0x6004  LOAD_LOOP lcr0, 4              ; inner cols = 4
+;   10  0x4820  MARK 4                         ; "(row, col)"
+;   11  0x68FE  DEC_BRANCH lcr0, col_loop      ; pc=10, 4 iters of col
+;   12  0x4828  MARK 5                         ; "row end"
+;   13  0x6CFA  DEC_BRANCH lcr1, row_loop      ; offset -6 -> pc=8, 3 rows
 ;   14  0x0000  HALT 0
 
                 LOAD_TIMING   i2c_freq, 36

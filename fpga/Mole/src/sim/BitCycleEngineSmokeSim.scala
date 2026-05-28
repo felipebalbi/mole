@@ -272,7 +272,7 @@ object BitCycleEngineSmokeSim {
 
   /** Smallest sim config that still has enough address space for the 11-word
     * program + 2 result words. Total = 96 words → 7-bit address space,
-    * comfortably below the 4096-instruction cap.
+    * comfortably below the 2048-instruction cap.
     */
   private def smallCfg = MoleConfig(
     fabricFreqHz = 24 MHz,
