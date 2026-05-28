@@ -6,15 +6,16 @@ import spinal.lib.fsm._
 
 /** The Mole bit-cycle engine --- Phase 1 complete variant.
   *
-  * Decodes the full v0 ISA except the two target-role opcodes
-  * ([[Opcode.sampleBitOnScl]] / [[Opcode.driveBitOnScl]], Step 19) and the four
-  * reserved v0.5 slots (trap to halt). Drives the [[MoleBus]] at quarter-bit
-  * pacing programmable per [[BusMode]] via the four [[LoadTiming]] divider
-  * registers, captures `MISMATCH_FLAG` / `TIMEOUT_FLAG` / `START_FLAG` /
-  * `STOP_FLAG` per AGENTS §3.15, writes a length-prefixed sequence of CAPTURE,
-  * MARK and HALT records into the result ring, and traps any malformed
-  * instruction (reserved opcode, reserved cond code, reserved tx_symbol,
-  * invalid `SET_BUS_MODE` wire value) to a HALT with a distinguished status.
+  * Decodes the full v0 ISA --- including the runtime role-switch opcode
+  * ([[Opcode.setRole]]) and both target-role opcodes ([[Opcode.sampleBitOnScl]]
+  * / [[Opcode.driveBitOnScl]]) --- and traps every reserved v0.5 slot to halt.
+  * Drives the [[MoleBus]] at quarter-bit pacing programmable per [[BusMode]]
+  * via the four [[LoadTiming]] divider registers, captures `MISMATCH_FLAG` /
+  * `TIMEOUT_FLAG` / `START_FLAG` / `STOP_FLAG` per AGENTS §3.15, writes a
+  * length-prefixed sequence of CAPTURE, MARK and HALT records into the result
+  * ring, and traps any malformed instruction (reserved opcode, reserved cond
+  * code, reserved tx_symbol, invalid `SET_BUS_MODE` wire value) to a HALT with
+  * a distinguished status.
   *
   * ==Architecture (one paragraph)==
   *
@@ -83,9 +84,9 @@ import spinal.lib.fsm._
   *
   * ==What is deliberately *not* implemented yet==
   *
-  *   - `SAMPLE_BIT_ON_SCL`, `DRIVE_BIT_ON_SCL` (Phase 4 / Step 19).
   *   - Result-ring readback / host visibility (Phase 2).
-  *   - AGENTS §3.13 target-role PP-on-SCL lint (defense-in-depth, Step 19).
+  *   - AGENTS §3.13 target-role PP-on-SCL lint (defense-in-depth, post-Step
+  *     21).
   *
   * ==PC arithmetic semantics==
   *
@@ -217,6 +218,26 @@ case class BitCycleEngineCore(cfg: MoleConfig) extends Component {
     * (safe default: OD release on idle bus).
     */
   val busModeReg = Reg(BusMode()) init (BusMode.i2c)
+
+  /** Active engine role. `False` = Controller, `True` = Target. Boot default
+    * taken from `cfg.role` so a program that never issues `SET_ROLE` keeps the
+    * pre-Step-21 compile-time-style behaviour. Run-time mutable via
+    * [[Opcode.setRole]]; both halves of the FSM (`SclWaveformGen`-paced
+    * controller emit, external-SCL-paced target sample/drive) elaborate
+    * unconditionally so a single bitstream can play either role.
+    *
+    * Deliberate departure from `fpga/Mole/AGENTS.md`'s "compile-time toggles
+    * via Scala `if`" idiom: the role-selection register *must* be runtime-
+    * mutable to deliver a single dual-role image (one firmware, two
+    * personalities). Other `MoleConfig` toggles still follow the
+    * Scala-time-`if` convention.
+    *
+    * Not reset on `io.start`: role is configuration state (same lifecycle as
+    * `busModeReg`), not a per-run sticky flag. A program that issues `SET_ROLE`
+    * once at the top carries that role across subsequent `io.start` pulses
+    * until another `SET_ROLE` overrides it.
+    */
+  val roleReg = Reg(Bool()) init (Bool(cfg.role == EngineRole.Target))
 
   /** Program counter (next instruction to fetch). */
   val pc = Reg(UInt(pcWidth bits)) init (0)
@@ -669,14 +690,18 @@ case class BitCycleEngineCore(cfg: MoleConfig) extends Component {
               // and latch into the SCL regs so the very first
               // quarter dwell shows the correct level. In target
               // role the engine releases SCL entirely (slaves to
-              // external controller); the Scala `if` strips the
-              // SclWaveformGen path from target-role bitstreams.
-              if (cfg.role == EngineRole.Controller) {
-                val sclSymQ0 = SclWaveformGen(U(0, 2 bits))
-                val sclQ0 = SymbolDecoder(sclSymQ0, busModeReg)
+              // external controller); the runtime `when(!roleReg)`
+              // gates the SclWaveformGen path so a dual-role
+              // bitstream collapses to "release SCL" when
+              // `roleReg` says target. SclWaveformGen and the
+              // symbol decoder elaborate unconditionally --- the
+              // synthesis cost is one mux per SCL driver.
+              val sclSymQ0 = SclWaveformGen(U(0, 2 bits))
+              val sclQ0 = SymbolDecoder(sclSymQ0, busModeReg)
+              when(!roleReg) {
                 sclDriveLow := sclQ0.driveLow
                 sclDriveHigh := sclQ0.driveHigh
-              } else {
+              } otherwise {
                 sclDriveLow := False
                 sclDriveHigh := False
               }
@@ -922,52 +947,85 @@ case class BitCycleEngineCore(cfg: MoleConfig) extends Component {
 
           // -- SAMPLE_BIT_ON_SCL / DRIVE_BIT_ON_SCL (target role) --
           //
-          // Decoded only when `cfg.role == EngineRole.Target`. In
-          // controller role these two opcodes fall through to the
-          // `default` trap arm below, which is the right behaviour:
-          // a controller program that reaches a target-role opcode
-          // is a malformed program, and a clean HALT 0xF surfaces
-          // it cleanly.
+          // Legal only when `roleReg === True` (target). With dual-
+          // role bitstreams the FSM `default` arm can no longer
+          // cover the controller-role rejection --- both opcodes
+          // always elaborate now --- so we trap explicitly here
+          // when a controller-mode program reaches them. A clean
+          // HALT 0xF still surfaces a malformed program the same
+          // way the pre-Step-21 `default` did.
           //
           // Both arms set up the per-instruction scratch and dispatch
           // to a dedicated FSM state. The state machine handles the
           // external-SCL edge pacing.
-          if (cfg.role == EngineRole.Target) {
-            // SAMPLE_BIT_ON_SCL: wait for the next external SCL
-            // rising edge, sample SDA, compare against expect/mask,
-            // optionally capture. No bus drive.
-            is(Opcode.sampleBitOnScl) {
-              goto(sampleBitOnSclState)
-            }
 
-            // DRIVE_BIT_ON_SCL: on the next external SCL falling
-            // edge, drive SDA per tx_symbol for one external-SCL-
-            // clocked bit cell; concurrently, on the rising edge
-            // inside that cell, sample SDA + compare. The
-            // simultaneous drive + sample is what enables I3C DAA
-            // arbitration --- a target driving recessive that reads
-            // dominant lost the bit and sets MISMATCH_FLAG.
-            // Reserved tx_symbol (0b11) traps to halt the same way
-            // EMIT_BIT does.
-            is(Opcode.driveBitOnScl) {
-              val txRaw = instrReg(10 downto 9)
-              when(txRaw === B"11") {
-                enterHalt(B"1111")
-              } otherwise {
-                goto(driveBitOnSclState)
-              }
+          // SAMPLE_BIT_ON_SCL: wait for the next external SCL
+          // rising edge, sample SDA, compare against expect/mask,
+          // optionally capture. No bus drive.
+          is(Opcode.sampleBitOnScl) {
+            when(roleReg) {
+              goto(sampleBitOnSclState)
+            } otherwise {
+              enterHalt(B"1111")
             }
+          }
+
+          // DRIVE_BIT_ON_SCL: on the next external SCL falling
+          // edge, drive SDA per tx_symbol for one external-SCL-
+          // clocked bit cell; concurrently, on the rising edge
+          // inside that cell, sample SDA + compare. The
+          // simultaneous drive + sample is what enables I3C DAA
+          // arbitration --- a target driving recessive that reads
+          // dominant lost the bit and sets MISMATCH_FLAG.
+          // Reserved tx_symbol (0b11) traps to halt the same way
+          // EMIT_BIT does; a controller-role build executing this
+          // opcode also traps to halt.
+          is(Opcode.driveBitOnScl) {
+            val txRaw = instrReg(10 downto 9)
+            when(txRaw === B"11" || !roleReg) {
+              enterHalt(B"1111")
+            } otherwise {
+              goto(driveBitOnSclState)
+            }
+          }
+
+          // -- SET_ROLE ---------------------------------------------
+          //
+          // Field layout: [10]=role (0=Controller, 1=Target),
+          // [9:0]=reserved (=0). No bit pattern is illegal --- the
+          // 10-bit reserved field is ignored on decode.
+          //
+          // Bus drivers are forced off before the role write so a
+          // mid-program role switch leaves the bus in a clean Hi-Z
+          // state regardless of which arm was driving last (see
+          // Instruction.scala `SetRole` docstring). There is no
+          // "must be first" enforcement --- the SDK convention is
+          // to issue `SET_ROLE` near the top of every program, but
+          // the engine accepts the opcode at any PC.
+          is(Opcode.setRole) {
+            sdaDriveLow := False
+            sdaDriveHigh := False
+            sclDriveLow := False
+            sclDriveHigh := False
+            roleReg := instrReg(10)
+            pc := pc + 1
+            goto(fetchState)
           }
 
           // -- Everything else --
           //
-          // Controller role: SAMPLE_BIT_ON_SCL / DRIVE_BIT_ON_SCL
-          // fall here (target-role only). Both roles: the two
-          // remaining reserved v0.5 slots (FLAG_CLEAR, CAPTURE_RUN)
-          // have no v0 meaning. Trap to halt with status 0xF so a
-          // forward-deployed program that ships with a
-          // not-yet-supported opcode surfaces as a clean halt
-          // rather than a runaway bus.
+          // Catches the two remaining reserved v0.5 slots
+          // (FLAG_CLEAR, CAPTURE_RUN) plus any of the 0x11..0x1F
+          // reserved opcode slots that the host might have
+          // accidentally emitted. Both have no v0 meaning. Trap
+          // to halt with status 0xF so a forward-deployed program
+          // that ships with a not-yet-supported opcode surfaces
+          // as a clean halt rather than a runaway bus.
+          //
+          // (Pre-Step-21 this arm also caught controller-mode
+          // SAMPLE_BIT_ON_SCL / DRIVE_BIT_ON_SCL; those now
+          // elaborate unconditionally and self-trap on
+          // `!roleReg`.)
           default {
             enterHalt(B"1111")
           }
@@ -1018,10 +1076,13 @@ case class BitCycleEngineCore(cfg: MoleConfig) extends Component {
             // Update SCL for the new quarter. SDA stays as latched on
             // entry to this state (held for the full bit per spec).
             // Target-role: leave SCL released (set in decodeState's
-            // emitBit arm); the Scala `if` here matches that.
-            if (cfg.role == EngineRole.Controller) {
-              val sclSym = SclWaveformGen(nextQ)
-              val scl = SymbolDecoder(sclSym, busModeReg)
+            // emitBit arm); the runtime `when(!roleReg)` here gates
+            // the per-quarter SclWaveformGen drive the same way the
+            // entry arm gates the Q0 latch. SclWaveformGen and the
+            // symbol decoder elaborate unconditionally.
+            val sclSym = SclWaveformGen(nextQ)
+            val scl = SymbolDecoder(sclSym, busModeReg)
+            when(!roleReg) {
               sclDriveLow := scl.driveLow
               sclDriveHigh := scl.driveHigh
             }
@@ -1087,45 +1148,48 @@ case class BitCycleEngineCore(cfg: MoleConfig) extends Component {
 
     // ---------------------------------------- SampleBitOnScl ----
     //
-    // Target-role only. Wait for the next external SCL rising
-    // edge; sample SDA at that cycle (post-2FF resolved value);
-    // compare against expect/mask; optionally capture. No bus
-    // drive --- we slave to the controller's SCL.
+    // Target-role only at the program level (the decodeState
+    // SAMPLE_BIT_ON_SCL arm traps to HALT 0xF when `!roleReg`).
+    // The state itself elaborates unconditionally so a single
+    // dual-role bitstream can reach it after a runtime SET_ROLE
+    // target; controller-only runs simply never enter it.
     //
-    // The state is conditionally created so a controller-role
-    // build never instantiates it. Spinal does not prune unused
-    // states out of a StateMachine; the Scala-time guard is what
-    // keeps target-only state out of controller bitstreams.
-    val sampleBitOnSclState: State =
-      if (cfg.role == EngineRole.Target) new State {
-        whenIsActive {
-          when(observer.sclRising) {
-            when(instrReg(Instruction.MASK_BIT)) {
-              mismatchFlag :=
-                sdaSampled =/= instrReg(Instruction.EXPECT_BIT)
-            }
-            when(instrReg(Instruction.CAPTURE_BIT)) {
-              captureValueReg := sdaSampled
-            }
-            pc := pc + 1
-            when(instrReg(Instruction.CAPTURE_BIT)) {
-              goto(captureWriteState)
-            } otherwise {
-              goto(fetchState)
-            }
+    // Wait for the next external SCL rising edge; sample SDA at
+    // that cycle (post-2FF resolved value); compare against
+    // expect/mask; optionally capture. No bus drive --- we
+    // slave to the controller's SCL.
+    val sampleBitOnSclState: State = new State {
+      whenIsActive {
+        when(observer.sclRising) {
+          when(instrReg(Instruction.MASK_BIT)) {
+            mismatchFlag :=
+              sdaSampled =/= instrReg(Instruction.EXPECT_BIT)
+          }
+          when(instrReg(Instruction.CAPTURE_BIT)) {
+            captureValueReg := sdaSampled
+          }
+          pc := pc + 1
+          when(instrReg(Instruction.CAPTURE_BIT)) {
+            goto(captureWriteState)
+          } otherwise {
+            goto(fetchState)
           }
         }
       }
-      else null
+    }
 
     // ---------------------------------------- DriveBitOnScl -----
     //
-    // Target-role only. Three dedicated sub-states (no phase
-    // register --- a previous single-state version with a
-    // `Reg(UInt(2 bits))` phase counter suffered a same-cycle
-    // stale-read bug where `onEntry { phase := 0 }` did not
-    // become visible until the next cycle, but the `switch`
-    // inside `whenIsActive` ran on entry and read the prior
+    // Target-role only at the program level (the decodeState
+    // DRIVE_BIT_ON_SCL arm traps when `!roleReg`). The three
+    // sub-states elaborate unconditionally; controller-only runs
+    // simply never enter them.
+    //
+    // Three dedicated sub-states (no phase register --- a previous
+    // single-state version with a `Reg(UInt(2 bits))` phase counter
+    // suffered a same-cycle stale-read bug where `onEntry { phase :=
+    // 0 }` did not become visible until the next cycle, but the
+    // `switch` inside `whenIsActive` ran on entry and read the prior
     // value, so every bit after the first deadlocked):
     //
     //   driveBitOnSclState     : wait for SCL falling, decode
@@ -1149,59 +1213,53 @@ case class BitCycleEngineCore(cfg: MoleConfig) extends Component {
     // States are declared in reverse-goto order so each forward
     // reference (`goto(driveBitWaitClosing)`, `goto(
     // driveBitWaitRising)`) resolves cleanly without `lazy val`.
-    val driveBitWaitClosing: State =
-      if (cfg.role == EngineRole.Target) new State {
-        whenIsActive {
-          when(observer.sclFalling) {
-            sdaDriveLow := False
-            sdaDriveHigh := False
-            pc := pc + 1
-            when(instrReg(Instruction.CAPTURE_BIT)) {
-              goto(captureWriteState)
-            } otherwise {
-              goto(fetchState)
-            }
-          }
-        }
-      }
-      else null
-
-    val driveBitWaitRising: State =
-      if (cfg.role == EngineRole.Target) new State {
-        whenIsActive {
-          when(observer.sclRising) {
-            when(instrReg(Instruction.MASK_BIT)) {
-              mismatchFlag :=
-                sdaSampled =/= instrReg(Instruction.EXPECT_BIT)
-            }
-            when(instrReg(Instruction.CAPTURE_BIT)) {
-              captureValueReg := sdaSampled
-            }
-            goto(driveBitWaitClosing)
-          }
-        }
-      }
-      else null
-
-    val driveBitOnSclState: State =
-      if (cfg.role == EngineRole.Target) new State {
-        onEntry {
+    val driveBitWaitClosing: State = new State {
+      whenIsActive {
+        when(observer.sclFalling) {
           sdaDriveLow := False
           sdaDriveHigh := False
-        }
-        whenIsActive {
-          when(observer.sclFalling) {
-            val txRaw = instrReg(10 downto 9)
-            val sdaSym = TxSymbol()
-            sdaSym.assignFromBits(txRaw)
-            val sda = SymbolDecoder(sdaSym, busModeReg)
-            sdaDriveLow := sda.driveLow
-            sdaDriveHigh := sda.driveHigh
-            goto(driveBitWaitRising)
+          pc := pc + 1
+          when(instrReg(Instruction.CAPTURE_BIT)) {
+            goto(captureWriteState)
+          } otherwise {
+            goto(fetchState)
           }
         }
       }
-      else null
+    }
+
+    val driveBitWaitRising: State = new State {
+      whenIsActive {
+        when(observer.sclRising) {
+          when(instrReg(Instruction.MASK_BIT)) {
+            mismatchFlag :=
+              sdaSampled =/= instrReg(Instruction.EXPECT_BIT)
+          }
+          when(instrReg(Instruction.CAPTURE_BIT)) {
+            captureValueReg := sdaSampled
+          }
+          goto(driveBitWaitClosing)
+        }
+      }
+    }
+
+    val driveBitOnSclState: State = new State {
+      onEntry {
+        sdaDriveLow := False
+        sdaDriveHigh := False
+      }
+      whenIsActive {
+        when(observer.sclFalling) {
+          val txRaw = instrReg(10 downto 9)
+          val sdaSym = TxSymbol()
+          sdaSym.assignFromBits(txRaw)
+          val sda = SymbolDecoder(sdaSym, busModeReg)
+          sdaDriveLow := sda.driveLow
+          sdaDriveHigh := sda.driveHigh
+          goto(driveBitWaitRising)
+        }
+      }
+    }
 
     // -------------------------------------------------- WaitOn ----
     //

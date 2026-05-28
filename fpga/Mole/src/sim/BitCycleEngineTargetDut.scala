@@ -4,18 +4,17 @@ import spinal.core._
 import spinal.core.sim._
 import spinal.lib._
 
-/** Sim DUT for [[BitCycleEngineTargetSim]]: one [[BitCycleEngineCore]]
-  * elaborated with `role = EngineRole.Target` plus the same loader + debug-read
-  * scaffolding [[BitCycleEngineFullDut]] uses. The test harness drives
-  * `bus.sda.read` and `bus.scl.read` directly to mimic an external controller;
-  * the engine's drivers are observable on the same bundle.
+/** Sim DUT for [[BitCycleEngineTargetSim]]: one [[BitCycleEngineCore]] plus the
+  * same loader + debug-read scaffolding [[BitCycleEngineFullDut]] uses. The
+  * test harness drives `bus.sda.read` and `bus.scl.read` directly to mimic an
+  * external controller; the engine's drivers are observable on the same bundle.
+  *
+  * Either role is accepted: with `cfg.role = EngineRole.Target` (the boot
+  * default this sim uses) `roleReg` powers up in target mode; tests that
+  * exercise the runtime role switch pass any cfg and issue `SET_ROLE`
+  * explicitly.
   */
 case class BitCycleEngineTargetDut(cfg: MoleConfig) extends Component {
-
-  require(
-    cfg.role == EngineRole.Target,
-    s"BitCycleEngineTargetDut requires role=Target, got ${cfg.role}"
-  )
 
   val addrWidth: Int =
     log2Up(cfg.programWordCount + (cfg.resultRingByteCount + 1) / 2)

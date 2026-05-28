@@ -147,6 +147,7 @@ object BitCycleEngineTargetSim {
   import Instruction._
 
   private def setMode(m: BusMode.E): Int = encode(SetBusMode(m))
+  private def setRole(target: Boolean): Int = encode(SetRole(target))
   private def halt(status: Int): Int = encode(Halt(status))
   private def mark(label: Int): Int = encode(Mark(label))
   private def stretch(n: Int): Int = encode(StretchScl(n))
@@ -177,7 +178,8 @@ object BitCycleEngineTargetSim {
   private def testTargetSampleEightBits(): Unit =
     runTest("target-sample-eight-bits") { dut =>
       val program =
-        (0 until 8).map(_ => sampleBit(capture = true)) ++
+        Seq(setRole(target = true)) ++
+          (0 until 8).map(_ => sampleBit(capture = true)) ++
           Seq(mark(0xa5), halt(0))
       dut.clockDomain.forkStimulus(period = 10)
       quiet(dut)
@@ -229,7 +231,7 @@ object BitCycleEngineTargetSim {
   private def testTargetDriveEightBits(): Unit =
     runTest("target-drive-eight-bits") { dut =>
       val bits = Seq(true, false, false, true, false, true, true, false)
-      val program = Seq(setMode(BusMode.i2c)) ++
+      val program = Seq(setRole(target = true), setMode(BusMode.i2c)) ++
         bits.map { b =>
           driveBit(if (b) TxSymbol.recessive else TxSymbol.dominant)
         } :+ halt(0)
@@ -304,6 +306,7 @@ object BitCycleEngineTargetSim {
   private def testTargetMismatchOnDrive(): Unit =
     runTest("target-mismatch-on-drive") { dut =>
       val program = Seq(
+        setRole(target = true),
         setMode(BusMode.i2c),
         driveBit(
           TxSymbol.recessive,
@@ -360,6 +363,7 @@ object BitCycleEngineTargetSim {
   private def testTargetNoSclDriveFromEmit(): Unit =
     runTest("target-no-scl-drive-from-emit") { dut =>
       val program = Seq(
+        setRole(target = true),
         setMode(BusMode.i2c),
         emitBit(TxSymbol.dominant),
         halt(0)
@@ -405,6 +409,7 @@ object BitCycleEngineTargetSim {
   private def testTargetStretchDrivesSclLow(): Unit =
     runTest("target-stretch-drives-scl-low") { dut =>
       val program = Seq(
+        setRole(target = true),
         setMode(BusMode.i2c),
         stretch(8),
         halt(0)
@@ -455,6 +460,7 @@ object BitCycleEngineTargetSim {
     println("--- BitCycleEngineTargetSim: target-daa-arbitration ---")
     compiled2.doSim("target-daa-arbitration") { dut =>
       val progLow = Seq(
+        setRole(target = true),
         setMode(BusMode.i2c),
         driveBit(
           TxSymbol.dominant,
@@ -465,6 +471,7 @@ object BitCycleEngineTargetSim {
         halt(0)
       )
       val progHigh = Seq(
+        setRole(target = true),
         setMode(BusMode.i2c),
         driveBit(
           TxSymbol.recessive,
@@ -596,6 +603,112 @@ object BitCycleEngineTargetSim {
     }
   }
 
+  /** End-to-end proof that `SET_ROLE` flips runtime engine behaviour. Two
+    * back-to-back runs share the same DUT compile (boot default
+    * `cfg.role = Target` -> `roleReg` powers up True):
+    *
+    *   1. Program rejects target opcodes after switching to controller.
+    *      `[setRole(controller), sampleBit(), halt(0)]` --- SAMPLE_BIT_ON_SCL
+    *      under `!roleReg` traps to HALT 0xF without ever reaching the user
+    *      `halt(0)`.
+    *   2. Program switches back to target and SAMPLE works again.
+    *      `[setRole(target), sampleBit(capture=true), mark, halt(0)]` --- one
+    *      controller SCL pulse with SDA=1 yields one CAPTURE record and a clean
+    *      HALT 0.
+    *
+    * Together these prove the runtime role gate is wired both ways. The boot
+    * default starts True (target) for both runs; the SET_ROLE in run 1 lowers
+    * it, the SET_ROLE in run 2 raises it again. Without runtime mutability (the
+    * pre-Step-21 Scala-time `if`) the controller-mode arm would not exist at
+    * all in the elaborated FSM and run 1 would either fail to compile or pass
+    * the SAMPLE through anyway.
+    */
+  private def testTargetRoleRuntimeFlip(): Unit = {
+    println("--- BitCycleEngineTargetSim: target-role-runtime-flip ---")
+
+    // Run 1 --- controller-mode rejects SAMPLE_BIT_ON_SCL with HALT 0xF.
+    compiled.doSim("target-role-runtime-flip-reject") { dut =>
+      val program = Seq(
+        setRole(target = false),
+        sampleBit(capture = false),
+        halt(0)
+      )
+      dut.clockDomain.forkStimulus(period = 10)
+      quiet(dut)
+      dut.clockDomain.waitSampling(5)
+      load(dut, program)
+      dut.io.start #= true
+      dut.clockDomain.waitSamplingWhere(!dut.io.done.toBoolean)
+      dut.io.start #= false
+      var c = 0
+      while (!dut.io.done.toBoolean && c < 5000) {
+        dut.clockDomain.waitSampling()
+        c += 1
+      }
+      assert(
+        dut.io.done.toBoolean,
+        "role-flip reject: engine never halted (SAMPLE in controller mode " +
+          "should trap immediately)"
+      )
+      val ring = drainRing(dut)
+      val h = haltAt(ring, resultLimit)
+      assert(
+        h.status == 0xf,
+        s"role-flip reject: expected HALT 0xF (malformed), got ${h.status}"
+      )
+    }
+
+    // Run 2 --- flip back to target, SAMPLE captures one bit cleanly.
+    compiled.doSim("target-role-runtime-flip-accept") { dut =>
+      val program = Seq(
+        setRole(target = true),
+        sampleBit(capture = true),
+        mark(0xa5),
+        halt(0)
+      )
+      dut.clockDomain.forkStimulus(period = 10)
+      quiet(dut)
+      dut.clockDomain.waitSampling(5)
+      load(dut, program)
+      dut.io.start #= true
+      dut.clockDomain.waitSamplingWhere(!dut.io.done.toBoolean)
+      dut.io.start #= false
+      // Clock one SDA=1 bit via the controller stim.
+      controllerBit(dut, bitValue = true)
+      dut.io.bus.sda.read #= true
+      dut.io.bus.scl.read #= true
+      var c = 0
+      while (!dut.io.done.toBoolean && c < 5000) {
+        dut.clockDomain.waitSampling()
+        c += 1
+      }
+      assert(
+        dut.io.done.toBoolean,
+        "role-flip accept: engine never halted"
+      )
+      val ring = drainRing(dut)
+      val sentinel = (2 << 14) | (0xa5 << 4)
+      val captures = (2 until ring.length)
+        .map(ring(_))
+        .takeWhile(w => w != sentinel)
+        .takeWhile(w => (w >>> 14) == 0x0)
+      assert(
+        captures.length == 1,
+        s"role-flip accept: expected 1 CAPTURE record, saw ${captures.length}"
+      )
+      assert(
+        (captures.head & 1) == 1,
+        s"role-flip accept: captured bit was 0, expected 1"
+      )
+      val h = haltAt(ring, resultLimit)
+      assert(
+        h.status == 0,
+        s"role-flip accept: expected HALT 0, got ${h.status}"
+      )
+    }
+    println("  target-role-runtime-flip OK")
+  }
+
   // --------------------------------------------------------------
   // Entry point (extended as tests land)
   // --------------------------------------------------------------
@@ -607,6 +720,7 @@ object BitCycleEngineTargetSim {
     testTargetNoSclDriveFromEmit()
     testTargetStretchDrivesSclLow()
     testTargetDaaArbitration()
+    testTargetRoleRuntimeFlip()
     println("BitCycleEngineTargetSim OK")
   }
 }

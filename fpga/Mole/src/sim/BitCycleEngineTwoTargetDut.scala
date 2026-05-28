@@ -5,10 +5,8 @@ import spinal.lib._
 
 case class BitCycleEngineTwoTargetDut(cfg: MoleConfig) extends Component {
 
-  require(
-    cfg.role == EngineRole.Target,
-    s"two-engine DUT requires role=Target, got ${cfg.role}"
-  )
+  // Two engines sharing one cfg --- both boot in whatever role `cfg.role`
+  // names, runtime SET_ROLE can override either independently.
 
   val addrWidth: Int =
     log2Up(cfg.programWordCount + (cfg.resultRingByteCount + 1) / 2)
