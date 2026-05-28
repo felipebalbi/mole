@@ -8,7 +8,7 @@
 //!   bad CRC) discovered when verifying the artifact before sending
 //!   it to the engine.
 //! - [`LoaderError::Ring`] --- malformed result-ring buffer (wrong
-//!   length, reserved tag, truncated record) discovered when
+//!   length, truncated MARK, missing HALT tail) discovered when
 //!   decoding what the engine wrote back.
 //! - [`LoaderError::RevisionMismatch`] --- the `--expect-revision`
 //!   check failed.
@@ -144,22 +144,6 @@ pub enum RingError {
         word: u16,
     },
 
-    /// While walking the record stream we saw a word with tag `0b01`,
-    /// which is reserved (never produced by a conforming engine).
-    /// Almost certainly trailing-slot garbage --- see the file header
-    /// docstring on [`crate::ring`] for why the gap exists.
-    #[error(
-        "ring record at word offset {offset_words}: reserved tag 0b01 \
-         (word {word:#06x})"
-    )]
-    ReservedTag {
-        /// 0-based word offset (from start of ring) where the bad
-        /// word lives.
-        offset_words: usize,
-        /// The full 16-bit word.
-        word: u16,
-    },
-
     /// A MARK record header (tag `0b10`) appeared without the two
     /// timestamp words that must follow it before the HALT word.
     #[error(
@@ -172,21 +156,6 @@ pub enum RingError {
         /// How many words were left between the MARK header and the
         /// HALT terminator.
         remaining_words: usize,
-    },
-
-    /// We hit a HALT-tagged word at an offset other than the tail.
-    /// The engine never writes HALT mid-ring; this is either a
-    /// drainer / framing bug or garbage that happened to decode as
-    /// HALT.
-    #[error(
-        "ring record at word offset {offset_words}: unexpected mid-ring HALT \
-         (word {word:#06x}); HALT only lives at the tail slot"
-    )]
-    UnexpectedMidRingHalt {
-        /// Word offset of the spurious HALT.
-        offset_words: usize,
-        /// The full 16-bit word.
-        word: u16,
     },
 }
 

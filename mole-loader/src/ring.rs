@@ -29,19 +29,29 @@
 //! whatever state the SPRAM came up in. On Verilator they are zero;
 //! on real silicon they are undefined.
 //!
-//! That means [`decode_ring`] cannot tell where the record stream
-//! genuinely ends. It walks from word offset 2 forward and treats
-//! every word as a real record until it hits the HALT terminator. On
-//! Verilator the trailing zeros decode as a run of
-//! `Capture { sda: false }` records; on real silicon the gap may
-//! decode as fake CAPTURE / MARK records or trip [`RingError::ReservedTag`].
+//! That means [`decode_ring`] cannot tell *exactly* where the
+//! record stream genuinely ends. The decoder uses the simplest
+//! heuristic available: it walks from word offset 2 forward and
+//! stops at the first word whose tag is not a legal record tag
+//! (`0b01` reserved, or `0b11` HALT seen before the tail slot).
+//! Both signal "engine stopped writing here, garbage begins"
+//! reliably enough for real-silicon use, and the HALT integrity
+//! check at the tail confirms we didn't simply lose framing.
 //!
-//! [`DecodedRing::trailing_garbage_words`] reports how many record
-//! slots sat between the last record and the HALT word, so callers
-//! can warn the user when the value is non-zero. A future engine
-//! revision will either zero the gap at HALT entry or emit an
-//! end-of-stream sentinel record, at which point this decoder can
-//! become strict.
+//! Limitation: a garbage word that happens to carry tag `0b00`
+//! (CAPTURE) is electrically indistinguishable from a real
+//! capture --- the decoder will emit it as `Capture { sda: bit0 }`.
+//! A garbage word that happens to carry tag `0b10` (MARK) plus
+//! two more garbage words after it will look like a real MARK
+//! record with arbitrary label and timestamp. The only reliable
+//! fix is for the engine to either zero the gap at HALT entry or
+//! emit an end-of-stream sentinel record; tracked in the engine
+//! roadmap.
+//!
+//! [`DecodedRing::trailing_garbage_words`] reports how many
+//! record slots sat between where the decoder stopped and the
+//! HALT word, so callers can warn the user when the value is
+//! non-zero.
 
 use crate::error::RingError;
 
@@ -230,8 +240,28 @@ pub fn decode_ring(bytes: &[u8]) -> Result<DecodedRing, RingError> {
     };
 
     // Records walk from word offset 2 up to (but not including) the
-    // HALT word. Stop on first HALT-tagged word (which would be the
-    // tail itself in a clean ring) OR on the explicit tail index.
+    // HALT word. The engine writes a contiguous record stream
+    // starting at offset 2 and stops at whatever `resultWp` reached
+    // when the program halted. Slots from `resultWp` up to
+    // `resultLimit - 1` hold *uninitialised SPRAM* on real silicon
+    // (zero only under Verilator) --- see the README's
+    // "trailing-garbage hazard" callout.
+    //
+    // We therefore stop walking at the first word whose tag is not
+    // a legal record tag (`0b01` reserved, or `0b11` HALT mid-
+    // stream): both signal "engine stopped writing here, garbage
+    // begins". The remainder is reported via
+    // `trailing_garbage_words` so callers can warn the user. The
+    // HALT integrity check at the tail (above) guarantees we
+    // didn't simply lose framing.
+    //
+    // A `0b00` (CAPTURE) garbage word is electrically
+    // indistinguishable from a real capture --- only the bottom
+    // bit matters for CAPTURE decode, so any 16-bit value with
+    // tag `0b00` looks like a valid `Capture { sda: bit0 }`. The
+    // engine zeroing the ring at HALT entry (or emitting an
+    // end-of-stream sentinel) is the only reliable way to fix
+    // that; tracked in the engine roadmap.
     let record_end_word = total_words - 1;
     let mut offset = 2usize;
     let mut records = Vec::new();
@@ -244,12 +274,6 @@ pub fn decode_ring(bytes: &[u8]) -> Result<DecodedRing, RingError> {
                     sda: (word & 1) != 0,
                 });
                 offset += 1;
-            }
-            0b01 => {
-                return Err(RingError::ReservedTag {
-                    offset_words: offset,
-                    word,
-                });
             }
             0b10 => {
                 let remaining = record_end_word - offset;
@@ -266,14 +290,13 @@ pub fn decode_ring(bytes: &[u8]) -> Result<DecodedRing, RingError> {
                 records.push(Record::Mark { label, timestamp });
                 offset += 3;
             }
-            0b11 => {
-                // Mid-ring HALT is never produced by the engine ---
-                // the tail slot is the only legal HALT site. Treat
-                // as malformed.
-                return Err(RingError::UnexpectedMidRingHalt {
-                    offset_words: offset,
-                    word,
-                });
+            0b01 | 0b11 => {
+                // Reserved tag mid-stream OR HALT-tagged word
+                // before the tail slot. Either way the engine
+                // stopped writing real records at `offset`; the
+                // remainder is uninitialised SPRAM. Stop walking
+                // and bookkeep the gap.
+                break;
             }
             _ => unreachable!("tag is >> 14 of a u16, only 4 possible values"),
         }
@@ -510,16 +533,18 @@ mod tests {
     }
 
     #[test]
-    fn rejects_reserved_tag_01_in_record_stream() {
-        // word at offset 2 with tag 01: 0x4000.
+    fn reserved_tag_01_terminates_record_stream_as_trailing_garbage() {
+        // word at offset 2 with tag 01: 0x4001. This is the real-
+        // silicon failure mode the tmp108 fixture hit: SPRAM came
+        // up with a tag-01-shaped word right where the engine
+        // stopped writing. The decoder must treat that as "garbage
+        // begins here" rather than fail, but still honour the
+        // HALT-at-tail integrity check.
         let bytes = build_ring((0, 0), &[0x4001], 0xC000, 4);
-        assert_eq!(
-            decode_ring(&bytes),
-            Err(RingError::ReservedTag {
-                offset_words: 2,
-                word: 0x4001,
-            })
-        );
+        let ring = decode_ring(&bytes).unwrap();
+        assert!(ring.records.is_empty());
+        assert_eq!(ring.trailing_garbage_words, 1);
+        assert_eq!(ring.halt.status, 0);
     }
 
     #[test]
@@ -551,16 +576,40 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unexpected_mid_ring_halt() {
-        // tag 11 at offset 2 (not the tail).
+    fn mid_ring_halt_tag_terminates_record_stream_as_trailing_garbage() {
+        // tag 11 at offset 2 (not the tail). On real silicon this
+        // is uninitialised SPRAM that happens to start with `11`;
+        // the decoder treats it as the end of the record stream
+        // and reports it via `trailing_garbage_words`, leaving the
+        // canonical HALT word at the tail untouched.
         let bytes = build_ring((0, 0), &[0xC000], 0xC000, 4);
-        assert_eq!(
-            decode_ring(&bytes),
-            Err(RingError::UnexpectedMidRingHalt {
-                offset_words: 2,
-                word: 0xC000,
-            })
-        );
+        let ring = decode_ring(&bytes).unwrap();
+        assert!(ring.records.is_empty());
+        assert_eq!(ring.trailing_garbage_words, 1);
+    }
+
+    #[test]
+    fn tmp108_shaped_real_silicon_ring_decodes_to_19_captures() {
+        // Regression test for the tmp108 hardware bring-up failure.
+        // The program emits 19 `EMIT_BIT ... capture=1` (3 slave
+        // ACKs + 8 MSB + 8 LSB), then HALT. On real silicon slots
+        // 21..(resultLimit - 1) hold uninitialised SPRAM; the
+        // decoder must stop at the first garbage word and not trip
+        // on its tag bits.
+        let captures: Vec<u16> = (0..19).map(|i| (i as u16) & 1).collect();
+        let mut bytes = build_ring((0, 0), &captures, 0xC000, 4096);
+        // Drop the garbage word at offset 21 (the first slot past
+        // the last real capture) to the same value real silicon
+        // produced on the user's run.
+        let garbage_byte_offset = 21 * 2;
+        bytes[garbage_byte_offset] = 0x0e;
+        bytes[garbage_byte_offset + 1] = 0x63;
+        let ring = decode_ring(&bytes).unwrap();
+        assert_eq!(ring.records.len(), 19);
+        assert_eq!(ring.halt.status, 0);
+        // 4093 record slots total, 19 consumed; the rest is
+        // trailing garbage.
+        assert_eq!(ring.trailing_garbage_words, 4093 - 19);
     }
 
     #[test]
