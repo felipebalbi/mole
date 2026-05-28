@@ -251,19 +251,32 @@ object BitCycleEngineTargetSim {
           dut.clockDomain.waitSampling()
         }
       }
-      // Each DRIVE_BIT_ON_SCL is a 3-phase state machine that needs
-      // a dedicated falling edge for phase 0, then a rising edge
-      // for phase 1, then ANOTHER dedicated falling edge for phase
-      // 2. The closing falling of bit N cannot serve as the
-      // opening falling of bit N+1 because the engine's onEntry
-      // resets phase to 0 only after refetch, and by that point
-      // the 1-cycle observer.sclFalling pulse has already passed.
-      // So 8 bits need 8 (phase0 falling + rising) + 8 (phase2
-      // falling) = 16 fallings + 8 risings. Achieved by 2
-      // controllerBit calls per intended bit cell:
-      //   - 1st call: phase0 falling + phase1 rising
-      //   - 2nd call: phase2 falling + (extra rising, unused by
-      //     the engine since phase2 only watches for fallings).
+      // Pace the harness against the engine's first-DRIVE
+      // dispatch. After start handshake the engine is in the
+      // fetch state of SET_BUS_MODE; it needs ~6 cycles to
+      // traverse setMode (fetch + fetchWait + decode) plus the
+      // first DRIVE_BIT_ON_SCL (fetch + fetchWait + decode)
+      // before driveBitOnSclState is active and watching for a
+      // falling edge. The observer adds 2-3 more cycles of
+      // synchroniser latency. If the first controllerBit fires
+      // immediately, its falling edge propagates to the engine
+      // while decode is still running and is silently dropped,
+      // putting every subsequent bit one harness-call behind
+      // the test author's mental model. Waiting halfPeriodCycles
+      // (matches the inter-bit gap rhythm) lets the engine reach
+      // driveBitOnSclState before the first edge arrives.
+      dut.clockDomain.waitSampling(halfPeriodCycles)
+      // Each DRIVE_BIT_ON_SCL is a 3-state walk:
+      //   driveBitOnSclState  : await falling, drive SDA
+      //   driveBitWaitRising  : await rising,  sample
+      //   driveBitWaitClosing : await falling, release SDA
+      // 8 bits therefore need 16 fallings + 8 risings, but the
+      // controller's SCL strictly alternates F-R-F-R..., so the 8
+      // risings between adjacent bits show up as "free" edges
+      // that no state is waiting on (harmlessly ignored). One
+      // controllerBit call produces exactly one F and one R, so 8
+      // bits = 16 calls. The last call's R after bit 7's closing
+      // F is the post-loop idle.
       for (_ <- 0 until 16) controllerBit(dut, bitValue = true)
       dut.io.bus.sda.read #= true
       dut.io.bus.scl.read #= true
@@ -311,6 +324,12 @@ object BitCycleEngineTargetSim {
       dut.io.start #= true
       dut.clockDomain.waitSamplingWhere(!dut.io.done.toBoolean)
       dut.io.start #= false
+      // Pace against first-DRIVE dispatch (see target-drive-eight-
+      // bits for the timing breakdown). Without this wait the F
+      // below races the engine's setMode + DRIVE fetch-decode
+      // pipeline and is dropped, leaving the engine stuck in
+      // driveBitOnSclState forever.
+      dut.clockDomain.waitSampling(halfPeriodCycles)
       // Drive SDA low across the controller bit cell so the wired
       // AND reads low even though the target is releasing.
       dut.io.bus.scl.read #= false
@@ -351,6 +370,12 @@ object BitCycleEngineTargetSim {
       load(dut, program)
       var anySclDrive = false
       var monitorStopA = false
+      dut.io.start #= true
+      dut.clockDomain.waitSamplingWhere(!dut.io.done.toBoolean)
+      dut.io.start #= false
+      // Fork AFTER the start handshake so the monitor's
+      // `while (!done)` doesn't exit immediately --- done is True
+      // while the engine sits in idle pre-start.
       val monitor = fork {
         while (!dut.io.done.toBoolean && !monitorStopA) {
           if (
@@ -360,9 +385,6 @@ object BitCycleEngineTargetSim {
           dut.clockDomain.waitSampling()
         }
       }
-      dut.io.start #= true
-      dut.clockDomain.waitSamplingWhere(!dut.io.done.toBoolean)
-      dut.io.start #= false
       var c = 0
       while (!dut.io.done.toBoolean && c < 50000) {
         dut.clockDomain.waitSampling(); c += 1
@@ -393,15 +415,17 @@ object BitCycleEngineTargetSim {
       load(dut, program)
       var sawSclLow = false
       var monitorStopB = false
+      dut.io.start #= true
+      dut.clockDomain.waitSamplingWhere(!dut.io.done.toBoolean)
+      dut.io.start #= false
+      // Fork AFTER the start handshake (see target-no-scl-drive-
+      // from-emit for the rationale).
       val monitor = fork {
         while (!dut.io.done.toBoolean && !monitorStopB) {
           if (dut.io.bus.scl.driveLow.toBoolean) sawSclLow = true
           dut.clockDomain.waitSampling()
         }
       }
-      dut.io.start #= true
-      dut.clockDomain.waitSamplingWhere(!dut.io.done.toBoolean)
-      dut.io.start #= false
       var c = 0
       while (!dut.io.done.toBoolean && c < 50000) {
         dut.clockDomain.waitSampling(); c += 1
@@ -482,6 +506,22 @@ object BitCycleEngineTargetSim {
       import OpenDrainBusSim._
       val done = scala.collection.mutable.Set[String]()
       var monitorStopC = false
+
+      dut.io.startA #= true
+      dut.io.startB #= true
+      dut.clockDomain.waitSamplingWhere(!dut.io.doneA.toBoolean)
+      dut.clockDomain.waitSamplingWhere(!dut.io.doneB.toBoolean)
+      dut.io.startA #= false
+      dut.io.startB #= false
+      // Fork the wired-AND monitor AFTER the start handshake. Both
+      // engines come up with done=True (FSM in idleState), so a
+      // monitor forked earlier would see done.size>=2 on its first
+      // iteration and exit before any cycles ran --- the wired-AND
+      // would never propagate engine-A's dominant pull-down to the
+      // observer of either engine and engine A would mis-sample
+      // recessive on the SCL rising edge. Same pitfall as
+      // target-no-scl-drive-from-emit / target-stretch-drives-scl-
+      // low.
       val monitor = fork {
         while (done.size < 2 && !monitorStopC) {
           val a = Drive(
@@ -500,13 +540,9 @@ object BitCycleEngineTargetSim {
           dut.clockDomain.waitSampling()
         }
       }
-
-      dut.io.startA #= true
-      dut.io.startB #= true
-      dut.clockDomain.waitSamplingWhere(!dut.io.doneA.toBoolean)
-      dut.clockDomain.waitSamplingWhere(!dut.io.doneB.toBoolean)
-      dut.io.startA #= false
-      dut.io.startB #= false
+      // Pace against first-DRIVE dispatch (see target-drive-eight-
+      // bits for the timing breakdown).
+      dut.clockDomain.waitSampling(halfPeriodCycles)
 
       def sclPulse(): Unit = {
         dut.io.busA.scl.read #= false
@@ -516,8 +552,11 @@ object BitCycleEngineTargetSim {
         dut.io.busB.scl.read #= true
         dut.clockDomain.waitSampling(halfPeriodCycles)
       }
-      sclPulse() // phase 0 falling + phase 1 rising
-      sclPulse() // phase 2 falling
+      // DRIVE_BIT_ON_SCL needs F-R-F (open / sample / close). Two
+      // sclPulse calls give F-R-F-R; the trailing R is harmlessly
+      // ignored by the engine's halt path.
+      sclPulse()
+      sclPulse()
       dut.io.busA.scl.read #= true
       dut.io.busB.scl.read #= true
 
