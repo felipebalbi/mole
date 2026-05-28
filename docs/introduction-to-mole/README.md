@@ -10,7 +10,7 @@ The deck is structured around seven labelled parts. Each one opens
 with a section divider, ends with a recap of the two or three
 things to remember, and seeds a "try it" thought-experiment before
 the answer lands on the following slide. The closing slide points
-to the long-form mdBook (`mole-asm/book/`) for everything the deck
+to the long-form mdBook (`book/`) for everything the deck
 only had time to sketch.
 
 ## Build

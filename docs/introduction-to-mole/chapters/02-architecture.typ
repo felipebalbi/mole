@@ -80,5 +80,5 @@
     [Compile-time determinism: every bug has a seed.],
   ),
   next: [the clock that makes all of this tick -- one quarter-bit at a time.],
-  deeper: [`mole-asm/book/src/mental-model.md` -- the layered view in long form.],
+  deeper: [`book/src/mental-model.md` -- the layered view in long form.],
 )

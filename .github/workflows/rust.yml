@@ -36,6 +36,7 @@ on:
     paths:
       - 'mole-asm/**'
       - 'mole-asm-cli/**'
+      - 'book/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - '.github/workflows/rust.yml'
@@ -44,6 +45,7 @@ on:
     paths:
       - 'mole-asm/**'
       - 'mole-asm-cli/**'
+      - 'book/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - '.github/workflows/rust.yml'
@@ -138,7 +140,7 @@ jobs:
 
       # `mdbook build` exits non-zero on bad SUMMARY.md, missing
       # chapters, or unresolved `[link]` references. Output lands
-      # in mole-asm/book/book/ which is gitignored; we don't
-      # publish it from CI.
+      # in book/book/ which is gitignored; we don't publish it
+      # from CI.
       - name: Build the book
-        run: mdbook build mole-asm/book
+        run: mdbook build book

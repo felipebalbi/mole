@@ -131,5 +131,5 @@ halt     status=0
     [The decoder closes the loop back to your source lines.],
   ),
   next: [breaking it on purpose -- injecting a single-quarter glitch.],
-  deeper: [`mole-asm/book/src/{quickstart,worked-examples}.md` -- the same write, end to end.],
+  deeper: [`book/src/{quickstart,worked-examples}.md` -- the same write, end to end.],
 )

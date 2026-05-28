@@ -160,5 +160,5 @@ EMIT_BIT  tx=recessive capture=1
     [Sticky flags + branch-on-condition is how control flow works.],
   ),
   next: [your first end-to-end test -- writing one byte to a real EEPROM.],
-  deeper: [`mole-asm/book/src/{syntax,opcodes}.md` -- the full ISA reference.],
+  deeper: [`book/src/{syntax,opcodes}.md` -- the full ISA reference.],
 )

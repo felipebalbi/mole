@@ -124,13 +124,13 @@ $ make flash       ; iceprog
     [The full ISA at a glance and the assembly syntax to drive it.],
     [A worked I2C test, a glitch fuzz, and the result ring that records both.],
   ),
-  next: [`mole-asm/book` -- the mdBook tutorial picks up from here.],
+  next: [`book` -- the mdBook tutorial picks up from here.],
   deeper: [`ROADMAP.md` for the design rationale; `AGENTS.md` for how to contribute.],
 )
 
 #thank-you-slide(
   "github.com/felipebalbi/mole",
-  book: "mole-asm/book/",
+  book: "book/",
   roadmap: "ROADMAP.md",
   contributing: "AGENTS.md",
 )
