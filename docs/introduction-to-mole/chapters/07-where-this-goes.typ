@@ -129,7 +129,7 @@ $ make flash       ; iceprog
 )
 
 #thank-you-slide(
-  "github.com/6mil-Labs/mole",
+  "github.com/felipebalbi/mole",
   book: "mole-asm/book/",
   roadmap: "ROADMAP.md",
   contributing: "AGENTS.md",

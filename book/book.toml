@@ -8,6 +8,6 @@ src = "src"
 [output.html]
 default-theme = "navy"
 preferred-dark-theme = "navy"
-git-repository-url = "https://github.com/6mil-Labs/mole"
-edit-url-template = "https://github.com/6mil-Labs/mole/edit/master/mole-asm/book/{path}"
+git-repository-url = "https://github.com/felipebalbi/mole"
+edit-url-template = "https://github.com/felipebalbi/mole/edit/master/mole-asm/book/{path}"
 no-section-label = true
