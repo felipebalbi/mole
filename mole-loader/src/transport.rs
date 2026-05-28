@@ -113,10 +113,17 @@ impl Transport {
     ///
     /// See [`TransportError`].
     pub fn open(path: &str, baud: u32) -> Result<Self, TransportError> {
+        // Set flow control on the BUILDER (not post-open). On Windows
+        // the serialport-rs `set_flow_control(Hardware)` post-open
+        // path has historically not reliably reconfigured the DCB's
+        // `fRtsControl` to `RTS_CONTROL_HANDSHAKE`, leaving RTS stuck
+        // deasserted so the engine's drain bytes never reach the
+        // host. Setting it at open time avoids that.
         let mut port = serialport::new(path, baud)
             .data_bits(DataBits::Eight)
             .parity(Parity::None)
             .stop_bits(StopBits::One)
+            .flow_control(FlowControl::Hardware)
             .timeout(DEFAULT_TIMEOUT)
             .open()
             .map_err(|source| TransportError::OpenPort {
@@ -124,9 +131,9 @@ impl Transport {
                 source,
             })?;
 
-        // `serialport::new(...).flow_control(Hardware)` would have
-        // worked too; setting it post-open lets us produce a
-        // distinct error if the platform refuses.
+        // Re-assert it post-open too, both to confirm the platform
+        // honours it and to keep the distinct error path for the
+        // "OS refuses HW flow control" failure mode.
         port.set_flow_control(FlowControl::Hardware)
             .map_err(|source| TransportError::ConfigureFlowControl {
                 path: path.to_string(),
