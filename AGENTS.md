@@ -332,6 +332,8 @@ scopes for sub-trees that don't exist yet.
 - `sdk` --- Scheme SDK (Layer 1).
 - `encoder` --- host-side Rust bytecode encoder.
 - `cli` --- host CLI (when it lands).
+- `loader` --- host-side bytecode loader and result-ring
+  decoder (`mole-loader/`, `mole-loader-cli/`).
 - `roadmap` --- changes to `ROADMAP.md`.
 - `agents` --- changes to this file (`AGENTS.md`).
 - `readme` --- changes to top-level `README.md`.

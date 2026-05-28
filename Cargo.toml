@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["mole-asm", "mole-asm-cli"]
+members = ["mole-asm", "mole-asm-cli", "mole-loader", "mole-loader-cli"]
 
 # Shared metadata for every workspace member. Per AGENTS §5, edition 2024
 # is fine now that rustc has stabilised it; bump `rust-version` only when

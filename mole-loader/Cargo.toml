@@ -1,0 +1,18 @@
+[package]
+name = "mole-loader"
+version = "0.1.0"
+description = "Host-side loader and result-ring decoder for the Mole bit-cycle engine."
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+name = "mole_loader"
+path = "src/lib.rs"
+
+[dependencies]
+mole-asm = { path = "../mole-asm" }
+thiserror.workspace = true

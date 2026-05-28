@@ -1,0 +1,19 @@
+[package]
+name = "mole-loader-cli"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+license.workspace = true
+publish = false
+description = "CLI front-end for the mole-loader bytecode loader and result decoder"
+
+[[bin]]
+name = "mole-loader"
+path = "src/main.rs"
+
+[dependencies]
+mole-loader = { path = "../mole-loader" }
+clap.workspace = true
+color-eyre.workspace = true
