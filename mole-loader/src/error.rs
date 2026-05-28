@@ -12,17 +12,17 @@
 //!   decoding what the engine wrote back.
 //! - [`LoaderError::RevisionMismatch`] --- the `--expect-revision`
 //!   check failed.
-//!
-//! These are all data-shape failures of bytes already in hand. I/O
-//! and serial-port errors land in Commit 3 alongside the transport
-//! module and live in their own variants.
+//! - [`LoaderError::Transport`] --- the serial port layer raised an
+//!   error (open / configure / read / write / timeout).
+
+use std::io;
 
 use thiserror::Error;
 
 use crate::ring::Revision;
 
 /// Anything that can go wrong inside the host-side loader.
-#[derive(Debug, Clone, Error, PartialEq, Eq)]
+#[derive(Debug, Error)]
 pub enum LoaderError {
     /// The `.mole.bin` artifact failed structural / CRC validation
     /// before it was even handed to the transport layer.
@@ -33,6 +33,12 @@ pub enum LoaderError {
     /// as a well-formed (REVISION, records*, HALT) sequence.
     #[error(transparent)]
     Ring(#[from] RingError),
+
+    /// Serial-port transport raised an error. Wraps the rich
+    /// [`TransportError`] which itself distinguishes open / configure
+    /// / I/O / timeout failures.
+    #[error(transparent)]
+    Transport(#[from] TransportError),
 
     /// The engine reported a different REVISION than the caller
     /// asserted via `--expect-revision`. Carries both sides so the
@@ -182,4 +188,100 @@ pub enum RingError {
         /// The full 16-bit word.
         word: u16,
     },
+}
+
+/// Serial-port transport failures.
+///
+/// Wraps the [`serialport`] crate errors and `std::io::Error` so the
+/// CLI can surface "couldn't open the port" differently from "wrote
+/// fine but read timed out". Hardware RTS/CTS flow control is
+/// mandatory on the Mole side; failure to configure it lands in
+/// [`TransportError::ConfigureFlowControl`].
+#[derive(Debug, Error)]
+pub enum TransportError {
+    /// `serialport::new(...).open()` failed --- usually means the
+    /// path does not exist, the port is held by another process, or
+    /// the OS refused permission.
+    #[error("failed to open serial port {path:?}: {source}")]
+    OpenPort {
+        /// Path the caller tried to open (e.g. `/dev/ttyUSB0`).
+        path: String,
+        /// Underlying `serialport` error.
+        source: serialport::Error,
+    },
+
+    /// Setting baud, parity, stop bits, or data bits failed after
+    /// `open` succeeded. Vanishingly rare in practice.
+    #[error("failed to configure serial port {path:?}: {source}")]
+    Configure {
+        /// Path of the port being configured.
+        path: String,
+        /// Underlying `serialport` error.
+        source: serialport::Error,
+    },
+
+    /// Setting hardware RTS/CTS flow control failed. Mole *requires*
+    /// hardware flow control --- if the platform's serial driver
+    /// cannot enable it, the loader cannot safely proceed.
+    #[error(
+        "failed to enable hardware RTS/CTS flow control on {path:?}: {source}.\n\
+         The Mole engine requires hardware flow control to safely transfer the \
+         program frame and drain the result ring; soft- or no-flow-control \
+         operation is not supported."
+    )]
+    ConfigureFlowControl {
+        /// Path of the port whose flow control could not be enabled.
+        path: String,
+        /// Underlying `serialport` error.
+        source: serialport::Error,
+    },
+
+    /// A blocking read or write returned an `io::ErrorKind::TimedOut`
+    /// before the requested byte count completed. Usually means the
+    /// engine never reached `HALT`, the wrong baud is set on one side,
+    /// or hardware flow control is wired the wrong way around.
+    #[error("serial port {phase:?} timed out after {after_bytes} of {expected_bytes} bytes")]
+    Timeout {
+        /// Which phase of the transaction timed out.
+        phase: TransportPhase,
+        /// How many bytes had completed before the timeout fired.
+        after_bytes: usize,
+        /// How many bytes the operation was waiting for in total.
+        expected_bytes: usize,
+    },
+
+    /// Any other `io::Error` raised by the serial port during read
+    /// or write.
+    #[error("serial port {phase:?} I/O error: {source}")]
+    Io {
+        /// Which phase of the transaction errored.
+        phase: TransportPhase,
+        /// Underlying I/O error.
+        source: io::Error,
+    },
+
+    /// Generic [`serialport`] error not captured by the more specific
+    /// variants above.
+    #[error("serial port error: {0}")]
+    Serial(#[from] serialport::Error),
+}
+
+/// Which phase of a `send_and_drain` transaction was active when the
+/// transport error fired. Lets the CLI render a more helpful diagnostic
+/// ("the frame upload timed out" vs "the result ring drain timed out").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TransportPhase {
+    /// Writing the `.mole.bin` frame to the engine.
+    Load,
+    /// Reading the result ring back from the engine.
+    Drain,
+}
+
+impl std::fmt::Display for TransportPhase {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Load => f.write_str("load"),
+            Self::Drain => f.write_str("drain"),
+        }
+    }
 }

@@ -85,6 +85,39 @@ impl std::fmt::Display for Revision {
     }
 }
 
+/// Parse a `"X.Y.Z"` triplet (decimal) into a [`Revision`].
+///
+/// Used by the CLI's `--expect-revision` flag. Major and minor are
+/// `u8`; patch is `u16`. Three components are mandatory; anything
+/// shorter or longer is rejected with a descriptive error.
+impl std::str::FromStr for Revision {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let parts: Vec<&str> = s.split('.').collect();
+        if parts.len() != 3 {
+            return Err(format!(
+                "expected three dot-separated components 'major.minor.patch', got {:?}",
+                s
+            ));
+        }
+        let major: u8 = parts[0]
+            .parse()
+            .map_err(|e| format!("invalid major {:?}: {e}", parts[0]))?;
+        let minor: u8 = parts[1]
+            .parse()
+            .map_err(|e| format!("invalid minor {:?}: {e}", parts[1]))?;
+        let patch: u16 = parts[2]
+            .parse()
+            .map_err(|e| format!("invalid patch {:?}: {e}", parts[2]))?;
+        Ok(Self {
+            major,
+            minor,
+            patch,
+        })
+    }
+}
+
 /// One decoded record from the ring's record stream.
 ///
 /// HALT is *not* a [`Record`] --- it terminates the stream and is
@@ -311,6 +344,32 @@ mod tests {
             patch: 3,
         };
         assert_eq!(rev.to_string(), "1.2.3");
+    }
+
+    #[test]
+    fn revision_from_str_round_trip() {
+        let rev = Revision {
+            major: 9,
+            minor: 12,
+            patch: 0x1234,
+        };
+        let parsed: Revision = rev.to_string().parse().unwrap();
+        assert_eq!(rev, parsed);
+    }
+
+    #[test]
+    fn revision_from_str_rejects_wrong_arity() {
+        assert!("1.2".parse::<Revision>().is_err());
+        assert!("1.2.3.4".parse::<Revision>().is_err());
+        assert!("not a version".parse::<Revision>().is_err());
+    }
+
+    #[test]
+    fn revision_from_str_rejects_out_of_range() {
+        // major / minor are u8; 256 overflows.
+        assert!("256.0.0".parse::<Revision>().is_err());
+        // patch is u16; 65536 overflows.
+        assert!("0.0.65536".parse::<Revision>().is_err());
     }
 
     #[test]

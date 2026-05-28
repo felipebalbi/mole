@@ -17,4 +17,6 @@ license = "MIT OR Apache-2.0"
 thiserror = "2"
 clap = { version = "4", features = ["derive"] }
 color-eyre = "0.6"
+serialport = "4"
+indicatif = "0.18"
 

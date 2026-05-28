@@ -54,7 +54,9 @@
 pub mod error;
 pub mod frame;
 pub mod ring;
+pub mod transport;
 
-pub use error::{FrameError, LoaderError, RingError};
+pub use error::{FrameError, LoaderError, RingError, TransportError, TransportPhase};
 pub use frame::verify_frame;
 pub use ring::{DecodedRing, HaltStatus, Record, Revision, decode_ring};
+pub use transport::{DEFAULT_BAUD, DEFAULT_RING_BYTES, DEFAULT_TIMEOUT, Progress, Transport};

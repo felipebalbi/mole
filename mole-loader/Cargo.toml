@@ -15,4 +15,5 @@ path = "src/lib.rs"
 
 [dependencies]
 mole-asm = { path = "../mole-asm" }
+serialport.workspace = true
 thiserror.workspace = true
