@@ -34,9 +34,9 @@
 ]
 
 #stat-slide(
-  "2",
-  "resistors",
-  caption: [Plus one iCEBreaker and the DUT. That's the entire BoM for v0.],
+  "1",
+  "iCEBreaker",
+  caption: [Plus 2 resistors and the DUT. That's the entire BoM for v0.],
 )
 
 #try-it-slide(
