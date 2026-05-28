@@ -31,7 +31,7 @@ rationale):
   HDR-DDR transition is *compiled* into Layer 0 bytecode.
 
 `moleasm` is the lowest level of Layer 1 that humans write directly.
-Above it sit higher-level languages (the eventual Scheme SDK,
+Above it sit higher-level languages (a planned SDK,
 ROADMAP §"Layer 1"); below it sits only the wire format
 itself. When you write moleasm you are spelling out the bus
 behaviour bit by bit, with no protocol layer hiding mistakes.

@@ -1,6 +1,6 @@
 // figures/architecture.typ
 //
-// Three-block diagram: Host (Rust + Scheme) ↔ Mole FPGA ↔ DUT.
+// Three-block diagram: Host (Rust) ↔ Mole FPGA ↔ DUT.
 // Drawn with cetz so it ships in-tree as code, not as a binary.
 
 #import "../lib.typ": *
@@ -22,7 +22,7 @@
   content((2.3, 1.95),
     text(font: font-sans, size: 11pt, weight: "semibold", fill: secondary)[HOST])
   content((2.3, 1.45),
-    text(font: font-serif, size: 13pt, fill: ink)[Rust + Scheme])
+    text(font: font-serif, size: 13pt, fill: ink)[Rust])
   content((2.3, 1.0),
     text(font: font-mono, size: 9pt, fill: ink-soft)[moleasm -> bytecode])
   content((2.3, 0.55),

@@ -111,7 +111,7 @@ $ make flash       ; iceprog
       [Target role -- sample / drive paced by external SCL.],
       [DAA arbitration for I3C.],
       [Result-ring decoder with source-line cross-link.],
-      [Scheme SDK on top of the assembler.],
+      [Spec-level SDK on top of the assembler (language TBD).],
     )
   ],
   verdict: [Wire format locks at Phase 0's first tagged release.],

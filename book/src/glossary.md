@@ -29,8 +29,8 @@ result ring. Controlled by the `capture=1` flag on `EMIT_BIT`,
 `EMIT_QUARTER`, `SAMPLE_BIT_ON_SCL`, and `DRIVE_BIT_ON_SCL`.
 
 **CCC.** *Common Command Code.* I3C in-band command. Out of scope
-for moleasm itself, which works at the bit layer; the Scheme SDK
-generates CCC sequences as straight-line moleasm.
+for moleasm itself, which works at the bit layer; a higher-level SDK
+will generate CCC sequences as straight-line moleasm.
 
 **Cond code.** One of `ALWAYS`, `MISMATCH`, ..., used by `BRANCH_ON`
 and `WAIT_ON`. See the [Reference](./reference.md).
@@ -98,7 +98,7 @@ nothing about I2C or I3C.
 **Layer 1.** The host-side compiler stack. The protocol knowledge
 lives here: spec-correct I2C / I3C / CCC / HDR-DDR primitives plus
 fault-injection knobs. moleasm is the lowest level of Layer 1 a
-human writes directly; above it sits the Scheme SDK.
+human writes directly; a higher-level SDK is planned to sit above it.
 
 **LCR.** *Loop counter register.* One of two 8-bit hardware
 counters (`lcr0`, `lcr1`) primed by `LOAD_LOOP` and decremented by

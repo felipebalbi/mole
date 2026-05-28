@@ -107,8 +107,8 @@ This separation is load-bearing. The bytecode never has to know what
 protocol you are running --- it just says "now drive the recessive
 symbol" --- and the `BUS_MODE` register decides whether that means
 "release the line" or "actively pull it high". Want to add SMBus or
-PMBus support tomorrow? Add a `BUS_MODE` table entry and an SDK
-wrapper. Zero ISA churn.
+PMBus support tomorrow? Add a `BUS_MODE` table entry and a macro
+layer on top. Zero ISA churn.
 
 ## The four sticky flags
 

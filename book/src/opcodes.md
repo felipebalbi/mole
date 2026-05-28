@@ -378,7 +378,7 @@ The decode arm releases all bus drivers (`sdaDriveLow/High`,
 `sclDriveLow/High := False`) before writing the role register, so
 a mid-program role switch always leaves the bus in a clean Hi-Z
 state regardless of which role was driving last. There is no
-"must be first" check --- the SDK convention is to issue
+"must be first" check --- the convention is to issue
 `SET_ROLE` near the top of every program, but the engine accepts
 the opcode at any PC.
 

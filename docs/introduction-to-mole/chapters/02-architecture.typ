@@ -31,12 +31,12 @@
 #compare-slide(
   "Two layers. One contract.",
   kicker-text: "Host above, engine below",
-  "Layer 1 -- Host compiler", [
+  "Layer 1 -- Assembler", [
     #v(0.3em)
     #text(font: font-serif, size: 18pt, fill: ink)[Knows the spec.]
     #v(0.2em)
     #text(size: 15pt, fill: muted)[
-      I2C, I3C, CCC, HDR-DDR primitives in Rust + Scheme. Emits bytecode.
+      Bytecode assembler (`moleasm`) in Rust. Emits bytecode for the engine.
     ]
   ],
   "Layer 0 -- Bit-cycle engine", [

@@ -179,7 +179,7 @@ alone, which is exactly why `EMIT_QUARTER` exists.
 - The hard part of writing moleasm isn't the syntax. It's deciding
   what tx symbols belong in each quarter so the resulting waveform
   matches the spec you're targeting. That's where the protocol
-  knowledge lives, and that's why the eventual Scheme SDK exists ---
+  knowledge lives, and that's why a planned SDK exists ---
   to spell those sequences once and reuse them.
 
 The next chapter, [Patterns](./patterns.md), distills the recurring
