@@ -517,11 +517,11 @@ fn resolve_branch_target(
     } else {
         parse_int(tok, loc)?
     };
-    if !(-128..=127).contains(&offset) {
+    if !(-64..=63).contains(&offset) {
         return Err(AsmError::range(
             loc,
             format!(
-                "BRANCH_ON offset {offset} out of signed 8-bit range \
+                "BRANCH_ON offset {offset} out of signed 7-bit range \
                  (branch_pc={branch_pc})"
             ),
         ));
@@ -924,10 +924,13 @@ mod tests {
 
     #[test]
     fn branch_out_of_range_rejected() {
-        // Force a forward branch past +127 by stuffing 129 HALTs between
-        // the branch and its target.
+        // Force a forward branch past +63 (one beyond the signed-7
+        // BRANCH_ON range) by stuffing 65 HALTs between the branch
+        // and its target. The old signed-8 guard accepted offsets
+        // up to +127, so 65 HALTs is a regression catcher for the
+        // tightened ±64 boundary.
         let mut src = String::from("BRANCH_ON ALWAYS, tgt\n");
-        for _ in 0..129 {
+        for _ in 0..65 {
             src.push_str("HALT\n");
         }
         src.push_str("tgt:\n  HALT\n");
