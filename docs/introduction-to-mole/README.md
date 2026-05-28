@@ -86,6 +86,9 @@ stay terse and the styling stays consistent:
 - `try-it-slide` -- prompt + hint + "answer on the next slide"
   banner, anchored so a long prompt can't push the banner onto
   an orphan page.
+- `provocation-slide` -- sibling of `try-it-slide` for rhetorical
+  / food-for-thought openers with no follow-up answer (no
+  banner, gentler kicker).
 - `compare-slide` -- two columns + optional verdict.
 - `code-slide` -- titled slide with a dark code panel as body.
 - `quote-slide` -- big italic pull-quote.

@@ -356,6 +356,31 @@
   #chrome()
 ]
 
+// Provocation slide: a rhetorical opener / food-for-thought hook
+// that does NOT have a follow-up answer slide. Visually a sibling
+// of try-it-slide (same prompt box + optional hint) but without the
+// "answer on the next slide" banner -- the audience is being asked
+// to sit with the question, not to be quizzed.
+#let provocation-slide(
+  prompt,
+  hint: none,
+  kicker-text: "Food for thought",
+  title: "Pause and consider.",
+) = slide[
+  #slide-title(title, kicker-text: kicker-text)
+  #v(0.4em)
+  #box(width: 100%, fill: bg-tint, inset: 18pt, radius: 6pt)[
+    #text(font: font-serif, size: 20pt, fill: ink)[#prompt]
+    #if hint != none [
+      #v(0.6em)
+      #text(font: font-serif, size: 13pt, style: "italic", fill: muted)[
+        Hint: #hint
+      ]
+    ]
+  ]
+  #chrome()
+]
+
 // Compare slide: two-column compare/contrast, optional bottom verdict.
 // Useful for before/after, controller-vs-target, OD-vs-PP, etc.
 #let compare-slide(
