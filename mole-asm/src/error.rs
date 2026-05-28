@@ -54,7 +54,7 @@ pub enum Kind {
     /// undefined symbol, label-vs-equate confusion.
     Symbol,
     /// Numeric range overflow: literal too large, branch offset out of
-    /// signed-8-bit range, program exceeds 4096 instruction slots, etc.
+    /// signed-7-bit range, program exceeds 2048 instruction slots, etc.
     Range,
     /// Operand-shape problem: missing required key, unexpected positional
     /// argument, duplicate `key=` operand, contradictory flag
@@ -79,13 +79,13 @@ pub enum AsmError {
         message: String,
     },
 
-    /// Tried to build a UART frame with zero or more-than-4096 words.
+    /// Tried to build a UART frame with zero or more-than-2048 words.
     /// Not tied to a source line because [`crate::frame::build_frame`]
     /// is also a public helper.
-    #[error("frame must contain 1..=4096 words, got {word_count}")]
+    #[error("frame must contain 1..=2048 words, got {word_count}")]
     FrameTooLarge {
         /// Number of words the caller tried to frame. Outside the
-        /// `1..=4096` range.
+        /// `1..=2048` range.
         word_count: usize,
     },
 }

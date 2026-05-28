@@ -92,102 +92,96 @@ fn syntax_kind(err: &AsmError) -> Option<Kind> {
 }
 
 #[test]
-fn branch_minus_128_accepted() {
-    // Place the target 128 PC slots before the branch: 128 HALTs, label,
-    // 128 HALTs again, then branch back to the label so offset = -128.
+fn branch_minus_64_accepted() {
+    // 7-bit signed BRANCH_ON offset spans -64..=63. Place the target
+    // 64 PC slots before the branch so offset = -64.
     // Layout:
-    //   PC 0..127:   HALT * 128
-    //   PC 128:      tgt:
-    //   PC 128..255: HALT * 128   (128 more HALTs *after* the label)
-    //   PC 256:      BRANCH_ON ALWAYS, tgt
-    // offset = tgt(128) - branch_pc(256) - 1 = -129. Off by one.
-    // Re-pick: want offset exactly -128, so target_pc - branch_pc = -127.
-    //   PC 0..126:   HALT * 127  (127 instrs)
-    //   PC 127:      tgt:
-    //   PC 127..253: HALT * 127  (127 instrs)
-    //   PC 254:      BRANCH_ON ALWAYS, tgt
-    // offset = 127 - 254 - 1 = -128.  ✓
+    //   PC 0..62:   HALT * 63
+    //   PC 63:      tgt:
+    //   PC 63..125: HALT * 63
+    //   PC 126:     BRANCH_ON ALWAYS, tgt
+    // offset = 63 - 126 - 1 = -64.  Goal.
     let mut src = String::new();
-    for _ in 0..127 {
+    for _ in 0..63 {
         src.push_str("HALT\n");
     }
     src.push_str("tgt:\n");
-    for _ in 0..127 {
+    for _ in 0..63 {
         src.push_str("HALT\n");
     }
     src.push_str("BRANCH_ON ALWAYS, tgt\n");
-    let words = assemble(&src, "<offset=-128>").expect("offset=-128 must encode");
+    let words = assemble(&src, "<offset=-64>").expect("offset=-64 must encode");
     let branch_word = *words.last().unwrap();
-    // BRANCH_ON cond=0 offset=-128 -> 0x5080.
+    // BRANCH_ON cond=0 offset=-64 -> (5<<11) | (0<<7) | 0x40 = 0x2840.
     assert_eq!(
-        branch_word, 0x5080,
-        "expected 0x5080, got {branch_word:#06x}"
+        branch_word, 0x2840,
+        "expected 0x2840, got {branch_word:#06x}"
     );
 }
 
 #[test]
-fn branch_minus_129_rejected() {
-    // One more HALT between label and branch -> offset = -129.
+fn branch_minus_65_rejected() {
+    // One more HALT between label and branch -> offset = -65.
     let mut src = String::new();
-    for _ in 0..127 {
+    for _ in 0..63 {
         src.push_str("HALT\n");
     }
     src.push_str("tgt:\n");
-    for _ in 0..128 {
+    for _ in 0..64 {
         src.push_str("HALT\n");
     }
     src.push_str("BRANCH_ON ALWAYS, tgt\n");
-    let err = assemble(&src, "<offset=-129>").unwrap_err();
+    let err = assemble(&src, "<offset=-65>").unwrap_err();
     assert_eq!(syntax_kind(&err), Some(Kind::Range));
 }
 
 #[test]
-fn branch_plus_127_accepted() {
-    // BRANCH at PC 0, target at PC 128 -> offset = 128 - 0 - 1 = 127.
+fn branch_plus_63_accepted() {
+    // BRANCH at PC 0, target at PC 64 -> offset = 64 - 0 - 1 = 63.
     let mut src = String::from("BRANCH_ON ALWAYS, tgt\n");
-    for _ in 0..127 {
+    for _ in 0..63 {
         src.push_str("HALT\n");
     }
     src.push_str("tgt:\n  HALT\n");
-    let words = assemble(&src, "<offset=+127>").expect("offset=+127 must encode");
-    // BRANCH_ON cond=0 offset=127 -> 0x507F.
-    assert_eq!(words[0], 0x507F, "expected 0x507F, got {:#06x}", words[0]);
+    let words = assemble(&src, "<offset=+63>").expect("offset=+63 must encode");
+    // BRANCH_ON cond=0 offset=63 -> (5<<11) | 0x3F = 0x283F.
+    assert_eq!(words[0], 0x283F, "expected 0x283F, got {:#06x}", words[0]);
 }
 
 #[test]
-fn branch_plus_128_rejected() {
+fn branch_plus_64_rejected() {
     let mut src = String::from("BRANCH_ON ALWAYS, tgt\n");
-    for _ in 0..128 {
+    for _ in 0..64 {
         src.push_str("HALT\n");
     }
     src.push_str("tgt:\n  HALT\n");
-    let err = assemble(&src, "<offset=+128>").unwrap_err();
+    let err = assemble(&src, "<offset=+64>").unwrap_err();
     assert_eq!(syntax_kind(&err), Some(Kind::Range));
 }
 
 #[test]
-fn program_length_4096_accepted() {
-    // 4096 HALTs is exactly the program-memory budget. assemble() must
-    // succeed; assemble_to_frame() then succeeds too (frame size check
-    // is 1..=4096 inclusive).
-    let mut src = String::with_capacity(4096 * 6);
-    for _ in 0..4096 {
+fn program_length_2048_accepted() {
+    // 2048 HALTs is exactly the program-memory budget (11-bit JMP
+    // addr). assemble() must succeed; assemble_to_frame() then succeeds
+    // too (frame size check is 1..=2048 inclusive).
+    let mut src = String::with_capacity(2048 * 6);
+    for _ in 0..2048 {
         src.push_str("HALT\n");
     }
-    let words = assemble(&src, "<max-prog>").expect("4096 words must assemble");
-    assert_eq!(words.len(), 4096);
+    let words = assemble(&src, "<max-prog>").expect("2048 words must assemble");
+    assert_eq!(words.len(), 2048);
     let frame = assemble_to_frame(&src, "<max-prog>").expect("must frame");
-    assert_eq!(frame.len(), 2 + 4096 * 2 + 2);
+    assert_eq!(frame.len(), 2 + 2048 * 2 + 2);
 }
 
 #[test]
-fn program_length_4097_rejected() {
-    let mut src = String::with_capacity(4097 * 6);
-    for _ in 0..4097 {
+fn program_length_2049_rejected() {
+    let mut src = String::with_capacity(2049 * 6);
+    for _ in 0..2049 {
         src.push_str("HALT\n");
     }
     let err = assemble(&src, "<over-prog>").unwrap_err();
-    // The assembler enforces 4096-word PC budget itself; we never get
+    // The assembler enforces 2048-word PC budget itself; we never get
     // far enough to hit the frame builder's check.
     assert_eq!(syntax_kind(&err), Some(Kind::Range));
 }

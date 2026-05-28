@@ -58,9 +58,10 @@ pub(crate) const TIMING_REG_ALIASES: &[(&str, u8)] = &[
     ("hdr_ddr_freq", 3),
 ];
 
-/// Recognised mnemonics (UPPER CASE). The 14 v0 opcodes; everything
-/// else either belongs in [`RESERVED_V05_MNEMONICS`] or is rejected
-/// outright.
+/// Recognised mnemonics (UPPER CASE). The 15 v0 opcodes (14 from the
+/// original ISA plus `SET_ROLE`, added when the opcode field widened
+/// from 4 to 5 bits); everything else either belongs in
+/// [`RESERVED_V05_MNEMONICS`] or is rejected outright.
 pub(crate) const MNEMONICS: &[&str] = &[
     "HALT",
     "EMIT_BIT",
@@ -76,6 +77,7 @@ pub(crate) const MNEMONICS: &[&str] = &[
     "DRIVE_BIT_ON_SCL",
     "LOAD_LOOP",
     "DEC_BRANCH",
+    "SET_ROLE",
 ];
 
 /// Reserved-v0.5 mnemonics; the assembler rejects them and points the
@@ -88,9 +90,17 @@ pub(crate) const RESERVED_V05_MNEMONICS: &[&str] = &["FLAG_CLEAR", "CAPTURE_RUN"
 
 /// Loop-counter register aliases for [`Instruction::LoadLoop`] /
 /// [`Instruction::DecBranch`]. One bit on the wire: `lcr0` -> 0,
-/// `lcr1` -> 1. The `[10:8]` pad above the reg bit stays reserved so
-/// a future 16-LCR widening reuses those bits with no wire break.
+/// `lcr1` -> 1. The `[9:8]` pad above the reg bit stays reserved so
+/// a future 4-LCR widening reuses those bits with no wire break.
 pub(crate) const LOOP_REG_ALIASES: &[(&str, u8)] = &[("lcr0", 0), ("lcr1", 1)];
+
+/// `SET_ROLE` named operand: `controller` (0) selects controller role,
+/// `target` (1) selects target role. The wire bit is at `[10]`; the
+/// rest of the operand is reserved zero. See
+/// `fpga/Mole/src/hw/Instruction.scala::SetRole` for the case-class
+/// definition and `BitCycleEngineCore.scala` for the runtime `roleReg`
+/// the engine maintains.
+pub(crate) const ROLE_ALIASES: &[(&str, u8)] = &[("controller", 0), ("target", 1)];
 
 /// Lookup helpers. Linear scans are fine: every table has at most a
 /// dozen entries and gets hit a handful of times per source line.
@@ -104,9 +114,9 @@ pub(crate) fn contains(table: &[&str], name: &str) -> bool {
 }
 
 /// True iff `name` is reserved (a mnemonic, a v0.5 reserved mnemonic,
-/// or any named tx / bus-mode / cond / timing-reg / loop-reg symbol).
-/// Used by the symbol table to refuse user-defined names that would
-/// shadow built-ins.
+/// or any named tx / bus-mode / cond / timing-reg / loop-reg / role
+/// symbol). Used by the symbol table to refuse user-defined names
+/// that would shadow built-ins.
 pub(crate) fn is_reserved_name(name: &str) -> bool {
     contains(MNEMONICS, name)
         || contains(RESERVED_V05_MNEMONICS, name)
@@ -115,6 +125,7 @@ pub(crate) fn is_reserved_name(name: &str) -> bool {
         || COND_CODES.iter().any(|(n, _)| *n == name)
         || TIMING_REG_ALIASES.iter().any(|(n, _)| *n == name)
         || LOOP_REG_ALIASES.iter().any(|(n, _)| *n == name)
+        || ROLE_ALIASES.iter().any(|(n, _)| *n == name)
 }
 
 /// Sorted list of accepted names from a `(name, value)` table, used in

@@ -43,23 +43,31 @@ from typing import Callable, Iterable, Optional
 
 # ===========================================================================
 # Opcode positions (mirrors Opcode.position in Instruction.scala)
+#
+# Wire format: 5-bit opcode at [15:11], 11-bit payload at [10:0]. Slots
+# 0x00..0x0D are v0; 0x0E (FLAG_CLEAR) and 0x0F (CAPTURE_RUN) are
+# reserved-v0.5; 0x10 is SET_ROLE (added with the 5-bit opcode widening);
+# 0x11..0x1F are reserved for v0.5+.
 # ===========================================================================
 
-OP_HALT = 0x0
-OP_EMIT_BIT = 0x1
-OP_EMIT_QUARTER = 0x2
-OP_STRETCH_SCL = 0x3
-OP_WAIT_ON = 0x4
-OP_BRANCH_ON = 0x5
-OP_JMP = 0x6
-OP_SET_BUS_MODE = 0x7
-OP_LOAD_TIMING = 0x8
-OP_MARK = 0x9
-OP_SAMPLE_BIT = 0xA
-OP_DRIVE_BIT = 0xB
-OP_LOAD_LOOP = 0xC
-OP_DEC_BRANCH = 0xD
-# 0xE..0xF reserved-v0.5 (use `.dw` to inject raw words if you really must)
+OP_HALT = 0x00
+OP_EMIT_BIT = 0x01
+OP_EMIT_QUARTER = 0x02
+OP_STRETCH_SCL = 0x03
+OP_WAIT_ON = 0x04
+OP_BRANCH_ON = 0x05
+OP_JMP = 0x06
+OP_SET_BUS_MODE = 0x07
+OP_LOAD_TIMING = 0x08
+OP_MARK = 0x09
+OP_SAMPLE_BIT = 0x0A
+OP_DRIVE_BIT = 0x0B
+OP_LOAD_LOOP = 0x0C
+OP_DEC_BRANCH = 0x0D
+# 0x0E (FLAG_CLEAR) and 0x0F (CAPTURE_RUN) are reserved v0.5; reach
+# them via `.dw` if you really must.
+OP_SET_ROLE = 0x10
+# 0x11..0x1F are reserved v0.5+; reachable via `.dw` only.
 
 
 # ===========================================================================
@@ -118,11 +126,20 @@ TIMING_REG_ALIASES: dict[str, int] = {
 
 
 # Loop-counter register aliases for LOAD_LOOP / DEC_BRANCH. One bit on
-# the wire (lcr0 -> 0, lcr1 -> 1); the [10:8] pad above stays reserved
-# for a future 16-LCR widening with no wire-format break.
+# the wire (lcr0 -> 0, lcr1 -> 1); the [9:8] pad above stays reserved
+# for a future 4-LCR widening with no wire-format break.
 LOOP_REG_ALIASES: dict[str, int] = {
     "lcr0": 0,
     "lcr1": 1,
+}
+
+
+# SET_ROLE role aliases. One bit on the wire (controller -> 0,
+# target -> 1); the [9:0] pad stays reserved for future role-mode
+# extensions.
+ROLE_ALIASES: dict[str, int] = {
+    "controller": 0,
+    "target": 1,
 }
 
 
@@ -143,6 +160,7 @@ MNEMONICS: set[str] = {
     "DRIVE_BIT_ON_SCL",
     "LOAD_LOOP",
     "DEC_BRANCH",
+    "SET_ROLE",
 }
 
 # Reserved-v0.5 mnemonics; assembler rejects them and points the user at
@@ -163,6 +181,7 @@ RESERVED_NAMES: set[str] = (
     | set(COND_CODES)
     | set(TIMING_REG_ALIASES)
     | set(LOOP_REG_ALIASES)
+    | set(ROLE_ALIASES)
 )
 
 
@@ -183,7 +202,14 @@ class AsmError(Exception):
 
 # ===========================================================================
 # Instruction-word encoders (mirror Instruction.scala `encode`)
+#
+# Wire format (post-widening): 5-bit opcode at [15:11], 11-bit payload
+# at [10:0]. Every field shift below is anchored against bit 11.
 # ===========================================================================
+
+
+# Low bit of the opcode field within the 16-bit instruction word.
+OPCODE_LO = 11
 
 
 def _flag_triple(expect: bool, mask: bool, capture: bool) -> int:
@@ -200,7 +226,8 @@ def _flag_triple(expect: bool, mask: bool, capture: bool) -> int:
 def enc_halt(status: int) -> int:
     if not 0 <= status < (1 << 4):
         raise ValueError(f"HALT status must be 0..15, got {status}")
-    return (OP_HALT << 12) | (status << 8)
+    # Layout: [15:11]op [10:7]status [6:0]reserved=0
+    return (OP_HALT << OPCODE_LO) | (status << 7)
 
 
 def enc_emit_bit(tx: int, expect: bool, mask: bool, capture: bool) -> int:
@@ -208,7 +235,8 @@ def enc_emit_bit(tx: int, expect: bool, mask: bool, capture: bool) -> int:
         raise ValueError(f"EMIT_BIT tx symbol must be 0..3, got {tx}")
     if tx == 0b11:
         raise ValueError("EMIT_BIT tx=reserved (0b11) is v0.5; use .dw")
-    return (OP_EMIT_BIT << 12) | (tx << 10) | _flag_triple(expect, mask, capture)
+    # Layout: [15:11]op [10:9]tx [8:3]reserved [2:0]flags
+    return (OP_EMIT_BIT << OPCODE_LO) | (tx << 9) | _flag_triple(expect, mask, capture)
 
 
 def enc_emit_quarter(
@@ -218,70 +246,79 @@ def enc_emit_quarter(
         raise ValueError(f"EMIT_QUARTER sda/scl must be 0..3, got sda={sda} scl={scl}")
     if sda == 0b11 or scl == 0b11:
         raise ValueError("EMIT_QUARTER sda/scl=reserved (0b11) is v0.5; use .dw")
+    # Layout: [15:11]op [10:9]sda [8:7]scl [6:3]reserved [2:0]flags
     return (
-        (OP_EMIT_QUARTER << 12)
-        | (sda << 10)
-        | (scl << 8)
+        (OP_EMIT_QUARTER << OPCODE_LO)
+        | (sda << 9)
+        | (scl << 7)
         | _flag_triple(expect, mask, capture)
     )
 
 
 def enc_stretch_scl(n_quarters: int) -> int:
-    if not 0 <= n_quarters < (1 << 12):
-        raise ValueError(f"STRETCH_SCL n_quarters must be 0..4095, got {n_quarters}")
-    return (OP_STRETCH_SCL << 12) | n_quarters
+    if not 0 <= n_quarters < (1 << 11):
+        raise ValueError(f"STRETCH_SCL n_quarters must be 0..2047, got {n_quarters}")
+    # Layout: [15:11]op [10:0]n_quarters
+    return (OP_STRETCH_SCL << OPCODE_LO) | n_quarters
 
 
 def enc_wait_on(cond: int, timeout_quarters: int) -> int:
     if not 0 <= cond < 16:
         raise ValueError(f"WAIT_ON cond must be 0..15, got {cond}")
-    if not 0 <= timeout_quarters < (1 << 8):
+    if not 0 <= timeout_quarters < (1 << 7):
         raise ValueError(
-            f"WAIT_ON timeout must be 0..255 quarters, got {timeout_quarters}"
+            f"WAIT_ON timeout must be 0..127 quarters, got {timeout_quarters}"
         )
-    return (OP_WAIT_ON << 12) | (cond << 8) | (timeout_quarters & 0xFF)
+    # Layout: [15:11]op [10:7]cond [6:0]timeout
+    return (OP_WAIT_ON << OPCODE_LO) | (cond << 7) | (timeout_quarters & 0x7F)
 
 
 def enc_branch_on(cond: int, pc_rel_offset: int) -> int:
     if not 0 <= cond < 16:
         raise ValueError(f"BRANCH_ON cond must be 0..15, got {cond}")
-    if not -128 <= pc_rel_offset <= 127:
+    if not -64 <= pc_rel_offset <= 63:
         raise ValueError(
-            f"BRANCH_ON pc-rel offset must be -128..127, got {pc_rel_offset}"
+            f"BRANCH_ON pc-rel offset must be -64..63, got {pc_rel_offset}"
         )
-    return (OP_BRANCH_ON << 12) | (cond << 8) | (pc_rel_offset & 0xFF)
+    # Layout: [15:11]op [10:7]cond [6:0]offset_signed
+    return (OP_BRANCH_ON << OPCODE_LO) | (cond << 7) | (pc_rel_offset & 0x7F)
 
 
 def enc_jmp(addr: int) -> int:
-    if not 0 <= addr < (1 << 12):
-        raise ValueError(f"JMP addr must fit in 12 bits (0..4095), got {addr}")
-    return (OP_JMP << 12) | addr
+    if not 0 <= addr < (1 << 11):
+        raise ValueError(f"JMP addr must fit in 11 bits (0..2047), got {addr}")
+    # Layout: [15:11]op [10:0]addr
+    return (OP_JMP << OPCODE_LO) | addr
 
 
 def enc_set_bus_mode(mode_wire: int) -> int:
     if mode_wire not in {0, 1, 6, 7}:
         raise ValueError(f"SET_BUS_MODE wire value must be 0|1|6|7, got {mode_wire}")
-    return (OP_SET_BUS_MODE << 12) | (mode_wire << 9)
+    # Layout: [15:11]op [10:8]mode_wire [7:0]reserved=0
+    return (OP_SET_BUS_MODE << OPCODE_LO) | (mode_wire << 8)
 
 
 def enc_load_timing(reg: int, divider_word: int) -> int:
     if not 0 <= reg < 4:
         raise ValueError(f"LOAD_TIMING reg must be 0..3, got {reg}")
-    if not 0 <= divider_word < (1 << 10):
+    if not 0 <= divider_word < (1 << 9):
         raise ValueError(
-            f"LOAD_TIMING divider_word must be 0..1023, got {divider_word}"
+            f"LOAD_TIMING divider_word must be 0..511, got {divider_word}"
         )
-    return (OP_LOAD_TIMING << 12) | (reg << 10) | divider_word
+    # Layout: [15:11]op [10:9]reg [8:0]divider_word
+    return (OP_LOAD_TIMING << OPCODE_LO) | (reg << 9) | divider_word
 
 
 def enc_mark(label: int) -> int:
     if not 0 <= label < (1 << 8):
         raise ValueError(f"MARK label must be 0..255, got {label}")
-    return (OP_MARK << 12) | (label << 4)
+    # Layout: [15:11]op [10:3]label [2:0]reserved=0
+    return (OP_MARK << OPCODE_LO) | (label << 3)
 
 
 def enc_sample_bit(expect: bool, mask: bool, capture: bool) -> int:
-    return (OP_SAMPLE_BIT << 12) | _flag_triple(expect, mask, capture)
+    # Layout: [15:11]op [10:3]reserved [2:0]flags
+    return (OP_SAMPLE_BIT << OPCODE_LO) | _flag_triple(expect, mask, capture)
 
 
 def enc_drive_bit(tx: int, expect: bool, mask: bool, capture: bool) -> int:
@@ -289,14 +326,15 @@ def enc_drive_bit(tx: int, expect: bool, mask: bool, capture: bool) -> int:
         raise ValueError(f"DRIVE_BIT_ON_SCL tx symbol must be 0..3, got {tx}")
     if tx == 0b11:
         raise ValueError("DRIVE_BIT_ON_SCL tx=reserved (0b11) is v0.5; use .dw")
-    return (OP_DRIVE_BIT << 12) | (tx << 10) | _flag_triple(expect, mask, capture)
+    # Layout: [15:11]op [10:9]tx [8:3]reserved [2:0]flags
+    return (OP_DRIVE_BIT << OPCODE_LO) | (tx << 9) | _flag_triple(expect, mask, capture)
 
 
 def enc_load_loop(reg: int, imm: int) -> int:
-    """LOAD_LOOP reg, imm8 -> [15:12]op [11]reg [10:8]reserved=0 [7:0]imm8.
+    """LOAD_LOOP reg, imm8 -> [15:11]op [10]reg [9:8]reserved=0 [7:0]imm8.
 
-    `reg` is one bit on the wire (lcr0 = 0, lcr1 = 1); the [10:8] pad
-    stays reserved so a future 16-LCR widening can claim those bits
+    `reg` is one bit on the wire (lcr0 = 0, lcr1 = 1); the [9:8] pad
+    stays reserved so a future 4-LCR widening can claim those bits
     without breaking the wire format. See Instruction.scala's LoadLoop
     case-class doc for the full design note.
     """
@@ -304,14 +342,16 @@ def enc_load_loop(reg: int, imm: int) -> int:
         raise ValueError(f"LOAD_LOOP reg must be 0 or 1, got {reg}")
     if not 0 <= imm < (1 << 8):
         raise ValueError(f"LOAD_LOOP imm must be 0..255, got {imm}")
-    return (OP_LOAD_LOOP << 12) | (reg << 11) | (imm & 0xFF)
+    return (OP_LOAD_LOOP << OPCODE_LO) | (reg << 10) | (imm & 0xFF)
 
 
 def enc_dec_branch(reg: int, pc_rel_offset: int) -> int:
     """DEC_BRANCH reg, offset -> decrement LCR[reg], back-edge if non-zero.
 
-    Wire: [15:12]op [11]reg [10:8]reserved=0 [7:0]offset_signed. 8-bit
-    wrap on the decrement (0 -> 0xFF).
+    Wire: [15:11]op [10]reg [9:8]reserved=0 [7:0]offset_signed. 8-bit
+    wrap on the decrement (0 -> 0xFF). DEC_BRANCH keeps the wider
+    signed-8 offset (-128..127) where BRANCH_ON narrowed to signed-7
+    (-64..63) --- counted-loop bodies benefit from the longer reach.
     """
     if not 0 <= reg < 2:
         raise ValueError(f"DEC_BRANCH reg must be 0 or 1, got {reg}")
@@ -319,7 +359,20 @@ def enc_dec_branch(reg: int, pc_rel_offset: int) -> int:
         raise ValueError(
             f"DEC_BRANCH pc-rel offset must be -128..127, got {pc_rel_offset}"
         )
-    return (OP_DEC_BRANCH << 12) | (reg << 11) | (pc_rel_offset & 0xFF)
+    return (OP_DEC_BRANCH << OPCODE_LO) | (reg << 10) | (pc_rel_offset & 0xFF)
+
+
+def enc_set_role(role: int) -> int:
+    """SET_ROLE role -> switch controller (0) / target (1) at runtime.
+
+    Wire: [15:11]op [10]role [9:0]reserved=0. Lives in opcode slot 0x10
+    (the first slot exposed by the 5-bit opcode widening). All v0
+    opcodes remain valid in either role; SET_ROLE only flips which
+    role-specific arms the engine dispatches to.
+    """
+    if role not in (0, 1):
+        raise ValueError(f"SET_ROLE role must be 0|1 (controller|target), got {role}")
+    return (OP_SET_ROLE << OPCODE_LO) | (role << 10)
 
 
 # ===========================================================================
@@ -344,11 +397,12 @@ def crc16_xmodem(data: bytes) -> int:
 def build_frame(words: Iterable[int]) -> bytes:
     """Build a complete UART frame: len_lo, len_hi, words (each LE),
     crc_lo, crc_hi. CRC covers everything except itself.
-    Per WIRE_FORMAT.md the engine accepts 1..4096 words per frame.
+    Per WIRE_FORMAT.md the engine accepts 1..2048 words per frame
+    (matches the 11-bit JMP addr / program-memory budget).
     """
     ws = list(words)
-    if not 1 <= len(ws) <= 4096:
-        raise ValueError(f"frame len {len(ws)} out of 1..4096")
+    if not 1 <= len(ws) <= 2048:
+        raise ValueError(f"frame len {len(ws)} out of 1..2048")
     payload = bytearray()
     payload.append(len(ws) & 0xFF)
     payload.append((len(ws) >> 8) & 0xFF)
@@ -639,10 +693,10 @@ def pass1(
             pc_stmts.append((pc, stmt))
         pc += advance
 
-        if pc >= (1 << 12):
+        if pc >= (1 << 11):
             raise AsmError(
                 f"{filename}:{stmt.line_no}",
-                f"program exceeds 4096 instruction slots (PC overflow)",
+                f"program exceeds 2048 instruction slots (PC overflow)",
             )
 
     return symbols, pc_stmts
@@ -887,6 +941,14 @@ def _encode_mnemonic(
         offset = _resolve_dec_branch_target(target_tok, pc, symbols, where)
         return enc_dec_branch(reg, offset)
 
+    if m == "SET_ROLE":
+        if len(stmt.operands) != 1:
+            raise AsmError(
+                where, "SET_ROLE takes one positional operand: <controller|target>"
+            )
+        role = _resolve_role(stmt.operands[0], where)
+        return enc_set_role(role)
+
     raise AsmError(where, f"unhandled mnemonic in encoder: {m!r}")
 
 
@@ -903,7 +965,9 @@ def _resolve_branch_target(
     tok: str, branch_pc: int, symbols: dict[str, Symbol], where: str
 ) -> int:
     """BRANCH_ON target: either a label name (compute signed offset) or a
-    raw signed numeric offset. PC math: next_pc = branch_pc + 1 + offset."""
+    raw signed numeric offset. PC math: next_pc = branch_pc + 1 + offset.
+    The 7-bit signed field caps reach at -64..63 instructions.
+    """
     if tok and tok[0].isalpha() or tok.startswith("_"):
         sym = symbols.get(tok)
         if sym is None:
@@ -916,17 +980,17 @@ def _resolve_branch_target(
         offset = sym.value - branch_pc - 1
     else:
         offset = _parse_int(tok, where)
-    if not -128 <= offset <= 127:
+    if not -64 <= offset <= 63:
         raise AsmError(
             where,
-            f"BRANCH_ON offset {offset} out of signed 8-bit range "
+            f"BRANCH_ON offset {offset} out of signed 7-bit range "
             f"(branch_pc={branch_pc})",
         )
     return offset
 
 
 def _resolve_jmp_target(tok: str, symbols: dict[str, Symbol], where: str) -> int:
-    """JMP target: either a label name (use absolute PC) or a raw 12-bit
+    """JMP target: either a label name (use absolute PC) or a raw 11-bit
     address literal."""
     if tok and tok[0].isalpha() or tok.startswith("_"):
         sym = symbols.get(tok)
@@ -952,6 +1016,22 @@ def _resolve_loop_reg(tok: str, where: str) -> int:
             where,
             f"loop reg {tok!r} must be lcr0|lcr1 or a literal 0|1 "
             f"(allowed names: {sorted(LOOP_REG_ALIASES)})",
+        )
+    return n
+
+
+def _resolve_role(tok: str, where: str) -> int:
+    """SET_ROLE role: `controller` / `target` (case-insensitive) or a
+    literal 0 / 1."""
+    lowered = tok.lower()
+    if lowered in ROLE_ALIASES:
+        return ROLE_ALIASES[lowered]
+    n = _parse_int(tok, where)
+    if n not in (0, 1):
+        raise AsmError(
+            where,
+            f"SET_ROLE operand {tok!r} must be controller|target or a literal 0|1 "
+            f"(allowed names: {sorted(ROLE_ALIASES)})",
         )
     return n
 
@@ -1077,50 +1157,50 @@ def _selfcheck_roadmap_example() -> None:
     §1118). Doc fix needed; the assembler emits the literal count."""
     words = assemble(_ROADMAP_EXAMPLE_SRC, filename="roadmap-example")
     expected = [
-        0x803C,  # LOAD_TIMING i2c_freq=0, 60
-        0x7000,  # SET_BUS_MODE i2c
-        0x2500,  # Q0: sda=rec scl=rec
-        0x2100,  # Q1: sda=dom scl=rec
-        0x2000,  # Q2: sda=dom scl=dom
+        0x403C,  # LOAD_TIMING i2c_freq=0, 60     -> (8<<11) | 60
+        0x3800,  # SET_BUS_MODE i2c               -> (7<<11) | (0<<8)
+        0x1280,  # Q0: sda=rec scl=rec            -> (2<<11) | (1<<9) | (1<<7)
+        0x1080,  # Q1: sda=dom scl=rec            -> (2<<11) | (0<<9) | (1<<7)
+        0x1000,  # Q2: sda=dom scl=dom            -> (2<<11)
         # addr 0xA0 = 1010_0000 (rec, dom, rec, dom, dom, dom, dom, dom)
-        0x1400,
-        0x1000,
-        0x1400,
-        0x1000,
-        0x1000,
-        0x1000,
-        0x1000,
-        0x1000,
-        # ACK slot: tx=hiz expect=0 mask=1 capture=1 -> 0x1803
-        0x1803,
+        0x0A00,
+        0x0800,
+        0x0A00,
+        0x0800,
+        0x0800,
+        0x0800,
+        0x0800,
+        0x0800,
+        # ACK slot: tx=hiz expect=0 mask=1 capture=1 -> (1<<11) | (2<<9) | 0b011
+        0x0C03,
         # BRANCH_ON MISMATCH, nak (nak at PC 30; branch at PC 14;
-        # offset = 30 - 14 - 1 = 15 = 0x0F) -> 0x510F
-        0x510F,
+        # offset = 30 - 14 - 1 = 15 = 0x0F) -> (5<<11) | (1<<7) | 0x0F
+        0x288F,
         # data 0xAB = 1010_1011 (rec, dom, rec, dom, rec, dom, rec, rec)
-        0x1400,
-        0x1000,
-        0x1400,
-        0x1000,
-        0x1400,
-        0x1000,
-        0x1400,
-        0x1400,
+        0x0A00,
+        0x0800,
+        0x0A00,
+        0x0800,
+        0x0A00,
+        0x0800,
+        0x0A00,
+        0x0A00,
         # ACK slot
-        0x1803,
+        0x0C03,
         # BRANCH_ON MISMATCH, nak (branch at PC 24; offset = 30-25 = 5)
-        0x5105,
+        0x2885,
         # STOP: dom/dom, dom/rec, rec/rec
-        0x2000,
-        0x2100,
-        0x2500,
-        # MARK label=1
-        0x9010,
+        0x1000,
+        0x1080,
+        0x1280,
+        # MARK label=1                  -> (9<<11) | (1<<3)
+        0x4808,
         # HALT status=0
         0x0000,
-        # nak: MARK label=2
-        0x9020,
-        # HALT status=1
-        0x0100,
+        # nak: MARK label=2             -> (9<<11) | (2<<3)
+        0x4810,
+        # HALT status=1                 -> (0<<11) | (1<<7)
+        0x0080,
     ]
     assert (
         len(words) == len(expected) == 32
@@ -1157,12 +1237,12 @@ def _selfcheck_whitespace_tolerance() -> None:
         "\tHALT\tstatus=0\n"
     )
     words = assemble(src, filename="whitespace-check")
-    # LOAD_TIMING i2c_freq=0, 59 -> 0x803B
-    # SET_BUS_MODE i2c          -> 0x7000
-    # HALT status=0             -> 0x0000
+    # LOAD_TIMING i2c_freq=0, 59 -> (8<<11) | 59 = 0x403B
+    # SET_BUS_MODE i2c           -> (7<<11)      = 0x3800
+    # HALT status=0              ->                0x0000
     assert words == [
-        0x803B,
-        0x7000,
+        0x403B,
+        0x3800,
         0x0000,
     ], f"whitespace tolerance failed: got {[hex(w) for w in words]}"
 
@@ -1200,9 +1280,14 @@ def main(argv: Optional[list[str]] = None) -> int:
     )
     parser.add_argument(
         "--frame",
-        action="store_true",
-        help="also emit a framed .mole.bin (len + CRC) next to the "
-        ".molecode output, ready to drop onto the iCEbreaker UART.",
+        nargs="?",
+        const=True,
+        default=None,
+        metavar="PATH",
+        help="also emit a framed .mole.bin (len + CRC) ready to drop onto "
+        "the iCEbreaker UART. With no value, writes alongside the .molecode "
+        "output; with PATH, writes to that exact path (matches the Rust "
+        "CLI's --frame-output for cross-implementation parity tests).",
     )
     args = parser.parse_args(argv)
 
@@ -1229,8 +1314,11 @@ def main(argv: Optional[list[str]] = None) -> int:
         f"assembled {len(words)} words ({len(words) * 2} bytes) " f"-> {out_molecode}"
     )
 
-    if args.frame:
-        out_frame = out_molecode.with_suffix(".mole.bin")
+    if args.frame is not None:
+        if args.frame is True:
+            out_frame = out_molecode.with_suffix(".mole.bin")
+        else:
+            out_frame = Path(args.frame)
         frame = build_frame(words)
         out_frame.write_bytes(frame)
         crc = crc16_xmodem(frame[:-2])

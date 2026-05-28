@@ -39,11 +39,11 @@ import spinal.core._
   * @param programWordCount
   *   Depth of the SPRAM-backed program memory, in 16-bit words. Each ISA
   *   instruction is exactly one word (ROADMAP §"Encoding width" — 16-bit
-  *   fixed). The 4096-instruction cap follows the 12-bit absolute `JMP`
-  *   operand: above 4096, `JMP` cannot reach all of memory and the encoder must
+  *   fixed). The 2048-instruction cap follows the 11-bit absolute `JMP`
+  *   operand: above 2048, `JMP` cannot reach all of memory and the encoder must
   *   reject the program. Long-range conditional branches expand to
-  *   `BRANCH_ON cond, near` + `JMP far` in the SDK to keep within ±128 of
-  *   `BRANCH_ON`'s signed offset while still spanning the full 4096-instruction
+  *   `BRANCH_ON cond, near` + `JMP far` in the SDK to keep within ±64 of
+  *   `BRANCH_ON`'s signed offset while still spanning the full 2048-instruction
   *   range.
   *
   * @param resultRingByteCount
@@ -91,7 +91,7 @@ case class MoleConfig(
     fabricFreqHz: HertzNumber =
       24 MHz, // .MHz method from spinal.core._; postfix form is documented sugar
     quarterPeriodCyclesReset: Int = 6,
-    programWordCount: Int = 4096,
+    programWordCount: Int = 2048,
     resultRingByteCount: Int = 8192,
     captureMaxBits: Int = 65536,
     uartBaud: Int = 1_000_000,
@@ -108,14 +108,14 @@ case class MoleConfig(
     s"programWordCount=$programWordCount must be >= 1"
   )
 
-  // 12-bit absolute JMP operand (ROADMAP §"Encoding width") caps the
-  // program at 4096 instructions = 4096 × 16-bit words = 8 KiB. No
+  // 11-bit absolute JMP operand (ROADMAP §"Encoding width") caps the
+  // program at 2048 instructions = 2048 × 16-bit words = 4 KiB. No
   // `isPow2` requirement here — JMP indexes directly and doesn't need
   // a power-of-two mask. A future v1 jumbo-address opcode could lift
   // the cap if a workload ever needs it.
   require(
-    programWordCount <= 4096,
-    s"programWordCount=$programWordCount exceeds 4096 (12-bit JMP addr cap)"
+    programWordCount <= 2048,
+    s"programWordCount=$programWordCount exceeds 2048 (11-bit JMP addr cap)"
   )
 
   require(

@@ -381,7 +381,7 @@ object BitCycleEngineSim {
   private def testWaitCondHit(): Unit = runTest("wait-cond-hit") { dut =>
     val program = Seq(
       setMode(BusMode.i2c),
-      waitOn(CondCode.sdaLow, 200), // generous timeout
+      waitOn(CondCode.sdaLow, 120), // generous timeout (max 127 in 7-bit field)
       halt(0xa)
     )
     dut.clockDomain.forkStimulus(period = 10)
@@ -648,7 +648,8 @@ object BitCycleEngineSim {
   private def testReservedOpcodeTrap(): Unit =
     runTest("reserved-opcode-trap") { dut =>
       // Slot 0xE is FLAG_CLEAR (reserved v0.5). All operand bits 0.
-      val badInstr = 0xe << 12
+      // 5-bit opcode at [15:11]: 0xE << 11 = 0x7000.
+      val badInstr = 0xe << 11
       val program = Seq(badInstr, halt(0))
       runProgram(dut, program)
       val ring = drainRing(dut)
@@ -663,7 +664,8 @@ object BitCycleEngineSim {
   private def testInvalidBusModeTrap(): Unit =
     runTest("invalid-busmode-trap") { dut =>
       val setBusModeOp = Opcode.setBusMode.position
-      val badInstr = (setBusModeOp << 12) | (2 << 9)
+      // 5-bit opcode at [15:11], mode field at [10:8].
+      val badInstr = (setBusModeOp << 11) | (2 << 8)
       val program = Seq(badInstr, halt(0))
       runProgram(dut, program)
       val ring = drainRing(dut)
@@ -681,7 +683,8 @@ object BitCycleEngineSim {
   private def testReservedTxSymbolTrap(): Unit =
     runTest("reserved-tx-symbol-trap") { dut =>
       val emitBitOp = Opcode.emitBit.position
-      val badInstr = (emitBitOp << 12) | (0x3 << 10) // tx_symbol = 0b11
+      // 5-bit opcode at [15:11], tx_symbol at [10:9].
+      val badInstr = (emitBitOp << 11) | (0x3 << 9) // tx_symbol = 0b11
       val program = Seq(badInstr, halt(0))
       runProgram(dut, program)
       val ring = drainRing(dut)

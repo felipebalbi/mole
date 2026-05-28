@@ -63,7 +63,7 @@ pub fn assemble(source: &str, filename: &str) -> Result<Vec<u16>> {
 /// # Errors
 ///
 /// Returns the same [`AsmError`] variants as [`assemble`], plus
-/// [`AsmError::FrameTooLarge`] if the program exceeds the 4096-word
+/// [`AsmError::FrameTooLarge`] if the program exceeds the 2048-word
 /// program-memory budget.
 pub fn assemble_to_frame(source: &str, filename: &str) -> Result<Vec<u8>> {
     let words = assemble(source, filename)?;

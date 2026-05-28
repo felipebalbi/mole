@@ -34,11 +34,11 @@ import spinal.core._
   *
   * @param maxReloadValue
   *   Largest legal `reload` value, used to size the counter at elaboration. The
-  *   default (`1023`) matches the 10-bit `LOAD_TIMING` divider field so the
-  *   same timer instance survives from Step 8's reset-only path through Step
-  *   11's runtime reloads without re-elaboration.
+  *   default (`511`) matches the 9-bit `LOAD_TIMING` divider field so the same
+  *   timer instance survives from Step 8's reset-only path through Step 11's
+  *   runtime reloads without re-elaboration.
   */
-case class QuarterBitTimer(maxReloadValue: Int = 1023) extends Component {
+case class QuarterBitTimer(maxReloadValue: Int = 511) extends Component {
 
   require(
     maxReloadValue >= 1,

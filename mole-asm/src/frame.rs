@@ -41,10 +41,12 @@ pub fn pack_bytecode(words: &[u16]) -> Vec<u8> {
 /// Build a complete UART frame: `len_lo`, `len_hi`, words (each LE),
 /// `crc_lo`, `crc_hi`. CRC covers everything except itself.
 ///
-/// Per `WIRE_FORMAT.md` the engine accepts 1..=4096 words per frame;
-/// anything outside that range returns [`AsmError::FrameTooLarge`].
+/// Per `WIRE_FORMAT.md` the engine accepts 1..=2048 words per frame
+/// (matching the 11-bit JMP / branch addr field after the opcode
+/// widening); anything outside that range returns
+/// [`AsmError::FrameTooLarge`].
 pub fn build_frame(words: &[u16]) -> Result<Vec<u8>, AsmError> {
-    if !(1..=4096).contains(&words.len()) {
+    if !(1..=2048).contains(&words.len()) {
         return Err(AsmError::FrameTooLarge {
             word_count: words.len(),
         });
@@ -110,19 +112,19 @@ mod tests {
 
     #[test]
     fn build_frame_rejects_oversize() {
-        let big = vec![0u16; 4097];
+        let big = vec![0u16; 2049];
         assert!(matches!(
             build_frame(&big),
-            Err(AsmError::FrameTooLarge { word_count: 4097 })
+            Err(AsmError::FrameTooLarge { word_count: 2049 })
         ));
     }
 
     #[test]
     fn build_frame_accepts_max() {
-        let max = vec![0u16; 4096];
+        let max = vec![0u16; 2048];
         // Just verify it does not error and yields the expected length:
-        // 2 (len) + 4096 * 2 (words) + 2 (crc) = 8196 bytes.
+        // 2 (len) + 2048 * 2 (words) + 2 (crc) = 4100 bytes.
         let frame = build_frame(&max).unwrap();
-        assert_eq!(frame.len(), 2 + 4096 * 2 + 2);
+        assert_eq!(frame.len(), 2 + 2048 * 2 + 2);
     }
 }

@@ -225,15 +225,15 @@ case class BitCycleEngineCore(cfg: MoleConfig) extends Component {
   val instrReg = Reg(Bits(Instruction.WORD_WIDTH bits)) init (0)
 
   /** Combinational opcode view of [[instrReg]] --- sliced directly from the top
-    * 4 bits. Every other operand field in the FSM is sliced from `instrReg` by
-    * hand (e.g. `instrReg(11 downto 10)` for the tx_symbol field of EMIT_BIT,
-    * `instrReg(11 downto 9)` for the mode field of SET_BUS_MODE). Keeping the
+    * 5 bits. Every other operand field in the FSM is sliced from `instrReg` by
+    * hand (e.g. `instrReg(10 downto 9)` for the tx_symbol field of EMIT_BIT,
+    * `instrReg(10 downto 8)` for the mode field of SET_BUS_MODE). Keeping the
     * opcode on the same convention means there is one slicing style across the
     * whole fetch path and no Bundle field-ordering surprise sitting between the
     * encoder and the decoder.
     */
   val opcode = Opcode()
-  opcode.assignFromBits(instrReg(15 downto 12))
+  opcode.assignFromBits(instrReg(15 downto 11))
 
   /** Quarter index within the active `EMIT_BIT` (0..3). Only valid in the
     * `emitBitState`.
@@ -326,14 +326,14 @@ case class BitCycleEngineCore(cfg: MoleConfig) extends Component {
   // ------------------------------------------------------------------
 
   val waitCondReg = Reg(CondCode()) init (CondCode.always)
-  val waitTimeoutQs = Reg(UInt(8 bits)) init (0)
+  val waitTimeoutQs = Reg(UInt(7 bits)) init (0)
   val waitTimeoutInfinite = Reg(Bool()) init (False)
-  val stretchQs = Reg(UInt(12 bits)) init (0)
+  val stretchQs = Reg(UInt(11 bits)) init (0)
 
   // ------------------------------------------------------------------
   // Quarter-bit timing registers (Step 11 `LOAD_TIMING`)
   //
-  // Four 10-bit divider words, one per `BUS_MODE.mode[1:0]` slot:
+  // Four 9-bit divider words, one per `BUS_MODE.mode[1:0]` slot:
   //
   //   index 0 -> i2c     (mode wire 0b000)
   //   index 1 -> i3c-OD  (mode wire 0b001)
@@ -351,7 +351,7 @@ case class BitCycleEngineCore(cfg: MoleConfig) extends Component {
   // ------------------------------------------------------------------
 
   val timingRegs = Vec(
-    Reg(UInt(10 bits)) init U(cfg.quarterPeriodCyclesReset - 1, 10 bits),
+    Reg(UInt(9 bits)) init U(cfg.quarterPeriodCyclesReset - 1, 9 bits),
     4
   )
 
@@ -411,8 +411,8 @@ case class BitCycleEngineCore(cfg: MoleConfig) extends Component {
   //
   // Two independent 8-bit architectural counters, one writer
   // (`LOAD_LOOP`) and one read-modify-writer (`DEC_BRANCH`). One
-  // bit of `instrReg(11)` selects the active register on either
-  // opcode; the remaining `instrReg(10 downto 8)` pad stays
+  // bit of `instrReg(10)` selects the active register on either
+  // opcode; the remaining `instrReg(9 downto 8)` pad stays
   // reserved (=0) per AGENTS §3.17 for a future 16-LCR widening
   // with no wire-format break.
   //
@@ -453,13 +453,13 @@ case class BitCycleEngineCore(cfg: MoleConfig) extends Component {
   // ------------------------------------------------------------------
   // Quarter-bit timer
   //
-  // Instantiated at the full 10-bit `LOAD_TIMING` divider width. The
+  // Instantiated at the full 9-bit `LOAD_TIMING` divider width. The
   // reload value is combinationally muxed out of `timingRegs` per the
   // active `BUS_MODE.mode[1:0]` slot; `LOAD_TIMING` writes to those
   // regs change the next load's period without an extra opcode.
   // ------------------------------------------------------------------
 
-  val timer = QuarterBitTimer(maxReloadValue = (1 << 10) - 1)
+  val timer = QuarterBitTimer(maxReloadValue = (1 << 9) - 1)
   val timerLoad = Bool()
   val timerEnable = Bool()
   timerLoad := False
@@ -612,25 +612,25 @@ case class BitCycleEngineCore(cfg: MoleConfig) extends Component {
           // write any 4-bit value), but the SDK should keep user
           // codes in `0x0..0xC` for distinguishability.
           is(Opcode.halt) {
-            enterHalt(instrReg(11 downto 8))
+            enterHalt(instrReg(10 downto 7))
           }
 
           // -- SET_BUS_MODE ----------------------------------------
           //
-          // Field layout: [11:9]=mode, [8:0]=reserved (=0).
+          // Field layout: [10:8]=mode, [7:0]=reserved (=0).
           //
           // Valid wire values are `0b000` (i2c), `0b001` (i3c-OD),
           // `0b110` (i3c-PP), `0b111` (hdr-DDR) per ROADMAP §"Bus
           // mode register". Anything else is a malformed-instruction
           // trap (engine-internal status `0xF`).
           is(Opcode.setBusMode) {
-            val rawMode = instrReg(11 downto 9).asUInt
+            val rawMode = instrReg(10 downto 8).asUInt
             when(
               rawMode === 0 || rawMode === 1 ||
                 rawMode === 6 || rawMode === 7
             ) {
               val newMode = BusMode()
-              newMode.assignFromBits(instrReg(11 downto 9))
+              newMode.assignFromBits(instrReg(10 downto 8))
               busModeReg := newMode
               pc := pc + 1
               goto(fetchState)
@@ -641,7 +641,7 @@ case class BitCycleEngineCore(cfg: MoleConfig) extends Component {
 
           // -- EMIT_BIT --------------------------------------------
           //
-          // Field layout: [11:10]=tx_symbol, [9:3]=reserved (=0),
+          // Field layout: [10:9]=tx_symbol, [8:3]=reserved (=0),
           // [2:0]=flag triple. `tx_symbol = 0b11` is reserved
           // (held for a v0.5 `raw_override` escape per AGENTS
           // §3.11) and traps. Latch SDA from the bitstream's
@@ -654,7 +654,7 @@ case class BitCycleEngineCore(cfg: MoleConfig) extends Component {
           // `captureWriteState` at Q3 instead of straight to
           // `fetchState`).
           is(Opcode.emitBit) {
-            val txRaw = instrReg(11 downto 10)
+            val txRaw = instrReg(10 downto 9)
             when(txRaw === B"11") {
               enterHalt(B"1111")
             } otherwise {
@@ -689,8 +689,8 @@ case class BitCycleEngineCore(cfg: MoleConfig) extends Component {
 
           // -- EMIT_QUARTER ----------------------------------------
           //
-          // Field layout: [11:10]=sda_symbol, [9:8]=scl_symbol,
-          // [7:3]=reserved (=0), [2:0]=flag triple. Either symbol
+          // Field layout: [10:9]=sda_symbol, [8:7]=scl_symbol,
+          // [6:3]=reserved (=0), [2:0]=flag triple. Either symbol
           // field set to `0b11` (reserved) traps to the
           // malformed-instruction HALT.
           //
@@ -700,8 +700,8 @@ case class BitCycleEngineCore(cfg: MoleConfig) extends Component {
           // register so the defense-in-depth flatten is deferred
           // until Step 19 lands target-role helpers.
           is(Opcode.emitQuarter) {
-            val sdaRaw = instrReg(11 downto 10)
-            val sclRaw = instrReg(9 downto 8)
+            val sdaRaw = instrReg(10 downto 9)
+            val sclRaw = instrReg(8 downto 7)
             when(sdaRaw === B"11" || sclRaw === B"11") {
               enterHalt(B"1111")
             } otherwise {
@@ -724,14 +724,14 @@ case class BitCycleEngineCore(cfg: MoleConfig) extends Component {
 
           // -- STRETCH_SCL -----------------------------------------
           //
-          // Field layout: [11:0]=n_quarters. Force SCL low for `n`
+          // Field layout: [10:0]=n_quarters. Force SCL low for `n`
           // quarter-bit periods; leave SDA as whatever the previous
           // wire opcode left in its drivers.
           //
           // `n = 0` is a documented no-op: skip the state entirely
           // and refetch. SDK shouldn't emit it (a zero-length
           // stretch is meaningless) but the engine accepts it
-          // rather than trapping --- the encoder's 12-bit operand
+          // rather than trapping --- the encoder's 11-bit operand
           // contract has no zero-rejection clause.
           //
           // On exit, SCL is *released* to recessive decoded against
@@ -740,7 +740,7 @@ case class BitCycleEngineCore(cfg: MoleConfig) extends Component {
           // SCL_HIGH, t` would deadlock waiting for the engine
           // itself to stop driving low.
           is(Opcode.stretchScl) {
-            val nQ = instrReg(11 downto 0).asUInt
+            val nQ = instrReg(10 downto 0).asUInt
             when(nQ === 0) {
               pc := pc + 1
               goto(fetchState)
@@ -773,13 +773,13 @@ case class BitCycleEngineCore(cfg: MoleConfig) extends Component {
           // eternal history. Other waits leave both flags alone
           // (sticky for the BRANCH_ON below to read).
           is(Opcode.waitOn) {
-            val condRaw = instrReg(11 downto 8).asUInt
+            val condRaw = instrReg(10 downto 7).asUInt
             when(condRaw > 9) {
               enterHalt(B"1111")
             } otherwise {
               val condCraft = CondCode()
-              condCraft.assignFromBits(instrReg(11 downto 8))
-              val t = instrReg(7 downto 0).asUInt
+              condCraft.assignFromBits(instrReg(10 downto 7))
+              val t = instrReg(6 downto 0).asUInt
               waitCondReg := condCraft
               waitTimeoutQs := t
               waitTimeoutInfinite := (t === 0)
@@ -796,20 +796,20 @@ case class BitCycleEngineCore(cfg: MoleConfig) extends Component {
 
           // -- JMP --------------------------------------------------
           //
-          // Field layout: [11:0]=addr (12-bit absolute). Wraps
+          // Field layout: [10:0]=addr (11-bit absolute). Wraps
           // modulo `2^pcWidth` --- the SDK guarantees valid
           // targets. Out-of-range fetches manifest as reads from
           // the result-ring SPRAM region; that decodes to garbage
           // and usually traps to the malformed-instruction HALT.
           is(Opcode.jmp) {
-            pc := instrReg(11 downto 0).asUInt.resize(pcWidth)
+            pc := instrReg(10 downto 0).asUInt.resize(pcWidth)
             goto(fetchState)
           }
 
           // -- BRANCH_ON --------------------------------------------
           //
-          // Field layout: [11:8]=cond_code, [7:0]=signed PC-rel
-          // offset (8-bit two's complement, ±128). On taken,
+          // Field layout: [10:7]=cond_code, [6:0]=signed PC-rel
+          // offset (7-bit two's complement, ±64). On taken,
           // `pc := pc + 1 + offset`; on not-taken, `pc := pc + 1`.
           // Wraps modulo `2^pcWidth`.
           //
@@ -820,15 +820,15 @@ case class BitCycleEngineCore(cfg: MoleConfig) extends Component {
           // (`evalCondFlagOnly`) --- BRANCH_ON does not race the
           // live edge pulse the way WAIT_ON does.
           is(Opcode.branchOn) {
-            val condRaw = instrReg(11 downto 8).asUInt
+            val condRaw = instrReg(10 downto 7).asUInt
             when(condRaw > 9) {
               enterHalt(B"1111")
             } otherwise {
               val condCraft = CondCode()
-              condCraft.assignFromBits(instrReg(11 downto 8))
+              condCraft.assignFromBits(instrReg(10 downto 7))
               val cTrue = evalCondFlagOnly(condCraft)
               val offsetSExt =
-                instrReg(7 downto 0).asSInt.resize(pcWidth)
+                instrReg(6 downto 0).asSInt.resize(pcWidth)
               val offsetU = offsetSExt.asUInt
               pc := Mux(cTrue, pc + 1 + offsetU, pc + 1)
               goto(fetchState)
@@ -837,7 +837,7 @@ case class BitCycleEngineCore(cfg: MoleConfig) extends Component {
 
           // -- LOAD_TIMING ------------------------------------------
           //
-          // Field layout: [11:10]=reg, [9:0]=divider_word. Writes
+          // Field layout: [10:9]=reg, [8:0]=divider_word. Writes
           // one of the four `timingRegs` entries; the new value is
           // visible to the next `EMIT_*` / `STRETCH_SCL` /
           // `WAIT_ON` whose `BUS_MODE.mode[1:0]` matches `reg`.
@@ -848,8 +848,8 @@ case class BitCycleEngineCore(cfg: MoleConfig) extends Component {
           // sample points still land inside their respective
           // SCL-high windows.
           is(Opcode.loadTiming) {
-            val regIdx = instrReg(11 downto 10).asUInt
-            val word = instrReg(9 downto 0).asUInt
+            val regIdx = instrReg(10 downto 9).asUInt
+            val word = instrReg(8 downto 0).asUInt
             timingRegs(regIdx) := word
             pc := pc + 1
             goto(fetchState)
@@ -857,7 +857,7 @@ case class BitCycleEngineCore(cfg: MoleConfig) extends Component {
 
           // -- MARK -------------------------------------------------
           //
-          // Field layout: [11:4]=label, [3:0]=reserved (=0). Writes
+          // Field layout: [10:3]=label, [2:0]=reserved (=0). Writes
           // a 3-word record into the ring (see file header for
           // format). If there is not enough room for 3 words below
           // `recordLimit`, set `resultOverflow` and refetch without
@@ -881,15 +881,15 @@ case class BitCycleEngineCore(cfg: MoleConfig) extends Component {
 
           // -- LOAD_LOOP --------------------------------------------
           //
-          // Field layout: [11]=reg, [10:8]=reserved (=0),
+          // Field layout: [10]=reg, [9:8]=reserved (=0),
           // [7:0]=imm8. Writes the immediate into `lcrRegs(reg)`.
           // Single-cycle; no bus effect; sticky engine flags
-          // untouched. Pads bits [10:8] are not validated against
+          // untouched. Pads bits [9:8] are not validated against
           // zero --- per Instruction.scala's decode contract,
           // stray reserved bits round-trip through `decode` rather
           // than trapping. The host SDK guarantees clean encodes.
           is(Opcode.loadLoop) {
-            val regIdx = instrReg(11).asUInt
+            val regIdx = instrReg(10).asUInt
             val imm = instrReg(7 downto 0).asUInt
             lcrRegs(regIdx) := imm
             pc := pc + 1
@@ -898,7 +898,7 @@ case class BitCycleEngineCore(cfg: MoleConfig) extends Component {
 
           // -- DEC_BRANCH -------------------------------------------
           //
-          // Field layout: [11]=reg, [10:8]=reserved (=0),
+          // Field layout: [10]=reg, [9:8]=reserved (=0),
           // [7:0]=signed 8-bit PC-rel offset (two's complement,
           // +/-128). Semantics, per fetch:
           //   1. lcr <- lcrRegs(reg) - 1   (8-bit wrap; 0 -> 0xFF)
@@ -910,7 +910,7 @@ case class BitCycleEngineCore(cfg: MoleConfig) extends Component {
           // inside the loop body because the mismatch flag survives
           // this opcode untouched.
           is(Opcode.decBranch) {
-            val regIdx = instrReg(11).asUInt
+            val regIdx = instrReg(10).asUInt
             val decremented = lcrRegs(regIdx) - 1
             lcrRegs(regIdx) := decremented
             val offsetSExt =
@@ -950,7 +950,7 @@ case class BitCycleEngineCore(cfg: MoleConfig) extends Component {
             // Reserved tx_symbol (0b11) traps to halt the same way
             // EMIT_BIT does.
             is(Opcode.driveBitOnScl) {
-              val txRaw = instrReg(11 downto 10)
+              val txRaw = instrReg(10 downto 9)
               when(txRaw === B"11") {
                 enterHalt(B"1111")
               } otherwise {
@@ -1191,7 +1191,7 @@ case class BitCycleEngineCore(cfg: MoleConfig) extends Component {
         }
         whenIsActive {
           when(observer.sclFalling) {
-            val txRaw = instrReg(11 downto 10)
+            val txRaw = instrReg(10 downto 9)
             val sdaSym = TxSymbol()
             sdaSym.assignFromBits(txRaw)
             val sda = SymbolDecoder(sdaSym, busModeReg)
@@ -1364,7 +1364,7 @@ case class BitCycleEngineCore(cfg: MoleConfig) extends Component {
         io.resultWrite.valid := True
         io.resultWrite.payload.addr := resultWp
         io.resultWrite.payload.data :=
-          B"10" ## B(0, 6 bits) ## instrReg(11 downto 4)
+          B"10" ## B(0, 6 bits) ## instrReg(10 downto 3)
         when(io.resultWrite.fire) {
           resultWp := resultWp + 1
           goto(markWriteWord1State)

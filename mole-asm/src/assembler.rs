@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use crate::encoder::{self};
 use crate::error::{AsmError, Result, SourceLocation};
 use crate::symbols::{
-    self, BUS_MODES, COND_CODES, LOOP_REG_ALIASES, MNEMONICS, RESERVED_V05_MNEMONICS,
+    self, BUS_MODES, COND_CODES, LOOP_REG_ALIASES, MNEMONICS, RESERVED_V05_MNEMONICS, ROLE_ALIASES,
     TIMING_REG_ALIASES, TX_SYMBOLS,
 };
 
@@ -372,10 +372,10 @@ pub(crate) fn pass1(statements: Vec<Statement>, _filename: &str) -> Result<Pass1
         pc = pc
             .checked_add(advance)
             .ok_or_else(|| AsmError::range(&stmt_loc, "PC overflow"))?;
-        if pc > (1 << 12) {
+        if pc > (1 << 11) {
             return Err(AsmError::range(
                 &stmt_loc,
-                "program exceeds 4096 instruction slots (PC overflow)",
+                "program exceeds 2048 instruction slots (PC overflow)",
             ));
         }
     }
@@ -567,6 +567,28 @@ fn resolve_loop_reg(tok: &str, loc: &SourceLocation) -> Result<i64> {
                 ),
             ))
         }
+    })
+}
+
+fn resolve_role(tok: &str, loc: &SourceLocation) -> Result<bool> {
+    // Source uses `controller` / `target`; the encoder takes a bool
+    // (false = controller, true = target). Numeric `0` / `1` also
+    // accepted so disassembler output round-trips.
+    let lower = tok.to_ascii_lowercase();
+    if let Some(v) = symbols::lookup(ROLE_ALIASES, &lower) {
+        return Ok(v != 0);
+    }
+    parse_int(tok, loc).and_then(|n| match n {
+        0 => Ok(false),
+        1 => Ok(true),
+        _ => Err(AsmError::operand(
+            loc,
+            format!(
+                "SET_ROLE operand '{tok}' must be controller|target or a \
+                 literal 0|1 (allowed names: {:?})",
+                symbols::sorted_names(ROLE_ALIASES)
+            ),
+        )),
     })
 }
 
@@ -778,6 +800,16 @@ fn encode_mnemonic(m: &str, stmt: &Statement, pc: u16, syms: &SymbolTable) -> Re
             let offset = resolve_dec_branch_target(&stmt.operands[1], pc, syms, loc)?;
             encoder::enc_dec_branch(reg, offset).map_err(rangify)
         }
+        "SET_ROLE" => {
+            if stmt.operands.len() != 1 {
+                return Err(AsmError::operand(
+                    loc,
+                    "SET_ROLE takes one positional operand: controller|target",
+                ));
+            }
+            let role = resolve_role(&stmt.operands[0], loc)?;
+            Ok(encoder::enc_set_role(role))
+        }
         other => Err(AsmError::lex(
             loc,
             format!("unhandled mnemonic in encoder: '{other}'"),
@@ -920,7 +952,7 @@ mod tests {
                    \tLOAD_TIMING\t\t i2c_freq,  slow_div\n\
                    \tSET_BUS_MODE   \ti2c\n\
                    \tHALT\tstatus=0\n";
-        assert_eq!(assemble(src, "<t>").unwrap(), vec![0x803B, 0x7000, 0x0000]);
+        assert_eq!(assemble(src, "<t>").unwrap(), vec![0x403B, 0x3800, 0x0000]);
     }
 
     #[test]
@@ -963,9 +995,9 @@ nak:
         HALT          status=1
 ";
         let expected = vec![
-            0x803C, 0x7000, 0x2500, 0x2100, 0x2000, 0x1400, 0x1000, 0x1400, 0x1000, 0x1000, 0x1000,
-            0x1000, 0x1000, 0x1803, 0x510F, 0x1400, 0x1000, 0x1400, 0x1000, 0x1400, 0x1000, 0x1400,
-            0x1400, 0x1803, 0x5105, 0x2000, 0x2100, 0x2500, 0x9010, 0x0000, 0x9020, 0x0100,
+            0x403C, 0x3800, 0x1280, 0x1080, 0x1000, 0x0A00, 0x0800, 0x0A00, 0x0800, 0x0800, 0x0800,
+            0x0800, 0x0800, 0x0C03, 0x288F, 0x0A00, 0x0800, 0x0A00, 0x0800, 0x0A00, 0x0800, 0x0A00,
+            0x0A00, 0x0C03, 0x2885, 0x1000, 0x1080, 0x1280, 0x4808, 0x0000, 0x4810, 0x0080,
         ];
         assert_eq!(assemble(src, "roadmap-example").unwrap(), expected);
     }
