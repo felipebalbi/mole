@@ -633,6 +633,33 @@ fn resolve_dec_branch_target(
 
 pub(crate) fn pass2(syms: &SymbolTable, pc_stmts: &[(u16, Statement)]) -> Result<Vec<u16>> {
     let mut out = Vec::with_capacity(pc_stmts.len());
+    // Linear `(role, bus_mode)` tracker for the AGENTS.md §3.13 check
+    // ("target role never PP-drives SCL"). State is whatever the
+    // most recent `SET_ROLE` / `SET_BUS_MODE` opcode set it to,
+    // walking pc_stmts in PC order.
+    //
+    // Limitations (documented here so future readers don't expect
+    // more than this can deliver):
+    //   * We do NOT follow branches. A JMP / BRANCH_ON / DEC_BRANCH
+    //     that lands in a region with different active state will
+    //     execute under that state at runtime, but the linear scan
+    //     here sees only the textually-prior SET_*. A program that
+    //     legitimately switches role/mode through a jump can defeat
+    //     the check (false negative). A program that sets state in
+    //     a never-taken branch could trip the check (false
+    //     positive); use `.dw` to bypass if you really mean it.
+    //   * Engine power-on defaults are not assumed. Until the
+    //     program issues a `SET_ROLE`, role is treated as Unknown
+    //     and the §3.13 check is skipped --- existing programs that
+    //     never call `SET_ROLE` keep working unchanged.
+    //   * `.dw` words are opaque; they neither update nor consult
+    //     the tracker.
+    //
+    // This is a "linter, not a verifier" --- catches the obvious
+    // mistakes that a careful reading of the source would also
+    // catch, without claiming to be sound under branching.
+    let mut active_role: Option<bool> = None; // false=ctrl, true=tgt
+    let mut active_bus_mode: Option<u8> = None; // BUS_MODES wire value
     for (pc, stmt) in pc_stmts {
         if stmt.directive.as_deref() == Some(".dw") {
             for tok in &stmt.operands {
@@ -651,13 +678,43 @@ pub(crate) fn pass2(syms: &SymbolTable, pc_stmts: &[(u16, Statement)]) -> Result
             .mnemonic
             .as_deref()
             .expect("pc_stmts only contains directives or mnemonic-bearing lines");
-        let word = encode_mnemonic(mnemonic, stmt, *pc, syms)?;
+        let word = encode_mnemonic(mnemonic, stmt, *pc, syms, active_role, active_bus_mode)?;
+        // Update the tracker *after* a successful encode, using the
+        // statement we just encoded. Centralising here (rather than
+        // sprinkling updates inside the per-opcode arms) keeps the
+        // tracking model in one place.
+        match mnemonic {
+            "SET_ROLE" => {
+                // Role bit is at [10] of the encoded word.
+                active_role = Some((word & (1 << 10)) != 0);
+            }
+            "SET_BUS_MODE" => {
+                // Mode wire value is at [10:8] of the encoded word.
+                active_bus_mode = Some(((word >> 8) & 0x7) as u8);
+            }
+            _ => {}
+        }
         out.push(word);
     }
     Ok(out)
 }
 
-fn encode_mnemonic(m: &str, stmt: &Statement, pc: u16, syms: &SymbolTable) -> Result<u16> {
+/// `true` if `bus_mode_wire` is a push-pull class for AGENTS.md
+/// §3.13 ("target role never PP-drives SCL"). PP classes are
+/// `i3c-pp` (wire 6) and `hdr-ddr` (wire 7). OD classes (`i2c` 0,
+/// `i3c-od` 1) and the reserved-mode slots are not PP.
+fn bus_mode_is_pp(wire: u8) -> bool {
+    matches!(wire, 6 | 7)
+}
+
+fn encode_mnemonic(
+    m: &str,
+    stmt: &Statement,
+    pc: u16,
+    syms: &SymbolTable,
+    active_role: Option<bool>,
+    active_bus_mode: Option<u8>,
+) -> Result<u16> {
     let loc = &stmt.loc;
     let rangify = |s: String| AsmError::range(loc, s);
     match m {
@@ -678,6 +735,40 @@ fn encode_mnemonic(m: &str, stmt: &Statement, pc: u16, syms: &SymbolTable) -> Re
             let sda = resolve_tx_key(&kv, "sda", loc)?;
             let scl = resolve_tx_key(&kv, "scl", loc)?;
             let (e, mk, c) = resolve_flag_triple(&kv, loc)?;
+            // AGENTS.md §3.13: in target role, under a push-pull
+            // class BUS_MODE (i3c-pp, hdr-ddr), driving SCL to
+            // `recessive` is illegal --- that would be active-high
+            // PP drive of SCL from the target side. `dominant`
+            // (pull low: stretch / fuzz) and `hiz` (release) are
+            // always legal in target role; this check only fires
+            // on `scl=recessive`.
+            //
+            // Linear-scan caveat: only fires when the textually-
+            // most-recent SET_ROLE/SET_BUS_MODE pair establishes
+            // (target, PP). Programs that flip state through a
+            // branch will not trip this check --- see the
+            // tracking-model note on `pass2`.
+            if active_role == Some(true)
+                && active_bus_mode.is_some_and(bus_mode_is_pp)
+                // tx_symbol wire: 0=dominant, 1=recessive, 2=hiz.
+                && scl == 0b01
+            {
+                let mode_name = match active_bus_mode {
+                    Some(6) => "i3c-pp",
+                    Some(7) => "hdr-ddr",
+                    _ => "<pp>",
+                };
+                return Err(AsmError::operand(
+                    loc,
+                    format!(
+                        "EMIT_QUARTER scl=recessive is illegal in target \
+                         role under PP-class BUS_MODE ({mode_name}): target \
+                         must not active-high PP-drive SCL (AGENTS.md §3.13). \
+                         Use scl=dominant (stretch / fuzz) or scl=hiz \
+                         (release) instead."
+                    ),
+                ));
+            }
             encoder::enc_emit_quarter(sda, scl, e, mk, c).map_err(rangify)
         }
         "SAMPLE_BIT_ON_SCL" => {
