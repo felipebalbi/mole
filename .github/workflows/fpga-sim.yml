@@ -39,6 +39,14 @@ on:
 permissions:
   contents: read
 
+# Cancel any in-flight run on the same branch / PR when a
+# new push lands. Saves duplicate minutes when pushing
+# multiple fix commits to a PR; safe because master never
+# pushes mid-merge.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   sim:
     name: SpinalHDL sims (sbt + Verilator)
