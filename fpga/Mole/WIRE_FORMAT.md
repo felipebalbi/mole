@@ -370,7 +370,92 @@ port.write(build_frame([0x9000, 0x6000]))   # placeholder opcodes
 
 ---
 
-## 7. Versioning
+---
+
+## 6a. Bus-safety invariant (INV-BUS-NO-CONTENTION)
+
+This document covers the host-link wire format. The companion
+invariant on the *electrical* bus (SDA / SCL) is that the engine
+never simultaneously asserts both `driveLow` and `driveHigh` on
+the same `MoleBus` line --- doing so would cause push-pull
+shoot-through on PP-class `BUS_MODE`s. The canonical statement
+of this rule, the decode truth table, and the rationale live in
+[`AGENTS.md`](AGENTS.md) §"Open-drain primitive: custom MoleBus";
+that file is the single source of truth. Defense-in-depth is
+layered: `SymbolDecoder` is structurally incapable of producing
+the contention pair, a sim-time `assert` in `BitCycleEngineCore`
+catches any future writer that bypasses the decoder, and a second
+`assert` in `MoleIoBufUp5k` guards the pad boundary. The
+exhaustive sweep at `sim-symbol-decoder-contention` audits every
+`(BUS_MODE, tx_symbol)` cell on every CI run.
+
+---
+
+## 7. Result-ring overflow and recovery semantics
+
+The result ring is bounded: it lives at `[resultBase, resultLimit]`
+where `resultLimit = resultBase + resultWordCount - 1`. The
+top-of-ring slot is reserved exclusively for the HALT status
+word so an overflowing record stream cannot clobber it. Hosts
+relying on a clean HALT to terminate the decode walk can do so
+unconditionally.
+
+### 7.1 Reserved HALT slot at `resultLimit`
+
+The slot at `resultLimit` is **reserved** for the HALT status
+word. The engine never writes a CAPTURE or MARK record into
+that slot; the record bound is `recordLimit = resultLimit - 1`.
+On `HALT`, the engine writes the status word into the reserved
+slot regardless of how much of the ring the record stream
+consumed.
+
+### 7.2 Per-record bound logic
+
+A record write is admitted only if its full footprint fits at
+or below `recordLimit`:
+
+- **CAPTURE** (1 word) requires `resultWp <= recordLimit`.
+- **MARK** (3 words) requires `resultWp <= recordLimit - 2`.
+
+A write whose footprint does not fit sets the **overflow flag**
+(see §7.3) and is silently dropped. The engine does **not** abort
+the program on overflow --- it continues fetching and executing
+instructions; subsequent CAPTURE / MARK opcodes that would also
+overflow are silently dropped in the same way.
+
+### 7.3 Overflow flag in the HALT word
+
+The HALT status word (tag `11` at `resultLimit`) carries an
+`overflow` bit at `[13]`:
+
+```
+HALT word [15:14] = 11           (tag: HALT)
+          [13]    = overflow     (1 = at least one record dropped)
+          [12]    = mismatchAtHalt
+          [11:8]  = status       (caller-defined; see §1.2 / TODO Step 11)
+          [7:0]   = 0            (reserved; must be zero)
+```
+
+`overflow` latches `True` the first time any record write was
+refused for lack of space and stays set until the next `io.start`.
+A clean run reports `overflow = 0`; a run that dropped at least
+one record reports `overflow = 1`. The host loader decodes this
+bit via `HaltStatus.overflow` in `mole-loader/src/ring.rs`.
+
+### 7.4 Sources
+
+- Engine: `BitCycleEngineCore.scala` ---
+  `enterHalt(status)`, `captureWriteState`, `markWriteState`,
+  and the `recordLimit` / `resultLimit` comparisons.
+- Loader: `mole-loader/src/ring.rs` --- `HaltStatus::overflow`
+  decodes bit `[13]` of the HALT word.
+- Bring-up plan: `TODO.md` Step 11 records the format pinning
+  and is preserved as project history; this section is the
+  canonical contract reference.
+
+---
+
+## 8. Versioning
 
 This is the **v0** wire format, frozen at the Phase 2 release.
 Any future change to:

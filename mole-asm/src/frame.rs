@@ -46,7 +46,7 @@ pub fn pack_bytecode(words: &[u16]) -> Vec<u8> {
 /// widening); anything outside that range returns
 /// [`AsmError::FrameTooLarge`].
 pub fn build_frame(words: &[u16]) -> Result<Vec<u8>, AsmError> {
-    if !(1..=2048).contains(&words.len()) {
+    if !(1..=mole_abi::MAX_PROGRAM_WORDS).contains(&words.len()) {
         return Err(AsmError::FrameTooLarge {
             word_count: words.len(),
         });

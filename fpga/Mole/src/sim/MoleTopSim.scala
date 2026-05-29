@@ -83,6 +83,12 @@ case class MoleTopSimDut(cfg: MoleConfig) extends Component {
     val loaderLoaded = out Bool ()
     val loaderFault = out Bool ()
 
+    /** Sticky CTS#-violation observable from MoleTop (F-FPGA-007). High once a
+      * UART RX byte has arrived while the phase FSM was not in
+      * `acceptLoadState`. Cleared only by reset.
+      */
+    val ctsViolationObserved = out Bool ()
+
     /** Pad ports passed straight through to MoleTop's `io_sda` / `io_scl` inout
       * pads. Verilator otherwise rejects MoleTop's instantiation with
       * PINMISSING because Analog inouts cannot be left unconnected at a
@@ -157,6 +163,7 @@ case class MoleTopSimDut(cfg: MoleConfig) extends Component {
   io.engineDone := mole.io.sim_engineDone
   io.loaderLoaded := mole.io.sim_loaderLoaded
   io.loaderFault := mole.io.sim_loaderFault
+  io.ctsViolationObserved := mole.io.sim_ctsViolationObserved
 }
 
 /** End-to-end audit for [[MoleTop]].

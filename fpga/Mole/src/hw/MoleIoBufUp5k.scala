@@ -90,6 +90,13 @@ case class MoleIoBufUp5k(useBlackBox: Boolean = true) extends Component {
     // as a simulation-time assertion. `label` is bound at elaboration
     // time so the message identifies which line (sda / scl) tripped
     // without any runtime overhead.
+    //
+    // Sim-only contract check: catches engine bugs that write
+    // (driveLow=1, driveHigh=1) on this line. On silicon with
+    // `useBlackBox=true` the SB_IO interprets that combination as
+    // PP-drive-high; this assert does NOT prevent shoot-through. The
+    // engine-side asserts in `BitCycleEngineCore` are the upstream
+    // defense for INV-BUS-NO-CONTENTION.
     assert(
       !(line.driveLow && line.driveHigh),
       s"MoleIoBufUp5k: $label bus contention (driveLow && driveHigh)"

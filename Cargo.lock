@@ -363,9 +363,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "mole-abi"
+version = "0.1.0"
+
+[[package]]
 name = "mole-asm"
 version = "0.1.0"
 dependencies = [
+ "mole-abi",
  "thiserror",
 ]
 
@@ -382,6 +387,7 @@ dependencies = [
 name = "mole-loader"
 version = "0.1.0"
 dependencies = [
+ "mole-abi",
  "mole-asm",
  "serialport",
  "thiserror",
@@ -394,6 +400,7 @@ dependencies = [
  "clap",
  "color-eyre",
  "indicatif",
+ "mole-abi",
  "mole-loader",
 ]
 

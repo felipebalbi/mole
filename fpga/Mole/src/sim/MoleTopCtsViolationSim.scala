@@ -1,0 +1,184 @@
+package mole
+
+import spinal.core._
+import spinal.core.sim._
+import spinal.lib._
+
+/** F-FPGA-007 regression coverage: CTS#-violation sticky observable.
+  *
+  * Reuses [[MoleTopSimDut]] (same fabric clock, same UART config, same sim-side
+  * TX/RX). The added sim port `ctsViolationObserved` taps
+  * `MoleTop.ctsViolationObservedReg`, which latches True on the first UART RX
+  * byte that arrives while the phase FSM is NOT in `acceptLoadState` (i.e. CTS#
+  * is deasserted and the host is supposed to be silent per the CTS contract).
+  *
+  * Single case: load a tiny program, wait for the engine to leave `acceptLoad`,
+  * then push a stray UART byte from the sim TX. The sticky must assert within a
+  * bounded number of cycles and must stay asserted for the rest of the run. The
+  * red LED must also be high (the sticky is OR'd into `io_ledR`).
+  *
+  * Run: `sbt "runMain mole.MoleTopCtsViolationSim"`
+  */
+object MoleTopCtsViolationSim extends App {
+
+  // Mirror MoleTopFlowControlSim's CRC + frame builder. Each sim is
+  // a self-contained App per the existing sim-file convention.
+  def crc16Xmodem(bytes: Seq[Int]): Int = {
+    var crc = 0
+    for (b <- bytes) {
+      crc = crc ^ ((b & 0xff) << 8)
+      for (_ <- 0 until 8) {
+        if ((crc & 0x8000) != 0) crc = ((crc << 1) ^ 0x1021) & 0xffff
+        else crc = (crc << 1) & 0xffff
+      }
+    }
+    crc & 0xffff
+  }
+
+  def buildFrame(words: Seq[Int]): Seq[Int] = {
+    val n = words.size
+    val lenBytes = Seq(n & 0xff, (n >> 8) & 0xff)
+    val wordBytes = words.flatMap(w => Seq(w & 0xff, (w >> 8) & 0xff))
+    val payload = lenBytes ++ wordBytes
+    val crc = crc16Xmodem(payload)
+    payload ++ Seq(crc & 0xff, (crc >> 8) & 0xff)
+  }
+
+  val cfg = MoleConfig(
+    fabricFreqHz = 24 MHz,
+    quarterPeriodCyclesReset = 6,
+    programWordCount = 16,
+    resultRingByteCount = 32,
+    captureMaxBits = 64,
+    uartBaud = 1_000_000
+  )
+
+  // Same Verilator x-init pinning rationale as MoleTopFlowControlSim.
+  val simConfig = SimConfig
+    .addSimulatorFlag("--x-assign")
+    .addSimulatorFlag("0")
+    .addSimulatorFlag("--x-initial")
+    .addSimulatorFlag("0")
+
+  def sendByte(dut: MoleTopSimDut, byte: Int): Unit = {
+    dut.io.txData.payload #= byte
+    dut.io.txData.valid #= true
+    dut.clockDomain.waitSamplingWhere(dut.io.txData.ready.toBoolean)
+    dut.io.txData.valid #= false
+  }
+
+  def sendFrame(dut: MoleTopSimDut, frame: Seq[Int]): Unit = {
+    for (b <- frame) sendByte(dut, b)
+  }
+
+  def doReset(dut: MoleTopSimDut): Unit = {
+    dut.io.externalReset #= false
+    dut.io.txData.valid #= false
+    dut.io.rxData.ready #= false
+    dut.io.rtsIn #= false
+    dut.clockDomain.waitSampling(10)
+    dut.io.externalReset #= true
+    dut.clockDomain.waitSampling(10)
+  }
+
+  // A program with a long-running WAIT_ON keeps the engine in
+  // `runningState` (CTS# deasserted) long enough for one UART byte
+  // to traverse the sim TX, hit MoleTop's RxFsm, and surface as
+  // `uartRx.payload.valid`. WAIT_ON ALWAYS would short-circuit
+  // immediately --- we want a cond that NEVER fires so the engine
+  // genuinely waits out the timeout. STOP_SEEN against an idle
+  // bus (no Stop edge) waits for the full 7-bit timeout.
+  //
+  // The timeout is in quarter-bit times. With
+  // `quarterPeriodCyclesReset = 6` and timeout = 127, the wait
+  // lasts roughly 127 * 6 = 762 fabric cycles --- well over a
+  // single UART byte (~240 cycles at 1 Mbaud / 24 MHz). The
+  // WAIT_ON then times out, the HALT runs, and the engine
+  // re-enters idle.
+  val longProgram = Seq(
+    Instruction.encode(Instruction.SetBusMode(BusMode.i2c)),
+    Instruction.encode(Instruction.WaitOn(CondCode.stopSeen, 127)),
+    Instruction.encode(Instruction.Halt(0))
+  )
+  val longFrame = buildFrame(longProgram)
+
+  println(
+    "--- MoleTopCtsViolationSim: rx_during_running_sets_cts_violation_sticky ---"
+  )
+  simConfig
+    .compile(MoleTopSimDut(cfg))
+    .doSim("rx-during-running-sets-cts-violation-sticky") { dut =>
+      dut.clockDomain.forkStimulus(period = 10)
+      doReset(dut)
+
+      // Sanity: out of reset, the sticky must be False.
+      assert(
+        !dut.io.ctsViolationObserved.toBoolean,
+        "post-reset: ctsViolationObserved should start False"
+      )
+
+      // Load the program. Loader RX consumes the frame while CTS#
+      // is asserted --- those bytes are NOT violations.
+      sendFrame(dut, longFrame)
+
+      // Wait until the phase FSM moves out of acceptLoad
+      // (CTS# deasserts == io_uCts goes high).
+      var waited = 0
+      while (!dut.io.ctsOut.toBoolean && waited < 200_000) {
+        dut.clockDomain.waitSampling()
+        waited += 1
+      }
+      assert(
+        dut.io.ctsOut.toBoolean,
+        "engine never entered running/draining (CTS# never deasserted)"
+      )
+
+      // Sticky must still be False --- we haven't sent a stray
+      // byte yet. (CTS deasserts BEFORE the violation occurs.)
+      assert(
+        !dut.io.ctsViolationObserved.toBoolean,
+        "ctsViolationObserved asserted before any stray byte was sent"
+      )
+
+      // Push a stray byte. The sim TX serialises it over ~240
+      // fabric cycles; MoleTop's RxFsm raises `uartRx.payload.valid`
+      // shortly after the stop bit. The sticky must latch True
+      // somewhere in the ~500-cycle window after the byte is
+      // queued. Give it generous headroom (5000 cycles).
+      sendByte(dut, 0xa5)
+
+      var observed = false
+      var c = 0
+      while (!observed && c < 5_000) {
+        if (dut.io.ctsViolationObserved.toBoolean) observed = true
+        dut.clockDomain.waitSampling()
+        c += 1
+      }
+      assert(
+        observed,
+        "ctsViolationObserved never asserted after stray UART byte during running phase"
+      )
+
+      // Red LED must reflect the sticky (OR'd into io_ledR).
+      assert(
+        dut.io.ledR.toBoolean,
+        "io_ledR did not assert when ctsViolationObserved latched"
+      )
+
+      // Stickiness: sample for another 2000 cycles --- must stay
+      // True regardless of what the phase FSM does next (engine
+      // eventually times out the WAIT_ON, halts, drains, returns
+      // to acceptLoad; the sticky must survive all of that).
+      for (_ <- 0 until 2_000) {
+        assert(
+          dut.io.ctsViolationObserved.toBoolean,
+          "ctsViolationObserved cleared --- sticky violated"
+        )
+        dut.clockDomain.waitSampling()
+      }
+
+      println("   ok: sticky latched, LED asserted, survived phase transitions")
+    }
+
+  println("--- MoleTopCtsViolationSim: all cases passed ---")
+}

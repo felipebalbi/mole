@@ -699,3 +699,42 @@ fn injection_ratio_zero_is_byte_identical_to_no_injection() {
     // ratio)` knob, `ratio = 0` must produce bytes identical to a
     // baseline assemble.
 }
+
+// ---------------------------------------------------------------------------
+// `.dw` operand-count cap (F-HOST-003)
+// ---------------------------------------------------------------------------
+
+/// `.dw` advances PC by `operands.len()`. The legacy code cast
+/// `operands.len() as u16`, so a source with >= 65536 operands
+/// wrapped the advance to a small u16; the existing `pc > 2048`
+/// guard then only caught wrapped sums still above 2048. A wrapped
+/// sum landing <= 2048 silently miscompiled. Both 2049 (above the
+/// program-memory budget, below the u16 wrap point) and 65536
+/// (exact u16 wrap to zero) must be rejected.
+#[test]
+fn dw_operand_count_above_max_program_words_rejected() {
+    // 2049 operands: below the u16 wrap point, but one past the
+    // 2048-word program-memory budget. Without the gate, pass1's
+    // `pc > 2048` check still catches this (2049 > 2048), but the
+    // diagnostic the user sees here is the new, explicit one.
+    let many = "0,".repeat(2049);
+    let src = format!(".dw {}\n", &many[..many.len() - 1]);
+    let r = assemble(&src, "<dw-cap>");
+    assert!(
+        r.is_err(),
+        "2049 .dw operands must be rejected, not silently truncated",
+    );
+
+    // 65536 operands: exactly the u16 wrap point. The legacy cast
+    // produced advance = 0, so pass1's PC overflow guard never
+    // fired --- silent miscompilation. The cap must intercept
+    // *before* the cast.
+    let many = "0,".repeat(65536);
+    let src = format!(".dw {}\n", &many[..many.len() - 1]);
+    let r = assemble(&src, "<dw-wrap>");
+    assert!(
+        r.is_err(),
+        "65536 .dw operands must be rejected; legacy cast wrapped \
+         the advance to 0 and silently miscompiled",
+    );
+}

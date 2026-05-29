@@ -117,4 +117,43 @@ object SymbolDecoder {
 
     SymbolDrive(driveLow, driveHigh)
   }
+
+  /** Pure-Scala mirror of [[apply]] over the wire-level encodings of `BUS_MODE`
+    * and `tx_symbol`. Returns `(driveLow, driveHigh)` as plain `Boolean`s ---
+    * no SpinalHDL elaboration, no SpinalSim DUT required.
+    *
+    * This exists so the exhaustive cartesian-product sweep that audits
+    * INV-BUS-NO-CONTENTION (`SymbolDecoderContentionSim`) can iterate the 4 x 4
+    * truth table directly in Scala. The lockstep test in that sim spot-checks
+    * several cells against a SpinalSim DUT wrapping [[apply]] so the two
+    * implementations cannot drift.
+    *
+    * Wire-value contract (per `Instruction.scala` and ROADMAP §"Bus mode
+    * register" / §"TX symbol"):
+    *
+    *   - `busModeWire`: 0 = `i2c`, 1 = `i3c-OD`, 6 = `i3c-PP`, 7 = `hdr-ddr`
+    *     (other values are illegal at the wire level).
+    *   - `txSymbolWire`: 0 = `dominant`, 1 = `recessive`, 2 = `hiz`, 3 =
+    *     `reserved` (v0.5 `raw_override`; decoded as Hi-Z in v0).
+    *
+    * An unknown `busModeWire` is treated as OD-class (the safer of the two:
+    * `recessive` does not assert `driveHigh`).
+    */
+  def staticDecode(busModeWire: Int, txSymbolWire: Int): SymbolDriveStatic = {
+    val isPp = busModeWire == 6 || busModeWire == 7
+    txSymbolWire match {
+      case 0 => // dominant
+        SymbolDriveStatic(driveLow = true, driveHigh = false)
+      case 1 => // recessive
+        SymbolDriveStatic(driveLow = false, driveHigh = isPp)
+      case _ => // hiz, reserved, anything else
+        SymbolDriveStatic(driveLow = false, driveHigh = false)
+    }
+  }
 }
+
+/** Pure-Scala counterpart of [[SymbolDrive]] used by
+  * [[SymbolDecoder.staticDecode]]. Lives alongside the SpinalHDL bundle so the
+  * contention sweep can iterate the truth table without elaborating any RTL.
+  */
+case class SymbolDriveStatic(driveLow: Boolean, driveHigh: Boolean)

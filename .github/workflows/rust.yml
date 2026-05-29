@@ -34,8 +34,11 @@ name: rust
 on:
   push:
     paths:
+      - 'mole-abi/**'
       - 'mole-asm/**'
       - 'mole-asm-cli/**'
+      - 'mole-loader/**'
+      - 'mole-loader-cli/**'
       - 'book/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
@@ -43,8 +46,11 @@ on:
   pull_request:
     branches: [main, master]
     paths:
+      - 'mole-abi/**'
       - 'mole-asm/**'
       - 'mole-asm-cli/**'
+      - 'mole-loader/**'
+      - 'mole-loader-cli/**'
       - 'book/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
@@ -63,6 +69,13 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 1
+
+      # serialport (via libudev-sys) needs libudev-dev on Linux.
+      # mole-loader pulls it in transitively.
+      - name: Install system dependencies (libudev for serialport)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libudev-dev pkg-config
 
       # Stable channel, with the formatter and linter components
       # we explicitly invoke below. Pinning to `stable` rather than

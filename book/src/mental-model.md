@@ -42,7 +42,7 @@ quarter is*; the wire-side bit rate falls out of that choice via
 
 ## Picking a divider
 
-`LOAD_TIMING reg, N` writes the 10-bit value `N` into one of the
+`LOAD_TIMING reg, N` writes the 9-bit value `N` into one of the
 four per-mode divider registers. The active register feeds the
 **quarter-bit timer**, which produces one tick every `N + 1`
 fabric cycles. Four ticks make one bit on the wire, so the

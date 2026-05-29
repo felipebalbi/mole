@@ -7,8 +7,8 @@
 
 use mole_asm::frame::{build_frame, crc16_xmodem};
 use mole_loader::{
-    DecodedRing, FrameError, HaltStatus, LoaderError, Record, Revision, RingError, decode_ring,
-    verify_frame,
+    DEFAULT_RING_BYTES, DecodedRing, FrameError, HaltStatus, LoaderError, Record, Revision,
+    RingError, decode_ring, decode_ring_strict, verify_frame,
 };
 
 // ---------------------------------------------------------------------------
@@ -228,6 +228,14 @@ fn halt_status_flag_bits_independently_decoded() {
     // HALT word and verify decode is bit-for-bit. Catches a
     // bit-shift regression in `decode_ring`'s tail parser.
     for status in 0u8..=0xF {
+        // 0xD and 0xE are now rejected by the decoder as reserved
+        // engine-trap codes (RingError::HaltStatusReserved); they
+        // never produce a HaltStatus and so cannot be sweep-tested
+        // here. The dedicated T-009 tests below cover the rejection
+        // path explicitly.
+        if status == 0xD || status == 0xE {
+            continue;
+        }
         for &mismatch in &[false, true] {
             for &overflow in &[false, true] {
                 let mut halt: u16 = 0xC000; // tag=11
@@ -487,6 +495,12 @@ fn halt_mismatch_flag_is_sticky_across_all_status_codes() {
     // the status code value. Loop over every status code with
     // mismatch=1 and confirm the decoded HaltStatus carries it.
     for status in 0u8..=0xF {
+        // 0xD and 0xE are rejected as reserved engine-trap codes
+        // (see T-009 tests below); skip them in the sweep so this
+        // test stays focused on the sticky-flag invariant.
+        if status == 0xD || status == 0xE {
+            continue;
+        }
         let halt: u16 = 0xC000 | (1 << 12) | ((status as u16) << 8);
         let bytes = build_ring((0, 0), &[], halt, 3);
         let ring = decode_ring(&bytes).unwrap();
@@ -536,4 +550,142 @@ fn crc_helper_re_export_matches_mole_asm_implementation() {
     // anywhere in the CRC path lights up *both* crates' suites.
     assert_eq!(crc16_xmodem(b"123456789"), 0x31C3);
     assert_eq!(crc16_xmodem(b""), 0x0000);
+}
+
+// ---------------------------------------------------------------------------
+// T-008 / T-009 --- HALT word validation (F-HOST-001)
+//
+// INV-WIRE-HALT-RECORD: HALT word = [15:14]=11, [13]=overflow,
+//   [12]=mismatchAtHalt, [11:8]=status, [7:0]=0.
+// INV-NUM-STATUS-RESERVED: status 0x0..0xC caller-defined,
+//   0xD..0xF reserved for engine traps; today only 0xF is in use.
+// ---------------------------------------------------------------------------
+
+/// Build a ring of exactly `DEFAULT_RING_BYTES` with a REVISION
+/// header at words 0..2, the supplied HALT word at the final slot,
+/// and the middle filled with tag-`01` reserved-tag words so the
+/// record-stream walker terminates immediately (rather than
+/// decoding ~4000 phantom CAPTUREs of zeroed slots).
+fn build_minimal_ring_with_halt(halt_word: u16) -> Vec<u8> {
+    let total_words = DEFAULT_RING_BYTES / 2;
+    let mut words = Vec::with_capacity(total_words);
+    words.push(0x0001); // revision lo (patch = 1)
+    words.push(0x0203); // revision hi (major=2, minor=3)
+    // Fill the gap with 0x4001 (tag 01 reserved). The walker
+    // recognises tag 01 as "trailing garbage starts here" and
+    // stops on the first slot, keeping the test cheap.
+    while words.len() < total_words - 1 {
+        words.push(0x4001);
+    }
+    words.push(halt_word);
+    let mut bytes = Vec::with_capacity(total_words * 2);
+    for w in words {
+        bytes.push((w & 0xFF) as u8);
+        bytes.push((w >> 8) as u8);
+    }
+    bytes
+}
+
+#[test]
+fn halt_reserved_bits_low_byte_rejected() {
+    // 0xC042 = tag=11, status=0, reserved=0x42
+    let ring = build_minimal_ring_with_halt(0xC042);
+    let r = decode_ring_strict(&ring, ring.len());
+    assert!(
+        matches!(
+            r,
+            Err(RingError::HaltReservedBitsSet {
+                halt_word: 0xC042,
+                reserved: 0x42,
+            })
+        ),
+        "expected HaltReservedBitsSet {{ 0xC042, 0x42 }}, got {r:?}"
+    );
+}
+
+#[test]
+fn halt_reserved_bits_low_byte_rejected_across_patterns() {
+    // Sweep a small set of reserved-bit patterns; every non-zero
+    // value in [7:0] must trip the fail-fast check regardless of
+    // which bit is set.
+    for reserved in [0x01u8, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0x42, 0xFF] {
+        let halt_word = 0xC000 | (reserved as u16);
+        let ring = build_minimal_ring_with_halt(halt_word);
+        let r = decode_ring_strict(&ring, ring.len());
+        assert!(
+            matches!(
+                r,
+                Err(RingError::HaltReservedBitsSet {
+                    halt_word: hw,
+                    reserved: rb,
+                }) if hw == halt_word && rb == reserved
+            ),
+            "reserved={reserved:#04x}: expected HaltReservedBitsSet, got {r:?}"
+        );
+    }
+}
+
+#[test]
+fn halt_status_reserved_for_engine_traps_rejected() {
+    for status in [0xD_u8, 0xE_u8] {
+        let halt_word = 0xC000_u16 | ((status as u16) << 8);
+        let ring = build_minimal_ring_with_halt(halt_word);
+        let r = decode_ring_strict(&ring, ring.len());
+        assert!(
+            matches!(
+                r,
+                Err(RingError::HaltStatusReserved {
+                    status: s,
+                    halt_word: hw,
+                }) if s == status && hw == halt_word
+            ),
+            "status 0x{status:X} must be rejected; got {r:?}"
+        );
+    }
+}
+
+#[test]
+fn halt_status_engine_trap_0xf_still_decodes_with_trap_flag() {
+    // 0xF is the documented engine-trap code; the decoder must
+    // NOT reject it (it is part of the contract surface). It must
+    // surface as HaltStatus.status == 0xF and
+    // HaltStatus::is_engine_trap() == true.
+    let halt_word = 0xC000_u16 | (0xF_u16 << 8);
+    let ring = build_minimal_ring_with_halt(halt_word);
+    let decoded = decode_ring_strict(&ring, ring.len()).expect("0xF must decode");
+    assert_eq!(decoded.halt.status, 0xF);
+    assert!(decoded.halt.is_engine_trap());
+}
+
+#[test]
+fn halt_clean_status_zero_still_decodes_after_validation_lands() {
+    // Regression: the canonical "clean halt" word (0xC000) must
+    // still decode after the new HaltReservedBitsSet /
+    // HaltStatusReserved checks were added.
+    let ring = build_minimal_ring_with_halt(0xC000);
+    let decoded = decode_ring_strict(&ring, ring.len()).expect("clean HALT must decode");
+    assert_eq!(
+        decoded.halt,
+        HaltStatus {
+            status: 0,
+            mismatch: false,
+            overflow: false,
+        }
+    );
+}
+
+#[test]
+fn halt_reserved_bits_rejected_before_reserved_status() {
+    // A HALT word that violates BOTH invariants (reserved bits set
+    // AND reserved status code) must be reported as
+    // HaltReservedBitsSet --- the structural check fires first by
+    // design, so callers see the more fundamental defect.
+    let halt_word = 0xC000_u16 | (0xD_u16 << 8) | 0x01;
+    let ring = build_minimal_ring_with_halt(halt_word);
+    let r = decode_ring_strict(&ring, ring.len());
+    assert!(
+        matches!(r, Err(RingError::HaltReservedBitsSet { .. })),
+        "structural check (reserved bits) must fire before semantic check \
+         (reserved status); got {r:?}"
+    );
 }

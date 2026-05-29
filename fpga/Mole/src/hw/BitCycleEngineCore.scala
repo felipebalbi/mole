@@ -208,6 +208,32 @@ case class BitCycleEngineCore(cfg: MoleConfig) extends Component {
   io.bus.scl.driveLow := sclDriveLow
   io.bus.scl.driveHigh := sclDriveHigh
 
+  // Defense-in-depth for INV-BUS-NO-CONTENTION
+  // (`fpga/Mole/AGENTS.md` §"Open-drain primitive: custom MoleBus").
+  //
+  // `SymbolDecoder` makes contention structurally impossible for every
+  // (BUS_MODE, tx_symbol) pair, but this assert catches any future
+  // writer that bypasses the decoder and sets both driver enables
+  // directly on these registers. The pad-level assert in
+  // `MoleIoBufUp5k` is the second line of defense and does NOT fire
+  // under `useBlackBox = true` on silicon (SB_IO interprets the
+  // illegal combination as PP-drive-high), so the engine-side check
+  // is the canonical sim-time guard.
+  //
+  // SpinalHDL `assert(...)` in non-formal context emits a sim-only
+  // check; it does NOT synthesise into the bitstream, so there is no
+  // area cost on the FPGA.
+  assert(
+    !(sdaDriveLow && sdaDriveHigh),
+    "BitCycleEngineCore: SDA bus contention " +
+      "(driveLow && driveHigh both set)"
+  )
+  assert(
+    !(sclDriveLow && sclDriveHigh),
+    "BitCycleEngineCore: SCL bus contention " +
+      "(driveLow && driveHigh both set)"
+  )
+
   // ------------------------------------------------------------------
   // Engine state
   // ------------------------------------------------------------------
@@ -821,14 +847,29 @@ case class BitCycleEngineCore(cfg: MoleConfig) extends Component {
 
           // -- JMP --------------------------------------------------
           //
-          // Field layout: [10:0]=addr (11-bit absolute). Wraps
-          // modulo `2^pcWidth` --- the SDK guarantees valid
-          // targets. Out-of-range fetches manifest as reads from
-          // the result-ring SPRAM region; that decodes to garbage
-          // and usually traps to the malformed-instruction HALT.
+          // Field layout: [10:0]=addr (11-bit absolute, wire-format
+          // range 0..2047 per INV-WIRE-JMP-ADDR). The host encoder
+          // enforces only the wire cap; board variants with
+          // `programWordCount < 2048` have a narrower runtime valid
+          // range, so the engine traps when the JMP target falls at
+          // or above the actual program memory.
+          //
+          // The trap fires only on out-of-range targets. With
+          // `programWordCount = 2048` (the default), the comparison
+          // is dead code --- the operand max (2047) is the legal
+          // max --- but the guard stays present so smaller program
+          // memories cannot silently truncate via `.resize(pcWidth)`
+          // (F-FPGA-004). The 12-bit literal width is one bit wider
+          // than the 11-bit operand so the `>=` comparison is
+          // unambiguous at the boundary.
           is(Opcode.jmp) {
-            pc := instrReg(10 downto 0).asUInt.resize(pcWidth)
-            goto(fetchState)
+            val jmpTarget = instrReg(10 downto 0).asUInt
+            when(jmpTarget.resize(12 bits) >= U(programWordCount, 12 bits)) {
+              enterHalt(B"1111")
+            } otherwise {
+              pc := jmpTarget.resize(pcWidth)
+              goto(fetchState)
+            }
           }
 
           // -- BRANCH_ON --------------------------------------------
