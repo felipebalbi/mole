@@ -208,35 +208,97 @@ impl Transport {
         let mut done = 0;
         progress.tick(done);
 
+        // Manual byte-counting loop per chunk, mirroring the shape
+        // of `drain_ring` below. We deliberately do NOT use
+        // `write_all` here: `write_all` swallows the partial-write
+        // count before returning `WouldBlock`, so a benign-retry
+        // `continue` would re-issue the whole chunk and duplicate
+        // the prefix the kernel already accepted on the wire.
+        // Some USB-CDC drivers do exactly that (accept N bytes,
+        // then surface `WouldBlock` for the rest of the chunk),
+        // which is how F-HOST-008 manifested.
         for chunk in frame.chunks(IO_CHUNK_BYTES) {
-            match self.port.write_all(chunk) {
-                Ok(()) => {
-                    done += chunk.len();
-                    progress.tick(done);
-                }
-                Err(e) if e.kind() == ErrorKind::TimedOut => {
-                    return Err(TransportError::Timeout {
-                        phase: TransportPhase::Load,
-                        after_bytes: done,
-                        expected_bytes: total,
-                    });
-                }
-                Err(source) => {
-                    return Err(TransportError::Io {
-                        phase: TransportPhase::Load,
-                        source,
-                    });
+            let mut sent = 0;
+            while sent < chunk.len() {
+                match self.port.write(&chunk[sent..]) {
+                    Ok(0) => {
+                        // Per stdlib `io::Write::write_all` semantics:
+                        // a zero-byte successful write means "no
+                        // progress possible". On a serial port this
+                        // is typically the link being unplugged
+                        // mid-transfer. Surface as `WriteZero` so it
+                        // routes through the generic `Io` variant.
+                        return Err(TransportError::Io {
+                            phase: TransportPhase::Load,
+                            source: std::io::Error::new(
+                                ErrorKind::WriteZero,
+                                "write returned 0 bytes (link may be disconnected)",
+                            ),
+                        });
+                    }
+                    Ok(n) => {
+                        sent += n;
+                        progress.tick(done + sent);
+                    }
+                    // Benign --- retry against the *remaining* slice
+                    // on the next loop turn. `sent` does not advance,
+                    // so we re-issue against `&chunk[sent..]` and no
+                    // bytes are duplicated. `Interrupted` is a
+                    // signal-delivered spurious return; `WouldBlock`
+                    // shows up under some USB-CDC drivers that
+                    // transiently drop into non-blocking mode. The
+                    // per-write timeout configured on the port still
+                    // bounds the total wait.
+                    Err(e)
+                        if e.kind() == ErrorKind::Interrupted
+                            || e.kind() == ErrorKind::WouldBlock =>
+                    {
+                        continue;
+                    }
+                    Err(e) if e.kind() == ErrorKind::TimedOut => {
+                        return Err(TransportError::Timeout {
+                            phase: TransportPhase::Load,
+                            after_bytes: done + sent,
+                            expected_bytes: total,
+                        });
+                    }
+                    Err(source) => {
+                        return Err(TransportError::Io {
+                            phase: TransportPhase::Load,
+                            source,
+                        });
+                    }
                 }
             }
+            done += chunk.len();
+            progress.tick(done);
         }
         // Make sure everything has actually left the OS buffer before
         // we hand control back --- the engine reads via DMA and we
         // do not want a half-frame still queued when the caller goes
         // to drain.
-        self.port.flush().map_err(|source| TransportError::Io {
-            phase: TransportPhase::Load,
-            source,
-        })?;
+        //
+        // A `TimedOut` here is almost always the engine's CTS being
+        // stuck deasserted (HW flow-control stall): the host TX
+        // buffer fills, `flush()` blocks waiting for the driver to
+        // hand bytes off, and the per-op timeout fires. Surface
+        // that as a structured `Timeout{Load}` rather than an
+        // opaque `Io` so the caller can render the actual failure
+        // mode --- it is the single most common bring-up symptom
+        // and previously had the worst diagnostic.
+        if let Err(e) = self.port.flush() {
+            if e.kind() == ErrorKind::TimedOut {
+                return Err(TransportError::Timeout {
+                    phase: TransportPhase::Load,
+                    after_bytes: frame.len(),
+                    expected_bytes: frame.len(),
+                });
+            }
+            return Err(TransportError::Io {
+                phase: TransportPhase::Load,
+                source: e,
+            });
+        }
         Ok(())
     }
 
@@ -285,6 +347,24 @@ impl Transport {
                         after_bytes: done,
                         expected_bytes: ring_bytes,
                     });
+                }
+                // Benign --- retry the read on the next loop turn.
+                // `Interrupted`: a signal (SIGWINCH from a terminal
+                // resize, SIGCHLD, etc.) was delivered while
+                // `read()` was blocked; the kernel returns
+                // spuriously rather than restarting the syscall.
+                // `WouldBlock`: some USB-CDC drivers transiently
+                // surface non-blocking semantics. Neither is a
+                // transport failure; the per-read timeout
+                // configured on the port still bounds the total
+                // wait, and `done` is unchanged so we resume
+                // exactly where we left off --- partial bytes are
+                // preserved, which matters for `--dump-ring`
+                // forensics on a real failure later in the drain.
+                Err(e)
+                    if e.kind() == ErrorKind::Interrupted || e.kind() == ErrorKind::WouldBlock =>
+                {
+                    continue;
                 }
                 Err(source) => {
                     return Err(TransportError::Io {

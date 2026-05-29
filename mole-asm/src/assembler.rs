@@ -311,16 +311,45 @@ pub(crate) fn lex(source: &str, filename: &str) -> Result<Vec<Statement>> {
 // Pass 1: build symbol table + assign PC slots
 // ---------------------------------------------------------------------------
 
-fn pc_advance_for(stmt: &Statement) -> u16 {
+/// Maximum program-memory budget, in 16-bit words, that the engine
+/// accepts in a single frame. Mirrors the `1..=MAX_PROGRAM_WORDS`
+/// range gate in `frame.rs` (see `WIRE_FORMAT.md` §encoding-width).
+/// Kept here as a local const for now; a follow-up commit
+/// consolidates this and other wire-format constants into a
+/// dedicated `mole-abi` crate so the `.dw` operand-count cap below,
+/// the pass1 PC overflow gate, and the frame builder cannot drift
+/// apart.
+pub(crate) const MAX_PROGRAM_WORDS: usize = 2048;
+
+fn pc_advance_for(stmt: &Statement) -> Result<u16> {
     match stmt.directive.as_deref() {
-        Some(".equ") => 0,
-        Some(".dw") => stmt.operands.len() as u16,
-        Some(_) => 0, // ALLOWED_DIRECTIVES gate keeps us here only for .equ/.dw
+        Some(".equ") => Ok(0),
+        Some(".dw") => {
+            // Cap before the `usize as u16` narrowing. Without the
+            // gate, a `.dw` with >= 65536 operands wraps the
+            // advance to a small u16 and the pass1 PC-overflow
+            // check at the caller can be evaded entirely if the
+            // wrapped sum lands <= 2048 --- silent miscompilation.
+            if stmt.operands.len() > MAX_PROGRAM_WORDS {
+                return Err(AsmError::range(
+                    &stmt.loc,
+                    format!(
+                        ".dw operand count {} exceeds program-memory \
+                         budget of {} words (see WIRE_FORMAT.md \
+                         §encoding-width)",
+                        stmt.operands.len(),
+                        MAX_PROGRAM_WORDS,
+                    ),
+                ));
+            }
+            Ok(stmt.operands.len() as u16)
+        }
+        Some(_) => Ok(0), // ALLOWED_DIRECTIVES gate keeps us here only for .equ/.dw
         None => {
             if stmt.mnemonic.is_some() {
-                1
+                Ok(1)
             } else {
-                0 // label-only line
+                Ok(0) // label-only line
             }
         }
     }
@@ -364,7 +393,7 @@ pub(crate) fn pass1(statements: Vec<Statement>, _filename: &str) -> Result<Pass1
             continue; // .equ consumes no PC slots
         }
 
-        let advance = pc_advance_for(&stmt);
+        let advance = pc_advance_for(&stmt)?;
         let stmt_loc = stmt.loc.clone();
         if advance > 0 {
             pc_stmts.push((pc, stmt));
@@ -372,7 +401,7 @@ pub(crate) fn pass1(statements: Vec<Statement>, _filename: &str) -> Result<Pass1
         pc = pc
             .checked_add(advance)
             .ok_or_else(|| AsmError::range(&stmt_loc, "PC overflow"))?;
-        if pc > (1 << 11) {
+        if pc as usize > MAX_PROGRAM_WORDS {
             return Err(AsmError::range(
                 &stmt_loc,
                 "program exceeds 2048 instruction slots (PC overflow)",
