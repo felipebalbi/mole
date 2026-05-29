@@ -1,6 +1,11 @@
 // slides.typ -- entry point for the Mole introduction deck.
+//
+// Compile:
+//   typst compile --root .. slides.typ                    -> slides.pdf
+//   typst compile --root .. --input theme=dark slides.typ -> dark theme
+//   typst compile --root .. --input notes=true slides.typ -> with notes
 
-#import "lib.typ": *
+#import "../presentation-template/lib.typ": *
 
 #set page(
   paper: "presentation-16-9",
@@ -15,10 +20,10 @@
 )
 
 // Global rules: inline raw is mono-only; block raw lands on the
-// shared cream chrome (see `code-chrome-block` in lib.typ) so any
-// fenced ```...``` in a chapter source looks the same as one
-// inside a `code-panel` or `code-slide` -- single source of truth
-// for the chrome shape.
+// shared chrome (see `code-chrome-block` in the template's lib.typ)
+// so any fenced ```...``` in a chapter source looks the same as
+// one inside a `code-panel` or `code-slide` -- single source of
+// truth for the chrome shape.
 #show raw: set text(font: font-mono, size: 15pt, fill: ink)
 #show raw.where(block: true): it => code-chrome-block(
   text(fill: ink, it),

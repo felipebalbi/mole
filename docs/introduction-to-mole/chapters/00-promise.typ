@@ -1,4 +1,4 @@
-#import "../lib.typ": *
+#import "../../presentation-template/lib.typ": *
 
 // Opening: cover -> what you'll get -> the hook -> a thought
 // experiment that sets up Part 1.

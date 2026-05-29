@@ -3,7 +3,8 @@
 # Targets:
 #   make           build slides.pdf (default)
 #   make notes     build slides-notes.pdf with speaker notes inlined
-#   make all       build both
+#   make dark      build slides-dark.pdf in melissa-dark
+#   make all       build all three
 #   make watch     auto-rebuild slides.pdf while editing
 #   make clean     remove built PDFs
 
@@ -11,23 +12,35 @@ TYPST ?= typst
 SRC   := slides.typ
 PDF   := slides.pdf
 NOTES := slides-notes.pdf
+DARK  := slides-dark.pdf
 
-DEPS  := $(SRC) $(wildcard chapters/*.typ) $(wildcard figures/*.typ) lib.typ
+# Root one level up (= docs/) so the template under
+# ../presentation-template/ is reachable. Typst forbids imports
+# that escape the project root.
+ROOT  := ..
 
-.PHONY: all notes watch clean
+DEPS  := $(SRC) $(wildcard chapters/*.typ) $(wildcard figures/*.typ) \
+         ../presentation-template/lib.typ \
+         ../presentation-template/theme.typ
 
-all: $(PDF) $(NOTES)
+.PHONY: all notes dark watch clean
+
+all: $(PDF) $(NOTES) $(DARK)
 
 $(PDF): $(DEPS)
-	$(TYPST) compile $(SRC) $(PDF)
+	$(TYPST) compile --root $(ROOT) $(SRC) $(PDF)
 
 $(NOTES): $(DEPS)
-	$(TYPST) compile --input notes=true $(SRC) $(NOTES)
+	$(TYPST) compile --root $(ROOT) --input notes=true $(SRC) $(NOTES)
+
+$(DARK): $(DEPS)
+	$(TYPST) compile --root $(ROOT) --input theme=dark $(SRC) $(DARK)
 
 notes: $(NOTES)
+dark:  $(DARK)
 
 watch:
-	$(TYPST) watch $(SRC) $(PDF)
+	$(TYPST) watch --root $(ROOT) $(SRC) $(PDF)
 
 clean:
-	rm -f $(PDF) $(NOTES)
+	rm -f $(PDF) $(NOTES) $(DARK)

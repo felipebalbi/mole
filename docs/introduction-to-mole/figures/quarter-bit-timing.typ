@@ -9,7 +9,7 @@
 // fpga/Mole/AGENTS.md "Quarter-bit is the timing unit"). The
 // receiver samples on the rising edge; Mole captures in Q2.
 
-#import "../lib.typ": *
+#import "../../presentation-template/lib.typ": *
 #import "@preview/cetz:0.4.2"
 
 // sda-bits: 4-tuple of values for Q0..Q3, one of "lo"/"hi"/"glitch".

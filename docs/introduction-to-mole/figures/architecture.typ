@@ -3,7 +3,7 @@
 // Three-block diagram: Host (Rust) ↔ Mole FPGA ↔ DUT.
 // Drawn with cetz so it ships in-tree as code, not as a binary.
 
-#import "../lib.typ": *
+#import "../../presentation-template/lib.typ": *
 #import "@preview/cetz:0.4.2"
 
 #let architecture-figure = cetz.canvas({

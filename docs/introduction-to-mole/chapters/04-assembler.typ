@@ -1,4 +1,4 @@
-#import "../lib.typ": *
+#import "../../presentation-template/lib.typ": *
 
 // Part 4: The assembler. moleasm as a human-readable surface for the
 // ISA, and the `mole-asm` CLI that compiles it. Audience leaves

@@ -4,7 +4,7 @@
 // vocabulary (dominant / recessive / hi-Z) onto an electrical
 // drive class. Per ROADMAP §"Bus mode register" and AGENTS §3.12.
 
-#import "../lib.typ": *
+#import "../../presentation-template/lib.typ": *
 #import "@preview/cetz:0.4.2"
 
 #let bus-mode-table-figure = cetz.canvas({

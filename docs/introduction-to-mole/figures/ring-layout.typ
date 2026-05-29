@@ -5,7 +5,7 @@
 // with a wrap pointer indicating where the next write lands. Per
 // fpga/Mole/TODO.md Step 11.
 
-#import "../lib.typ": *
+#import "../../presentation-template/lib.typ": *
 #import "@preview/cetz:0.4.2"
 
 #let ring-layout-figure = cetz.canvas({

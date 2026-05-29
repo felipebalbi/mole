@@ -1,4 +1,4 @@
-#import "../lib.typ": *
+#import "../../presentation-template/lib.typ": *
 #import "../figures/quarter-bit-timing.typ": quarter-bit-figure
 #import "../figures/bus-mode-table.typ": bus-mode-table-figure
 #import "../figures/sticky-flag-lifecycle.typ": sticky-flag-lifecycle-figure

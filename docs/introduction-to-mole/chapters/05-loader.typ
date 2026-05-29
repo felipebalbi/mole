@@ -1,4 +1,4 @@
-#import "../lib.typ": *
+#import "../../presentation-template/lib.typ": *
 #import "../figures/ring-layout.typ": ring-layout-figure
 
 // Part 5: The loader. mole-loader is the runtime counterpart to

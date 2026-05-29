@@ -1,4 +1,4 @@
-#import "../lib.typ": *
+#import "../../presentation-template/lib.typ": *
 
 // Part 6: First test. Walk through a real I2C single-byte write
 // against the i2c-write-one-byte fixture, then show what the host

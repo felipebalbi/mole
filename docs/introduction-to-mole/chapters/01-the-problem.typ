@@ -1,4 +1,4 @@
-#import "../lib.typ": *
+#import "../../presentation-template/lib.typ": *
 
 // Part 1: The problem. Frame compliance vs conformance, walk through
 // the three existing options, end with the six-item wishlist that
@@ -106,12 +106,6 @@
     )
   ],
   verdict: [One tool that does all six. That's the gap Mole fills.],
-)
-
-#stat-slide(
-  "1",
-  "iCEBreaker",
-  caption: [Plus 2 resistors and the DUT. That's the entire BoM for v0.],
 )
 
 #recap-slide(
