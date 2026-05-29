@@ -22,7 +22,7 @@ end you should be able to:
 Mole is split into two layers (see `ROADMAP.md` for the full
 rationale):
 
-- **Layer 0** is the FPGA bit-cycle engine. It executes 12 fixed-width
+- **Layer 0** is the FPGA bit-cycle engine. It executes 15 fixed-width
   16-bit opcodes and knows *nothing* about I2C, I3C, SMBus, or any
   other protocol. It only knows how to drive and sample symbols on a
   two-wire bus at a configured quarter-bit period.
