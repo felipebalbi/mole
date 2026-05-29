@@ -5,22 +5,21 @@
 // we deliberately violate setup/hold to see how the target reacts.
 // Mirrors uppercase mnemonics + `;` comments of the golden fixtures.
 
-#section-slide("06", "Breaking it on purpose")
+#section-slide("07", "Breaking it on purpose")
 
 #content-slide(
   "The goal",
   kicker-text: "From clean test to glitch fuzz",
 )[
-  #v(0.6em)
-  #align(center)[
-    #text(font: font-serif, size: 26pt, weight: "semibold", fill: ink)[
+  #align(center + horizon, stack(
+    spacing: 1.2em,
+    text(font: font-serif, size: 26pt, weight: "semibold", fill: ink)[
       Force a single-quarter dip on SDA, mid-byte.
-    ]
-    #v(0.8em)
-    #text(font: font-serif, size: 18pt, style: "italic", fill: muted)[
+    ],
+    text(font: font-serif, size: 18pt, style: "italic", fill: muted)[
       Does the target NACK, hang, or shrug it off?
-    ]
-  ]
+    ],
+  ))
   #note[
     The whole point of having a per-quarter ISA is that you can ask
     this kind of question. A logic analyser only watches; an MCU is
@@ -32,19 +31,14 @@
   "The shape on the wire",
   kicker-text: "Q2 dips while SCL rises",
 )[
-  #v(0.3em)
-  #align(center)[
-    #box(width: 92%)[
-      #quarter-bit-figure(
-        sda-bits: ("hi", "hi", "glitch", "hi"),
-        capture: none,
-        title: [
-          A bit that should look recessive end-to-end has a deliberate
-          dip on its sample edge.
-        ],
-      )
-    ]
-  ]
+  #align(center + horizon, box(width: 92%, quarter-bit-figure(
+    sda-bits: ("hi", "hi", "glitch", "hi"),
+    capture: none,
+    title: [
+      A bit that should look recessive end-to-end has a deliberate
+      dip on its sample edge.
+    ],
+  )))
 ]
 
 #code-slide(
@@ -64,18 +58,17 @@
   "Three possible outcomes",
   kicker-text: "All interesting",
 )[
-  #v(0.4em)
-  #numbered(
-    [#tag("ACK",   color: accent)    #h(0.4em) Target didn't enforce setup / hold. *Bug.*],
-    [#tag("NACK",  color: secondary) #h(0.4em) Target rejected the byte. *Spec-correct.*],
-    [#tag("START", color: muted)     #h(0.4em) Target re-armed as if a new START arrived. *Brittle.*],
+  #stack(
+    spacing: 1em,
+    numbered(
+      [#tag("ACK",   color: accent)    #h(0.6em) Target didn't enforce setup / hold. *Bug.*],
+      [#tag("NACK",  color: secondary) #h(0.6em) Target rejected the byte. *Spec-correct.*],
+      [#tag("START", color: muted)     #h(0.6em) Target re-armed as if a new START arrived. *Brittle.*],
+    ),
+    align(center, text(
+      font: font-serif, size: 16pt, style: "italic", fill: muted,
+    )[All three tell you something useful about the part on the desk.]),
   )
-  #v(0.6em)
-  #align(center)[
-    #text(font: font-serif, size: 16pt, style: "italic", fill: muted)[
-      All three tell you something useful about the part on the desk.
-    ]
-  ]
 ]
 
 #quote-slide(
@@ -85,7 +78,7 @@
 )
 
 #recap-slide(
-  "What Part 6 leaves you with",
+  "What Part 7 leaves you with",
   (
     [`EMIT_QUARTER` is the per-quarter escape hatch you reach for to fuzz.],
     [A single bit can be perfectly compliant or deliberately bent.],

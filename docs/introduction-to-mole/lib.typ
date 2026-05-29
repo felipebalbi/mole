@@ -67,8 +67,7 @@
   if notes-mode {
     place(
       bottom + left,
-      dx: 0pt, dy: -4pt,
-      box(width: 100%, fill: bg-tint, inset: 10pt, radius: 4pt)[
+      box(width: 100%, fill: bg-tint, inset: 0.8em, radius: 4pt)[
         #text(
           font: font-serif, size: 10pt, fill: ink-soft, style: "italic",
         )[
@@ -125,32 +124,30 @@
   ]
 }
 
-#let slide-title(s, kicker-text: none) = block[
-  #if kicker-text != none [
-    #kicker(kicker-text)
-    #v(0.2em)
-  ]
-  #text(font: font-serif, size: 32pt, weight: "semibold", fill: ink)[#s]
-  #v(0.15em)
-  #rule()
-  #v(0.4em)
+#let slide-title(s, kicker-text: none) = block(below: 0.8em)[
+  #stack(
+    spacing: 1em,
+    if kicker-text != none { kicker(kicker-text) },
+    text(font: font-serif, size: 32pt, weight: "semibold", fill: ink)[#s],
+    rule(),
+  )
 ]
 
 #let bullets(..items) = {
   set text(size: 18pt, fill: ink-soft)
-  set par(leading: 0.55em)
+  set par(leading: 1em)
   list(
     marker: text(fill: accent)[●],
-    spacing: 0.7em,
+    spacing: 1em,
     ..items.pos(),
   )
 }
 
 #let numbered(..items) = {
   set text(size: 18pt, fill: ink-soft)
-  set par(leading: 0.55em)
+  set par(leading: 1em)
   enum(
-    spacing: 0.7em,
+    spacing: 1em,
     ..items.pos(),
   )
 }
@@ -158,51 +155,78 @@
 // Check-marked recap items. Use in recap-slide.
 #let checks(..items) = {
   set text(size: 18pt, fill: ink-soft)
-  set par(leading: 0.55em)
+  set par(leading: 1em)
   list(
     marker: text(fill: success)[✓],
-    spacing: 0.7em,
+    spacing: 1em,
     ..items.pos(),
   )
 }
 
 #let stat-block(value, label) = align(center)[
-  #text(font: font-serif, size: 110pt, weight: "bold", fill: accent)[#value]
-  #v(-0.3em)
-  #text(font: font-sans, size: 18pt, fill: muted, tracking: 3pt)[#upper(label)]
+  #stack(
+    spacing: 1em,
+    text(font: font-serif, size: 110pt, weight: "bold", fill: accent)[#value],
+    text(font: font-sans, size: 18pt, fill: muted, tracking: 3pt)[#upper(label)],
+  )
 ]
 
 #let two-col(left, right) = grid(
   columns: (1fr, 1fr),
-  column-gutter: 40pt,
+  column-gutter: 4%,
+  align: top,
   left, right,
 )
 
 #let three-col(a, b, c) = grid(
   columns: (1fr, 1fr, 1fr),
-  column-gutter: 28pt,
+  column-gutter: 3%,
+  align: top,
   a, b, c,
 )
 
-// A dark code panel for use inside content-slides.  The inner show rule
-// undoes the global cream raw wrap so text is light-on-dark.
+// Unified chrome for every code block on a light slide.  Used by
+// the global raw-block show rule in slides.typ, by `code-panel`
+// (inline), and by `code-slide` (titled). Single source of truth
+// so the cream / radius / inset don't drift apart between render
+// paths.
+//
+// No stroke: the tone difference between bg-subtle (panel) and
+// bg-page (slide) carries the boundary on its own ("card on
+// paper" idiom). A previous pass tried a 0.5pt hairline; on
+// real-rendered slides the combination of stroke + inset read
+// as a visible band rather than a hairline, so the stroke is
+// gone.
+//
+// breakable: false so the chrome always encloses every line of
+// the block. If a code sample doesn't fit, it overflows
+// honestly off the slide bottom (a content problem) instead of
+// silently shedding its border (a chrome lie).
+#let code-chrome-block(body) = block(
+  fill: bg-subtle,
+  inset: 1em,
+  radius: 4pt,
+  width: 100%,
+  breakable: false,
+  body,
+)
+
+// A code panel for use inline inside content-slides.  Reads as a
+// soft cream panel with dark text -- the chrome should hint at
+// "code" without competing with the slide title.
 //
 // `highlight:` is a list of (pattern, color) pairs. Each pattern is a
 // `regex(...)` value matched inside the raw body; matches are recoloured
 // to the given fill. Useful for spotlighting `expect=`, `mask=`,
 // `capture=`, opcode mnemonics, etc.
-#let code-panel(body, size: 16pt, highlight: ()) = block(
-  fill: bg-code,
-  inset: 16pt,
-  radius: 6pt,
-  width: 100%,
-)[
+#let code-panel(body, size: 16pt, highlight: ()) = code-chrome-block[
+  #set text(size: size)
   #show raw.where(block: true): it => block(
     fill: none, inset: 0pt, width: 100%,
-    text(font: font-mono, fill: ink-code, size: size, it),
+    text(font: font-mono, fill: ink, size: size, it),
   )
   #show raw.where(block: false): it => (
-    text(font: font-mono, fill: ink-code, size: size, it)
+    text(font: font-mono, fill: ink, size: size, it)
   )
   #for (pat, color) in highlight {
     show pat: set text(fill: color, weight: "semibold")
@@ -219,7 +243,7 @@
 #let current-part = state("mole-part", none)
 
 #let chrome() = place(
-  bottom + right, dx: 0pt, dy: 0pt,
+  bottom + right,
   context {
     let p = current-part.get()
     let n = counter(page).get().first()
@@ -232,86 +256,118 @@
 // ---- Slide kinds ---------------------------------------------------
 
 #let cover-slide(title, subtitle, author, date) = slide[
-  #set page(fill: bg-dark, margin: (x: 70pt, y: 50pt))
+  #set page(fill: bg-dark)
   #set text(fill: ink-invert)
   #place(
-    left + top, dx: 0pt, dy: 0pt,
+    left + top,
     box(width: 6pt, height: 100%, fill: accent),
   )
-  #v(1fr)
-  #kicker("Introducing", color: accent)
-  #v(0.3em)
-  #text(font: font-serif, size: 100pt, weight: "bold", fill: ink-invert)[#title]
-  #v(0.3em)
-  #text(font: font-serif, size: 24pt, style: "italic", fill: muted-light)[#subtitle]
-  #v(1fr)
-  #grid(
-    columns: (1fr, auto),
-    align: (left, right),
-    text(font: font-sans, size: 14pt, fill: muted-light)[#author],
-    text(font: font-sans, size: 14pt, fill: muted-light)[#date],
-  )
+  #pad(left: 2.5em, grid(
+    rows: (1fr, auto, 1fr, auto),
+    row-gutter: 0pt,
+    [],
+    stack(
+      spacing: 1em,
+      kicker("Introducing", color: accent),
+      text(
+        font: font-serif, size: 100pt, weight: "bold", fill: ink-invert,
+      )[#title],
+      text(
+        font: font-serif, size: 24pt, style: "italic", fill: muted-light,
+      )[#subtitle],
+    ),
+    [],
+    grid(
+      columns: (1fr, auto),
+      align: (left + bottom, right + bottom),
+      text(font: font-sans, size: 14pt, fill: muted-light)[#author],
+      text(font: font-sans, size: 14pt, fill: muted-light)[#date],
+    ),
+  ))
 ]
 
 #let section-slide(num, title) = slide[
   #set page(fill: bg-page)
   #current-part.update("Part " + num + " · " + title)
-  #v(1fr)
-  #kicker("Part " + num, color: accent)
-  #v(0.5em)
-  #text(font: font-serif, size: 64pt, weight: "semibold", fill: ink)[#title]
-  #v(0.4em)
-  #rule(w: 100pt)
-  #v(1fr)
+  #grid(
+    rows: (1fr, auto, 1fr),
+    [],
+    stack(
+      spacing: 1em,
+      kicker("Part " + num, color: accent),
+      text(font: font-serif, size: 64pt, weight: "semibold", fill: ink)[#title],
+      rule(w: 100pt),
+    ),
+    [],
+  )
 ]
 
 #let content-slide(title, kicker-text: none, body) = slide[
-  #slide-title(title, kicker-text: kicker-text)
-  #body
+  #pad(y: 1em, grid(
+    rows: (auto, 1fr),
+    slide-title(title, kicker-text: kicker-text),
+    align(horizon, body),
+  ))
   #chrome()
 ]
 
 #let stat-slide(value, label, caption: none) = slide[
-  #v(1fr)
-  #stat-block(value, label)
-  #if caption != none [
-    #v(0.8em)
-    #align(center)[
-      #text(font: font-serif, size: 20pt, style: "italic", fill: muted)[#caption]
-    ]
-  ]
-  #v(1fr)
+  #pad(y: 1em, grid(
+    columns: 1fr,
+    rows: (1fr, auto, 1fr),
+    [],
+    align(horizon + center, stack(
+      spacing: 0.6em,
+      align(center, text(
+        font: font-serif, size: 110pt, weight: "bold", fill: accent,
+      )[#value]),
+      align(center, text(
+        font: font-sans, size: 18pt, fill: muted, tracking: 3pt,
+      )[#upper(label)]),
+      if caption != none {
+        align(center, text(
+          font: font-serif, size: 20pt, style: "italic", fill: muted,
+        )[#caption])
+      },
+    )),
+    [],
+  ))
   #chrome()
 ]
 
 #let quote-slide(body, by: none) = slide[
-  #v(1fr)
-  #align(center)[
-    #box(width: 78%)[
-      #text(font: font-serif, size: 30pt, style: "italic", fill: ink)[
+  #pad(y: 1em, grid(
+    rows: (1fr, auto, 1fr),
+    [],
+    align(center, box(width: 78%, stack(
+      spacing: 1em,
+      text(font: font-serif, size: 30pt, style: "italic", fill: ink)[
         \"#body\"
-      ]
-      #if by != none [
-        #v(0.8em)
-        #align(right)[
-          #text(font: font-sans, size: 14pt, fill: muted, tracking: 2pt)[#upper("-- " + by)]
-        ]
-      ]
-    ]
-  ]
-  #v(1fr)
+      ],
+      if by != none {
+        align(right, text(
+          font: font-sans, size: 14pt, fill: muted, tracking: 2pt,
+        )[#upper("-- " + by)])
+      },
+    ))),
+    [],
+  ))
   #chrome()
 ]
 
-// Code slide: scoped raw-block rule renders straight onto a dark panel.
-// The body is just one or more raw blocks (and optional prose).
+// Code slide: titled slide whose body is one or more raw blocks.
+// The scoped show rule wraps each block in the shared cream chrome
+// so a `code-slide` looks identical to a `content-slide` whose
+// body is a `code-panel` -- same fill, stroke, radius, inset.
 #let code-slide(title, kicker-text: none, body) = slide[
-  #slide-title(title, kicker-text: kicker-text)
-  #show raw.where(block: true): it => block(
-    fill: bg-code, inset: 16pt, radius: 6pt, width: 100%,
-    text(font: font-mono, fill: ink-code, size: 16pt, it),
+  #show raw.where(block: true): it => code-chrome-block(
+    text(font: font-mono, fill: ink, size: 16pt, it),
   )
-  #body
+  #pad(y: 1em, grid(
+    rows: (auto, 1fr),
+    slide-title(title, kicker-text: kicker-text),
+    body,
+  ))
   #chrome()
 ]
 
@@ -319,12 +375,19 @@
 // explanation. Used to introduce a single new term per slide
 // (quarter-bit, sticky flag, BUS_MODE, ...).
 #let definition-slide(term, sub: none, kicker-text: "Definition", body) = slide[
-  #slide-title(term, kicker-text: kicker-text)
-  #if sub != none [
-    #text(font: font-serif, size: 18pt, style: "italic", fill: muted)[#sub]
-    #v(0.6em)
-  ]
-  #body
+  #pad(y: 1em, grid(
+    rows: (auto, 1fr),
+    slide-title(term, kicker-text: kicker-text),
+    align(horizon, stack(
+      spacing: 1em,
+      if sub != none {
+        text(
+          font: font-serif, size: 18pt, style: "italic", fill: muted,
+        )[#sub]
+      },
+      body,
+    )),
+  ))
   #chrome()
 ]
 
@@ -336,23 +399,29 @@
 // are anchored with #place so a long prompt can't push them onto a
 // new page (polylux auto-paginates content that overflows).
 #let try-it-slide(prompt, hint: none, kicker-text: "Try it") = slide[
-  #slide-title("Pause and think.", kicker-text: kicker-text)
-  #v(0.4em)
-  #box(width: 100%, fill: bg-tint, inset: 18pt, radius: 6pt)[
-    #text(font: font-serif, size: 20pt, fill: ink)[#prompt]
-    #if hint != none [
-      #v(0.6em)
-      #text(font: font-serif, size: 13pt, style: "italic", fill: muted)[
-        Hint: #hint
-      ]
-    ]
-  ]
-  #place(
-    bottom + center, dy: -36pt,
-    text(font: font-sans, size: 12pt, fill: muted-light, tracking: 3pt)[
-      #upper("answer on the next slide")
+  #pad(y: 1em, grid(
+    rows: (auto, auto, 1fr, auto),
+    row-gutter: 1em,
+    slide-title("Pause and think.", kicker-text: kicker-text),
+    block(
+      width: 100%, fill: bg-tint, inset: 1em, radius: 6pt,
+      breakable: false,
+    )[
+      #stack(
+        spacing: 1em,
+        text(font: font-serif, size: 20pt, fill: ink)[#prompt],
+        if hint != none {
+          text(
+            font: font-serif, size: 13pt, style: "italic", fill: muted,
+          )[Hint: #hint]
+        },
+      )
     ],
-  )
+    [],
+    align(center + bottom, text(
+      font: font-sans, size: 12pt, fill: muted-light, tracking: 3pt,
+    )[#upper("answer on the next slide")]),
+  ))
   #chrome()
 ]
 
@@ -367,17 +436,26 @@
   kicker-text: "Food for thought",
   title: "Pause and consider.",
 ) = slide[
-  #slide-title(title, kicker-text: kicker-text)
-  #v(0.4em)
-  #box(width: 100%, fill: bg-tint, inset: 18pt, radius: 6pt)[
-    #text(font: font-serif, size: 20pt, fill: ink)[#prompt]
-    #if hint != none [
-      #v(0.6em)
-      #text(font: font-serif, size: 13pt, style: "italic", fill: muted)[
-        Hint: #hint
-      ]
-    ]
-  ]
+  #pad(y: 1em, grid(
+    rows: (auto, auto, 1fr),
+    row-gutter: 1em,
+    slide-title(title, kicker-text: kicker-text),
+    block(
+      width: 100%, fill: bg-tint, inset: 1em, radius: 6pt,
+      breakable: false,
+    )[
+      #stack(
+        spacing: 1em,
+        text(font: font-serif, size: 20pt, fill: ink)[#prompt],
+        if hint != none {
+          text(
+            font: font-serif, size: 13pt, style: "italic", fill: muted,
+          )[Hint: #hint]
+        },
+      )
+    ],
+    [],
+  ))
   #chrome()
 ]
 
@@ -390,29 +468,32 @@
   kicker-text: none,
   verdict: none,
 ) = slide[
-  #slide-title(title, kicker-text: kicker-text)
-  #grid(
-    columns: (1fr, 1fr),
-    column-gutter: 32pt,
-    [
-      #tag(left-title, color: secondary)
-      #v(0.4em)
-      #left
-    ],
-    [
-      #tag(right-title, color: accent)
-      #v(0.4em)
-      #right
-    ],
-  )
-  #if verdict != none [
-    #v(0.8em)
-    #align(center)[
-      #text(font: font-serif, size: 18pt, style: "italic", fill: muted)[
-        #verdict
-      ]
-    ]
-  ]
+  #pad(y: 1em, grid(
+    rows: (auto, auto, 1fr, auto),
+    row-gutter: 1em,
+    slide-title(title, kicker-text: kicker-text),
+    grid(
+      columns: (1fr, 1fr),
+      column-gutter: 4%,
+      align: top,
+      stack(
+        spacing: 0.5em,
+        tag(left-title, color: secondary),
+        left,
+      ),
+      stack(
+        spacing: 0.5em,
+        tag(right-title, color: accent),
+        right,
+      ),
+    ),
+    [],
+    if verdict != none {
+      align(center, text(
+        font: font-serif, size: 18pt, style: "italic", fill: muted,
+      )[#verdict])
+    },
+  ))
   #chrome()
 ]
 
@@ -422,23 +503,21 @@
 #let recap-slide(
   title, points, next: none, deeper: none, kicker-text: "Recap",
 ) = slide[
-  #slide-title(title, kicker-text: kicker-text)
-  #checks(..points)
-  #if next != none [
-    #v(0.8em)
-    #callout(
-      kind: "info",
-      icon: "→",
-    )[Next up: #next]
-  ]
-  #if deeper != none [
-    #v(0.4em)
-    #align(left)[
-      #text(font: font-sans, size: 11pt, fill: muted, tracking: 1pt)[
-        ↪ Go deeper: #deeper
-      ]
-    ]
-  ]
+  #pad(y: 1em, grid(
+    rows: (auto, auto, 1fr, auto, auto),
+    row-gutter: 0.8em,
+    slide-title(title, kicker-text: kicker-text),
+    checks(..points),
+    [],
+    if next != none {
+      callout(kind: "info", icon: "→")[Next up: #next]
+    },
+    if deeper != none {
+      align(left, text(
+        font: font-sans, size: 11pt, fill: muted, tracking: 1pt,
+      )[↪ Go deeper: #deeper])
+    },
+  ))
   #chrome()
 ]
 
@@ -453,40 +532,47 @@
 ) = slide[
   #set page(fill: bg-dark)
   #set text(fill: ink-invert)
-  #v(1fr)
-  #align(center)[
-    #text(font: font-serif, size: 96pt, weight: "bold", fill: ink-invert)[
-      Thanks.
-    ]
-    #v(0.4em)
-    #text(font: font-serif, size: 20pt, style: "italic", fill: muted-light)[
-      Now go break something on purpose.
-    ]
-  ]
-  #v(0.8em)
-  #align(center)[
-    #box(width: 78%)[
-      #grid(
-        columns: (auto, 1fr),
-        column-gutter: 18pt,
-        row-gutter: 10pt,
-        align: (right, left),
-        text(font: font-sans, size: 12pt, fill: accent, tracking: 2pt)[#upper("Repo")],
-        text(font: font-mono, size: 14pt, fill: ink-invert)[#repo],
-        ..if book != none {(
-          text(font: font-sans, size: 12pt, fill: accent, tracking: 2pt)[#upper("Manual")],
-          text(font: font-mono, size: 14pt, fill: ink-invert)[#book],
-        )} else { () },
-        ..if roadmap != none {(
-          text(font: font-sans, size: 12pt, fill: accent, tracking: 2pt)[#upper("Design")],
-          text(font: font-mono, size: 14pt, fill: ink-invert)[#roadmap],
-        )} else { () },
-        ..if contributing != none {(
-          text(font: font-sans, size: 12pt, fill: accent, tracking: 2pt)[#upper("Hack on it")],
-          text(font: font-mono, size: 14pt, fill: ink-invert)[#contributing],
-        )} else { () },
-      )
-    ]
-  ]
-  #v(1fr)
+  #grid(
+    rows: (1fr, auto, auto, 1fr),
+    row-gutter: 1.2em,
+    [],
+    align(center, stack(
+      spacing: 0.5em,
+      text(
+        font: font-serif, size: 96pt, weight: "bold", fill: ink-invert,
+      )[Thanks.],
+      text(
+        font: font-serif, size: 20pt, style: "italic", fill: muted-light,
+      )[Now go break something on purpose.],
+    )),
+    align(center, box(width: 78%, grid(
+      columns: (auto, 1fr),
+      column-gutter: 2%,
+      row-gutter: 0.8em,
+      align: (right, left),
+      text(
+        font: font-sans, size: 12pt, fill: accent, tracking: 2pt,
+      )[#upper("Repo")],
+      text(font: font-mono, size: 14pt, fill: ink-invert)[#repo],
+      ..if book != none {(
+        text(
+          font: font-sans, size: 12pt, fill: accent, tracking: 2pt,
+        )[#upper("Manual")],
+        text(font: font-mono, size: 14pt, fill: ink-invert)[#book],
+      )} else { () },
+      ..if roadmap != none {(
+        text(
+          font: font-sans, size: 12pt, fill: accent, tracking: 2pt,
+        )[#upper("Design")],
+        text(font: font-mono, size: 14pt, fill: ink-invert)[#roadmap],
+      )} else { () },
+      ..if contributing != none {(
+        text(
+          font: font-sans, size: 12pt, fill: accent, tracking: 2pt,
+        )[#upper("Hack on it")],
+        text(font: font-mono, size: 14pt, fill: ink-invert)[#contributing],
+      )} else { () },
+    ))),
+    [],
+  )
 ]

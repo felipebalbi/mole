@@ -14,18 +14,17 @@
   "What you'll get out of today",
   kicker-text: "The promise",
 )[
-  #v(0.4em)
-  #bullets(
-    [A clear mental model of what Mole #emph[is] and #emph[isn't].],
-    [Enough of the ISA to read someone else's `moleasm` and follow along.],
-    [The confidence to write your first test before lunch tomorrow.],
+  #stack(
+    spacing: 1em,
+    bullets(
+      [A clear mental model of what Mole #emph[is] and #emph[isn't].],
+      [Enough of the ISA to read someone else's `moleasm` and follow along.],
+      [The confidence to write your first test before lunch tomorrow.],
+    ),
+    align(center, text(
+      font: font-serif, size: 16pt, style: "italic", fill: muted,
+    )[No prior FPGA experience required. Bring curiosity.]),
   )
-  #v(0.6em)
-  #align(center)[
-    #text(font: font-serif, size: 16pt, style: "italic", fill: muted)[
-      No prior FPGA experience required. Bring curiosity.
-    ]
-  ]
   #note[
     Lead with what the audience gets, not what we built. The whole deck
     is shaped around these three outcomes -- check back at the recap of

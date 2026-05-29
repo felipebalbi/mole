@@ -4,7 +4,7 @@
 
 #set page(
   paper: "presentation-16-9",
-  margin: (x: 50pt, y: 40pt),
+  margin: (x: 6%, y: 5%),
   fill: bg-page,
 )
 
@@ -14,24 +14,22 @@
   fill: ink,
 )
 
-// Global rules: inline raw is mono-only; block raw lands on a subtle
-// cream panel with explicit dark fill so it never vanishes when wrapped
-// in a styled context.  `code-slide` overrides this to render straight
-// onto a dark panel.  `code-panel` (in lib.typ) does the same inline.
+// Global rules: inline raw is mono-only; block raw lands on the
+// shared cream chrome (see `code-chrome-block` in lib.typ) so any
+// fenced ```...``` in a chapter source looks the same as one
+// inside a `code-panel` or `code-slide` -- single source of truth
+// for the chrome shape.
 #show raw: set text(font: font-mono, size: 15pt, fill: ink)
-#show raw.where(block: true): it => block(
-  fill: bg-subtle,
-  inset: 12pt,
-  radius: 4pt,
-  width: 100%,
+#show raw.where(block: true): it => code-chrome-block(
   text(fill: ink, it),
 )
 
 #include "chapters/00-promise.typ"
 #include "chapters/01-the-problem.typ"
 #include "chapters/02-architecture.typ"
-#include "chapters/03-timing.typ"
-#include "chapters/04-isa-and-moleasm.typ"
-#include "chapters/05-first-test.typ"
-#include "chapters/06-breaking-it.typ"
-#include "chapters/07-where-this-goes.typ"
+#include "chapters/03-isa.typ"
+#include "chapters/04-assembler.typ"
+#include "chapters/05-loader.typ"
+#include "chapters/06-first-test.typ"
+#include "chapters/07-breaking-it.typ"
+#include "chapters/08-where-this-goes.typ"

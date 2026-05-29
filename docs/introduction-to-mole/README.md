@@ -6,7 +6,7 @@ Mole is, why it exists, how the engine + host compiler split, and
 what writing -- and intentionally breaking -- a test program looks
 like end to end.
 
-The deck is structured around seven labelled parts. Each one opens
+The deck is structured around eight labelled parts. Each one opens
 with a section divider, ends with a recap of the two or three
 things to remember, and seeds a "try it" thought-experiment before
 the answer lands on the following slide. The closing slide points
@@ -53,21 +53,21 @@ gitignored.
 
 ```text
 slides.typ            ; entry point: page setup, fonts,
-                      ;   include list across the seven parts.
+                      ;   include list across the eight parts.
 lib.typ               ; design system: tokens, atoms,
                       ;   slide kinds, notes-mode switch.
 chapters/             ; one .typ file per part.
   00-promise.typ      ; cover, what-you-get, opening hook.
   01-the-problem.typ  ; compliance vs conformance, today's gaps.
   02-architecture.typ ; three boxes, two layers, contract.
-  03-timing.typ       ; quarter-bit time and why four.
-  04-isa-and-moleasm.typ
-                      ; 15 opcodes, BUS_MODE, sticky flags,
-                      ;   the assembly syntax.
-  05-first-test.typ   ; worked I2C single-byte write.
-  06-breaking-it.typ  ; same write with a deliberate glitch.
-  07-where-this-goes.typ
-                      ; CLI, sims, three SKUs, thank-you.
+  03-isa.typ          ; quarter-bit, 15 opcodes, BUS_MODE,
+                      ;   sticky flags.
+  04-assembler.typ    ; moleasm syntax + the mole-asm CLI.
+  05-loader.typ       ; mole-loader: wire contract + ring decode.
+  06-first-test.typ   ; worked I2C single-byte write.
+  07-breaking-it.typ  ; same write with a deliberate glitch.
+  08-where-this-goes.typ
+                      ; sims, three SKUs, status, thank-you.
 figures/              ; reusable cetz diagrams (typst code,
                       ;   not images).
 Makefile              ; build wrapper.
