@@ -111,6 +111,25 @@ impl std::str::FromStr for Revision {
                 s
             ));
         }
+        // libstd's `u8::from_str` / `u16::from_str` accept a leading
+        // `+` (e.g. "+1" parses as 1). For a version triple that is
+        // surprising --- "+1.0.0" should not silently become "1.0.0"
+        // --- so reject any component whose first byte is not an
+        // ASCII digit. This keeps the contract "decimal digits only,
+        // no sign, no whitespace, no underscores".
+        fn check_digits_only(field: &str, tok: &str) -> Result<(), String> {
+            match tok.as_bytes().first() {
+                None => Err(format!("invalid {field}: empty component")),
+                Some(b) if !b.is_ascii_digit() => Err(format!(
+                    "invalid {field} {tok:?}: must start with an ASCII \
+                     digit (no leading sign or whitespace)"
+                )),
+                Some(_) => Ok(()),
+            }
+        }
+        check_digits_only("major", parts[0])?;
+        check_digits_only("minor", parts[1])?;
+        check_digits_only("patch", parts[2])?;
         let major: u8 = parts[0]
             .parse()
             .map_err(|e| format!("invalid major {:?}: {e}", parts[0]))?;
@@ -393,6 +412,22 @@ mod tests {
         assert!("256.0.0".parse::<Revision>().is_err());
         // patch is u16; 65536 overflows.
         assert!("0.0.65536".parse::<Revision>().is_err());
+    }
+
+    #[test]
+    fn revision_from_str_rejects_leading_plus() {
+        // Regression: libstd's `u8::from_str` / `u16::from_str`
+        // accept a leading `+`, so without an explicit check
+        // "+1.0.0" parses to 1.0.0. We require strict decimal-digit
+        // components --- no leading sign --- so callers cannot
+        // confuse themselves on the CLI's `--expect-revision` flag.
+        assert!("+1.0.0".parse::<Revision>().is_err());
+        assert!("1.+0.0".parse::<Revision>().is_err());
+        assert!("1.0.+0".parse::<Revision>().is_err());
+        // The negative-rejection cases already covered upstream
+        // (libstd refuses `-` for unsigned types) are re-pinned
+        // here to keep the rejection contract visible in one place.
+        assert!("-1.0.0".parse::<Revision>().is_err());
     }
 
     #[test]
