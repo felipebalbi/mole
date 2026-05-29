@@ -34,8 +34,11 @@ name: rust
 on:
   push:
     paths:
+      - 'mole-abi/**'
       - 'mole-asm/**'
       - 'mole-asm-cli/**'
+      - 'mole-loader/**'
+      - 'mole-loader-cli/**'
       - 'book/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
@@ -43,8 +46,11 @@ on:
   pull_request:
     branches: [main, master]
     paths:
+      - 'mole-abi/**'
       - 'mole-asm/**'
       - 'mole-asm-cli/**'
+      - 'mole-loader/**'
+      - 'mole-loader-cli/**'
       - 'book/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
