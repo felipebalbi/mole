@@ -181,6 +181,12 @@ pub enum Record {
 /// [11:8]  = caller status (or 0xF for engine trap)
 /// [7:0]   = reserved (= 0)
 /// ```
+///
+/// The strict decoder validates `[7:0] == 0` and `status ∉
+/// {0xD, 0xE}` per INV-WIRE-HALT-RECORD +
+/// INV-NUM-STATUS-RESERVED. See
+/// [`RingError::HaltReservedBitsSet`] and
+/// [`RingError::HaltStatusReserved`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct HaltStatus {
     /// 4-bit status code from the HALT opcode (`0x0..=0xC`
@@ -261,10 +267,28 @@ pub fn decode_ring(bytes: &[u8]) -> Result<DecodedRing, RingError> {
     if halt_word >> 14 != 0b11 {
         return Err(RingError::NoHaltAtTail { word: halt_word });
     }
+    // Reject structurally invalid HALT words first (reserved low
+    // byte must be zero per INV-WIRE-HALT-RECORD); then reject
+    // semantically reserved status codes (0xD, 0xE per
+    // INV-NUM-STATUS-RESERVED). Both carry the original
+    // `halt_word` for forensic value. 0xF is the documented
+    // engine-trap code and passes through to `HaltStatus` where
+    // `is_engine_trap()` surfaces it.
+    let reserved = (halt_word & 0x00FF) as u8;
+    if reserved != 0 {
+        return Err(RingError::HaltReservedBitsSet {
+            halt_word,
+            reserved,
+        });
+    }
+    let status = ((halt_word >> 8) & 0xF) as u8;
+    if status == 0xD || status == 0xE {
+        return Err(RingError::HaltStatusReserved { status, halt_word });
+    }
     let halt = HaltStatus {
         overflow: (halt_word & (1 << 13)) != 0,
         mismatch: (halt_word & (1 << 12)) != 0,
-        status: ((halt_word >> 8) & 0xF) as u8,
+        status,
     };
 
     // Records walk from word offset 2 up to (but not including) the

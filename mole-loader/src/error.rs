@@ -176,6 +176,53 @@ pub enum RingError {
         /// [`crate::transport::DEFAULT_RING_BYTES`]).
         expected: usize,
     },
+
+    /// HALT word's reserved low-byte field (`[7:0]`) is non-zero.
+    ///
+    /// Per INV-WIRE-HALT-RECORD the HALT word layout is
+    /// `[15:14]=11`, `[13]=overflow`, `[12]=mismatchAtHalt`,
+    /// `[11:8]=status`, `[7:0]=0`. Any non-zero bit in `[7:0]` is
+    /// either an engine-loader version skew (a future engine
+    /// repurposed the reserved field) or a corrupted drain. The
+    /// decoder fails fast rather than silently discarding the
+    /// information.
+    #[error(
+        "HALT word {halt_word:#06x} has non-zero reserved low byte {reserved:#04x}; \
+         INV-WIRE-HALT-RECORD requires [7:0] == 0. Likely cause: \
+         engine-loader version skew, or a corrupted drain"
+    )]
+    HaltReservedBitsSet {
+        /// The full 16-bit HALT word for forensic inspection.
+        halt_word: u16,
+        /// The offending low-byte value (= `halt_word & 0x00FF`).
+        reserved: u8,
+    },
+
+    /// HALT word's status field is `0xD` or `0xE` --- reserved for
+    /// future engine traps and not currently emitted by any shipped
+    /// engine.
+    ///
+    /// Per INV-NUM-STATUS-RESERVED, status codes `0x0..=0xC` are
+    /// caller-defined and `0xD..=0xF` are reserved for engine
+    /// traps. Today only `0xF` is in use (surfaced via the normal
+    /// [`crate::ring::HaltStatus`] path with
+    /// [`crate::ring::HaltStatus::is_engine_trap`]); `0xD` and
+    /// `0xE` are held for future trap classes. This decoder
+    /// rejects them so callers are not silently misled when a
+    /// future engine ships a new trap class. Likely cause:
+    /// engine-loader version skew, or a corrupted drain.
+    #[error(
+        "HALT word {halt_word:#06x} has reserved status code {status:#x}; \
+         INV-NUM-STATUS-RESERVED reserves 0xD and 0xE for future engine \
+         traps (today only 0xF is defined). Likely cause: \
+         engine-loader version skew, or a corrupted drain"
+    )]
+    HaltStatusReserved {
+        /// The reserved status value (`0xD` or `0xE`).
+        status: u8,
+        /// The full 16-bit HALT word for forensic inspection.
+        halt_word: u16,
+    },
 }
 
 /// Serial-port transport failures.
