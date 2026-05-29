@@ -67,7 +67,7 @@ $ make flash       ; iceprog
   #stack(
     spacing: 1.2em,
     three-col(
-      sku("Verde", "Dongle / per-dev",   "iCE40 UP5K",   "I3C SDR, I2C, HDR-DDR"),
+      sku("Verde", "Dongle / per-dev",   "iCE40 UP5K",   "I3C SDR, I2C"),
       sku("Rojo",  "Bench / compliance", "ECP5-45K",     "I3C SDR, I2C, HDR-DDR"),
       sku("Negro", "Certification",      "CertusPro-NX", "future tier"),
     ),

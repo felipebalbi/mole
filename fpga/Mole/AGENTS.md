@@ -228,6 +228,16 @@ The engine reports back to the host:
 
 That is the whole result-ring contract.
 
+Result-ring layout (canonical reference: `WIRE_FORMAT.md`
+§"Frame layout (engine -> host: result drain)" and `TODO.md`
+Step 11 "Result-ring format"): the `REVISION` word lives at
+offset 0 (low word, high word, little-endian per 16-bit ring
+grain); the record stream follows, made of CAPTURE records
+(`tag = 00`, 1 word) and MARK records (`tag = 10`, 3 words);
+the HALT status word (`tag = 11`) sits at `resultLimit` as a
+reserved slot that overflowing records can never overwrite.
+Overflow and recovery semantics live in `WIRE_FORMAT.md` §7.
+
 ## Bus-shaped FSM idiom
 
 Same pattern the I2c example project codified (and named in its

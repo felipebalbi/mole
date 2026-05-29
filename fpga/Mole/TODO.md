@@ -801,6 +801,13 @@ including WAIT_ON paths lands in Step 12.
 `LOAD_TIMING`. After this step the controller-side engine is
 ISA-complete for v0 (target-side opcodes land in Step 19).
 
+**Canonical reference:** the result-ring overflow and recovery
+contract (reserved HALT slot at `resultLimit`, per-record bound
+logic, `overflow` flag at HALT-word bit `[13]`) lives in
+`WIRE_FORMAT.md` §7. The "Result-ring format (v0, pre-Phase-0)"
+block below is preserved as bring-up history; consult
+`WIRE_FORMAT.md` for the stable contract.
+
 **Files:** extended `src/hw/BitCycleEngineCore.scala` (no new
 files --- `timingRegs` lives as a 4-entry `Vec` inside the engine).
 

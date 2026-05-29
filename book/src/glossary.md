@@ -17,8 +17,9 @@ moleasm the ACK slot is conventionally
 moleasm bytecode at quarter-bit-time resolution. See [Mental
 Model](./mental-model.md).
 
-**Branch.** A PC-relative jump (`BRANCH_ON`). Range `-128..+127`
-quarters of PC. For longer reach, use `JMP`.
+**Branch.** A PC-relative jump (`BRANCH_ON`). Range `-64..+63`
+instructions (signed 7-bit PC-relative offset). For longer reach,
+use `JMP`.
 
 **Bus mode.** One of `i2c`, `i3c-od`, `i3c-pp`, `hdr-ddr`. Selected
 by `SET_BUS_MODE`. Decides the electrical meaning of `recessive` and

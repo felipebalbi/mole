@@ -232,7 +232,7 @@ Wire engine --- role-agnostic primitives:
   `cond` becomes true, or until `timeout` quarter-bit ticks
   elapse. `cond` is a 4-bit condition code drawn from the same
   shared namespace as `BRANCH_ON cond` (see "Engine flags --
-  unified condition codes" below); `timeout` is 8-bit unsigned
+  unified condition codes" below); `timeout` is 7-bit unsigned
   quarters with `timeout = 0` meaning **wait forever** (no
   timeout). After return, `TIMEOUT_FLAG` is set iff the wait
   fell out because the timeout expired (cond did not fire);
