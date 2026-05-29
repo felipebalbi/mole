@@ -30,7 +30,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 
 use mole_loader::{
     DEFAULT_BAUD, DEFAULT_RING_BYTES, DecodedRing, HaltStatus, Progress, Record, Revision,
-    Transport, decode_ring, verify_frame,
+    Transport, decode_ring_strict, verify_frame,
 };
 
 /// Load a Mole program over UART and decode the engine's result ring.
@@ -189,7 +189,12 @@ fn run(cli: Cli) -> Result<ExitCode> {
     }
 
     // ----------------------------------------------------- 8. Decode
-    let decoded = decode_ring(&ring_bytes).wrap_err("failed to decode result ring")?;
+    // Strict decode: the drainer is supposed to hand back exactly
+    // `cli.ring_bytes` bytes. Any deviation is a louder signal of a
+    // real problem (wrong --ring-bytes, dropped framing, stale kernel
+    // buffer) than the structural errors `decode_ring` alone catches.
+    let decoded =
+        decode_ring_strict(&ring_bytes, cli.ring_bytes).wrap_err("failed to decode result ring")?;
 
     // ----------------------------------------------------- 9. Optional REVISION check
     if let Some(expected) = cli.expect_revision {
