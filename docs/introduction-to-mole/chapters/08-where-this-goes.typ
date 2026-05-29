@@ -1,23 +1,9 @@
-#import "../lib.typ": *
+#import "../../presentation-template/lib.typ": *
 
 // Part 7: Where this goes. CLI, sims, bring-up, the three SKUs as
 // reference designs, and a snapshot of what ships vs what's in flight.
 
 #section-slide("08", "Where this goes")
-
-#code-slide(
-  "Compile",
-  kicker-text: "mole-asm CLI",
-)[
-```
-$ mole-asm program.moleasm
-  -> program.molecode               ; packed 16-bit words
-
-$ mole-asm --frame program.moleasm
-  -> program.molecode
-  -> program.mole.bin               ; length + words + CRC, UART-ready
-```
-]
 
 #code-slide(
   "Simulate",
@@ -85,19 +71,18 @@ $ make flash       ; iceprog
   kicker-text: "Snapshot of the tree",
   "Shipping", [
     #bullets(
-      [Bit-cycle engine -- controller role, sims green end to end.],
-      [`mole-asm` assembler -- full ISA coverage.],
-      [`mole-loader` -- frame verify, UART round-trip, ring decode.],
-      [Bring-up notes for iCEBreaker (Verde-class).],
-      [mdBook tutorial: quickstart, opcodes, patterns.],
+      [Bit-cycle engine (controller). Sims green.],
+      [`mole-asm`: full ISA coverage.],
+      [`mole-loader`: verify, round-trip, ring decode.],
+      [iCEBreaker bring-up notes; mdBook quickstart.],
     )
   ],
   "In flight", [
     #bullets(
-      [Target role -- sample / drive paced by external SCL.],
+      [Target role: sample / drive paced by external SCL.],
       [DAA arbitration for I3C.],
-      [Source-line cross-reference in the loader output.],
-      [Spec-level SDK on top of the assembler (language TBD).],
+      [Source-line cross-ref in loader output.],
+      [Spec-level SDK on the assembler (TBD).],
     )
   ],
   verdict: [Wire format locks at Phase 0's first tagged release.],
@@ -119,4 +104,5 @@ $ make flash       ; iceprog
   book: "book/",
   roadmap: "ROADMAP.md",
   contributing: "AGENTS.md",
+  tagline: "Now go break something on purpose.",
 )

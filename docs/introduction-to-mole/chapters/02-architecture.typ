@@ -1,4 +1,4 @@
-#import "../lib.typ": *
+#import "../../presentation-template/lib.typ": *
 #import "../figures/architecture.typ": architecture-figure
 
 // Part 2: Architecture. Three boxes -> two layers -> the contract

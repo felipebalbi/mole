@@ -1,4 +1,4 @@
-# Mole --- Introduction deck.
+# Subagents deck.
 #
 # Targets:
 #   make           build slides.pdf (default)
@@ -19,7 +19,7 @@ DARK  := slides-dark.pdf
 # that escape the project root.
 ROOT  := ..
 
-DEPS  := $(SRC) $(wildcard chapters/*.typ) $(wildcard figures/*.typ) \
+DEPS  := $(SRC) $(wildcard chapters/*.typ) \
          ../presentation-template/lib.typ \
          ../presentation-template/theme.typ
 

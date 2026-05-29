@@ -5,7 +5,7 @@
 // only by the next opcode that would write the same flag. Per
 // AGENTS §3.15 and book/src/glossary.md ("until overwritten").
 
-#import "../lib.typ": *
+#import "../../presentation-template/lib.typ": *
 #import "@preview/cetz:0.4.2"
 
 #let sticky-flag-lifecycle-figure = cetz.canvas({

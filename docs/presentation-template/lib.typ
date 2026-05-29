@@ -1,40 +1,80 @@
-// lib.typ -- design system for the Mole introduction deck.
+// lib.typ -- design system for Mole presentation decks.
+//
+// Extracted from docs/introduction-to-mole/lib.typ and refactored
+// to be theme-switchable via theme.typ. Behaviour is otherwise
+// identical: same slide kinds, same atoms, same notes-mode switch.
 //
 // Conventions:
 //   - One slide kind per public function.
-//   - Token colors live at the top so the whole deck can be retuned
-//     by editing a handful of lines.
-//   - Slide kinds wrap polylux's `#slide` so chapters can stay terse.
+//   - Color tokens come from `theme.typ`; never hardcode rgb(...)
+//     in this file. Adding a third theme should be a one-file
+//     change in theme.typ.
+//   - Slide kinds wrap polylux's `#slide` so chapters can stay
+//     terse.
 //   - Notes mode is opt-in: `typst compile --input notes=true ...`
 //     renders an italic "Speaker note" block at the bottom of every
 //     content-bearing slide. In slide mode notes are inert.
+//
+// Theme selection (from a consumer deck):
+//   typst compile slides.typ                    -> melissa-light
+//   typst compile --input theme=dark slides.typ -> melissa-dark
 
 #import "@preview/polylux:0.4.0": *
+#import "theme.typ"
 
-// ---- Tokens --------------------------------------------------------
+// ---- Tokens (sourced from active theme) ---------------------------
+//
+// Token names follow ef-themes. The handful of legacy aliases
+// (bg-page, ink, ink-soft, bg-subtle, ...) are kept so existing
+// chapter sources keep working while the design system is in
+// flight; new code should prefer the ef-themes names.
 
-// Palette: ef-melissa-light (Protesilaos Stavrou, ef-themes).
-// "Melissa" = bee. Warm honey paper, dark olive ink, warm accents.
+// Background tiers.
+#let bg-main = theme.active.bg-main
+#let bg-dim  = theme.active.bg-dim
+#let bg-alt  = theme.active.bg-alt
 
-#let bg-page    = rgb("#fff6d8")  // bg-main      -- honey cream
-#let bg-tint    = rgb("#fbeec3")  // halfway between bg-page and bg-subtle
-#let bg-subtle  = rgb("#f5e9cb")  // bg-dim       -- dimmer cream panel
-#let bg-dark    = rgb("#2a2520")  // warm near-black for cover / thanks
-#let bg-code    = rgb("#2a2520")  // code panels match cover
+// Foreground tiers.
+#let fg-main = theme.active.fg-main
+#let fg-dim  = theme.active.fg-dim
+#let fg-alt  = theme.active.fg-alt
 
-#let ink         = rgb("#484431")  // fg-main     -- warm dark olive
-#let ink-soft    = rgb("#56503a")  // bumped from #6a6147 for 4.5:1 contrast
-#let ink-invert  = rgb("#fff6d8")  // bg-main on dark
-#let ink-code    = rgb("#fff6d8")
+// Named hues (ink + matching subtle background per hue).
+#let red               = theme.active.red
+#let green             = theme.active.green
+#let yellow            = theme.active.yellow
+#let blue              = theme.active.blue
+#let magenta           = theme.active.magenta
+#let cyan              = theme.active.cyan
+#let bg-red-subtle     = theme.active.bg-red-subtle
+#let bg-green-subtle   = theme.active.bg-green-subtle
+#let bg-yellow-subtle  = theme.active.bg-yellow-subtle
+#let bg-blue-subtle    = theme.active.bg-blue-subtle
+#let bg-magenta-subtle = theme.active.bg-magenta-subtle
+#let bg-cyan-subtle    = theme.active.bg-cyan-subtle
 
-#let accent      = rgb("#ba5205")  // yellow-warmer -- burnt honey
-#let secondary   = rgb("#0f708a")  // cyan-cooler   -- deep teal
-#let tertiary    = rgb("#007a0a")  // green
-#let success     = rgb("#1a7a1a")  // darker green for body-size text
-#let danger      = rgb("#c1190c")  // warm red, fits palette
-#let muted       = rgb("#80431a")  // fg-alt        -- warm chestnut
-#let muted-light = rgb("#a89682")
-#let divider-c   = rgb("#c5baa6")  // border
+// Identity / chrome.
+#let accent      = theme.active.accent
+#let secondary   = theme.active.secondary
+#let muted       = theme.active.muted
+#let muted-light = theme.active.muted-light
+#let divider-c   = theme.active.divider
+
+// Legacy aliases. New code: use the ef-themes names above.
+#let bg-page    = bg-main
+#let bg-tint    = bg-dim
+#let bg-subtle  = bg-dim
+#let bg-code    = bg-alt
+#let cover-fill = bg-alt
+#let cover-ink  = fg-main
+#let bg-dark    = bg-alt
+#let ink        = fg-main
+#let ink-soft   = fg-dim
+#let ink-invert = fg-main
+#let ink-code   = fg-main
+#let tertiary   = green
+#let success    = green
+#let danger     = red
 
 // Font families. We list Aporetic alone -- typst 0.14 warns once
 // per unresolved family in a fallback chain, so a cross-platform
@@ -87,40 +127,46 @@
 
 #let rule(w: 60pt, color: accent) = box(width: w, height: 3pt, fill: color)
 
-#let pill(body, color: secondary) = box(
-  fill: color.lighten(85%),
-  stroke: 1pt + color,
-  inset: (x: 10pt, y: 4pt),
-  radius: 14pt,
-  text(font: font-mono, size: 14pt, fill: color)[#body],
-)
+#let pill(body, kind: "info") = {
+  let c = theme.active.callout.at(kind)
+  box(
+    fill: c.fill,
+    stroke: 1pt + c.ink,
+    inset: (x: 10pt, y: 4pt),
+    radius: 14pt,
+    text(font: font-mono, size: 14pt, fill: c.ink)[#body],
+  )
+}
 
 #let tag(body, color: accent) = text(
   font: font-sans, size: 12pt, weight: "semibold",
   tracking: 2pt, fill: color,
 )[#upper(body)]
 
-// Callout box for asides, warnings, encouragement. Tints to the kind:
-//   info     -- secondary teal, neutral
-//   success  -- green, "you got this right"
-//   warn     -- accent honey, "watch out"
-//   danger   -- red, hard rule violation
+// Callout box for asides, warnings, encouragement. Looks up the
+// (fill, ink) pair for the requested kind from the active theme:
+//   info     -- bg-blue-subtle    + blue
+//   warn     -- bg-yellow-subtle  + yellow
+//   success  -- bg-green-subtle   + green
+//   danger   -- bg-red-subtle     + red
+//
+// No alpha math, no derived colors -- both values are pulled
+// verbatim from theme.typ. The stripe on the left edge uses the
+// same ink color so the callout reads as one coloured semantic
+// object.
 #let callout(body, kind: "info", icon: none) = {
-  let c = if kind == "success" { success }
-    else if kind == "warn" { accent }
-    else if kind == "danger" { danger }
-    else { secondary }
+  let c = theme.active.callout.at(kind)
   block(
-    fill: c.lighten(88%),
-    stroke: (left: 4pt + c),
+    fill: c.fill,
+    stroke: (left: 4pt + c.ink),
     inset: (x: 14pt, y: 10pt),
     radius: (right: 4pt),
     width: 100%,
   )[
     #if icon != none [
-      #text(fill: c, weight: "bold")[#icon ]
+      #text(fill: c.ink, weight: "bold")[#icon ]
     ]
-    #text(fill: ink-soft, size: 14pt)[#body]
+    #text(fill: c.ink, size: 14pt)[#body]
   ]
 }
 
@@ -185,7 +231,7 @@
   a, b, c,
 )
 
-// Unified chrome for every code block on a light slide.  Used by
+// Unified chrome for every code block on a content slide. Used by
 // the global raw-block show rule in slides.typ, by `code-panel`
 // (inline), and by `code-slide` (titled). Single source of truth
 // so the cream / radius / inset don't drift apart between render
@@ -193,10 +239,7 @@
 //
 // No stroke: the tone difference between bg-subtle (panel) and
 // bg-page (slide) carries the boundary on its own ("card on
-// paper" idiom). A previous pass tried a 0.5pt hairline; on
-// real-rendered slides the combination of stroke + inset read
-// as a visible band rather than a hairline, so the stroke is
-// gone.
+// paper" idiom).
 //
 // breakable: false so the chrome always encloses every line of
 // the block. If a code sample doesn't fit, it overflows
@@ -212,13 +255,13 @@
 )
 
 // A code panel for use inline inside content-slides.  Reads as a
-// soft cream panel with dark text -- the chrome should hint at
+// soft panel with body-colored text -- the chrome should hint at
 // "code" without competing with the slide title.
 //
 // `highlight:` is a list of (pattern, color) pairs. Each pattern is a
 // `regex(...)` value matched inside the raw body; matches are recoloured
-// to the given fill. Useful for spotlighting `expect=`, `mask=`,
-// `capture=`, opcode mnemonics, etc.
+// to the given fill. Useful for spotlighting field names, mnemonics,
+// keywords, etc.
 #let code-panel(body, size: 16pt, highlight: ()) = code-chrome-block[
   #set text(size: size)
   #show raw.where(block: true): it => block(
@@ -240,7 +283,7 @@
 // current part label (set by section-slide) and the slide number, so
 // an attendee skimming the deck always knows where they are.
 
-#let current-part = state("mole-part", none)
+#let current-part = state("deck-part", none)
 
 #let chrome() = place(
   bottom + right,
@@ -256,8 +299,8 @@
 // ---- Slide kinds ---------------------------------------------------
 
 #let cover-slide(title, subtitle, author, date) = slide[
-  #set page(fill: bg-dark)
-  #set text(fill: ink-invert)
+  #set page(fill: cover-fill)
+  #set text(fill: cover-ink)
   #place(
     left + top,
     box(width: 6pt, height: 100%, fill: accent),
@@ -270,7 +313,7 @@
       spacing: 1em,
       kicker("Introducing", color: accent),
       text(
-        font: font-serif, size: 100pt, weight: "bold", fill: ink-invert,
+        font: font-serif, size: 100pt, weight: "bold", fill: cover-ink,
       )[#title],
       text(
         font: font-serif, size: 24pt, style: "italic", fill: muted-light,
@@ -356,9 +399,9 @@
 ]
 
 // Code slide: titled slide whose body is one or more raw blocks.
-// The scoped show rule wraps each block in the shared cream chrome
-// so a `code-slide` looks identical to a `content-slide` whose
-// body is a `code-panel` -- same fill, stroke, radius, inset.
+// The scoped show rule wraps each block in the shared chrome so a
+// `code-slide` looks identical to a `content-slide` whose body is
+// a `code-panel` -- same fill, stroke, radius, inset.
 #let code-slide(title, kicker-text: none, body) = slide[
   #show raw.where(block: true): it => code-chrome-block(
     text(font: font-mono, fill: ink, size: 16pt, it),
@@ -372,8 +415,7 @@
 ]
 
 // Definition slide: big word, optional etymology / sublabel, body
-// explanation. Used to introduce a single new term per slide
-// (quarter-bit, sticky flag, BUS_MODE, ...).
+// explanation. Used to introduce a single new term per slide.
 #let definition-slide(term, sub: none, kicker-text: "Definition", body) = slide[
   #pad(y: 1em, grid(
     rows: (auto, 1fr),
@@ -392,12 +434,7 @@
 ]
 
 // Try-it slide: poses a thought-experiment and asks the audience to
-// pause before the answer lands on the next slide. The prompt is the
-// content; `hint` is an optional faint nudge under it.
-//
-// Both the "answer on the next slide" banner and the chrome footer
-// are anchored with #place so a long prompt can't push them onto a
-// new page (polylux auto-paginates content that overflows).
+// pause before the answer lands on the next slide.
 #let try-it-slide(prompt, hint: none, kicker-text: "Try it") = slide[
   #pad(y: 1em, grid(
     rows: (auto, auto, 1fr, auto),
@@ -426,10 +463,7 @@
 ]
 
 // Provocation slide: a rhetorical opener / food-for-thought hook
-// that does NOT have a follow-up answer slide. Visually a sibling
-// of try-it-slide (same prompt box + optional hint) but without the
-// "answer on the next slide" banner -- the audience is being asked
-// to sit with the question, not to be quizzed.
+// that does NOT have a follow-up answer slide.
 #let provocation-slide(
   prompt,
   hint: none,
@@ -460,7 +494,6 @@
 ]
 
 // Compare slide: two-column compare/contrast, optional bottom verdict.
-// Useful for before/after, controller-vs-target, OD-vs-PP, etc.
 #let compare-slide(
   title,
   left-title, left,
@@ -497,9 +530,7 @@
   #chrome()
 ]
 
-// Recap slide: end-of-part summary with checkmarks. Optional `next`
-// pointer to the next part, plus an optional `deeper` pointer into
-// the long-form mdBook -- the deck is a tour, the book is the manual.
+// Recap slide: end-of-part summary with checkmarks.
 #let recap-slide(
   title, points, next: none, deeper: none, kicker-text: "Recap",
 ) = slide[
@@ -521,17 +552,19 @@
   #chrome()
 ]
 
-// Thank-you slide. Warm dark close with a short list of where to
-// land next: the mdBook, the roadmap, the repo. Each pointer is the
-// filesystem / URL path itself so the audience can copy/paste.
+// Thank-you slide. Inverted-chrome close with a short list of
+// pointers (repo, manual, etc). Each pointer is the filesystem /
+// URL path itself so the audience can copy/paste.
 #let thank-you-slide(
   repo,
   book: none,
   roadmap: none,
   contributing: none,
+  headline: "Thanks.",
+  tagline: none,
 ) = slide[
-  #set page(fill: bg-dark)
-  #set text(fill: ink-invert)
+  #set page(fill: cover-fill)
+  #set text(fill: cover-ink)
   #grid(
     rows: (1fr, auto, auto, 1fr),
     row-gutter: 1.2em,
@@ -539,11 +572,13 @@
     align(center, stack(
       spacing: 0.5em,
       text(
-        font: font-serif, size: 96pt, weight: "bold", fill: ink-invert,
-      )[Thanks.],
-      text(
-        font: font-serif, size: 20pt, style: "italic", fill: muted-light,
-      )[Now go break something on purpose.],
+        font: font-serif, size: 96pt, weight: "bold", fill: cover-ink,
+      )[#headline],
+      if tagline != none {
+        text(
+          font: font-serif, size: 20pt, style: "italic", fill: muted-light,
+        )[#tagline]
+      },
     )),
     align(center, box(width: 78%, grid(
       columns: (auto, 1fr),
@@ -553,24 +588,24 @@
       text(
         font: font-sans, size: 12pt, fill: accent, tracking: 2pt,
       )[#upper("Repo")],
-      text(font: font-mono, size: 14pt, fill: ink-invert)[#repo],
+      text(font: font-mono, size: 14pt, fill: cover-ink)[#repo],
       ..if book != none {(
         text(
           font: font-sans, size: 12pt, fill: accent, tracking: 2pt,
         )[#upper("Manual")],
-        text(font: font-mono, size: 14pt, fill: ink-invert)[#book],
+        text(font: font-mono, size: 14pt, fill: cover-ink)[#book],
       )} else { () },
       ..if roadmap != none {(
         text(
           font: font-sans, size: 12pt, fill: accent, tracking: 2pt,
         )[#upper("Design")],
-        text(font: font-mono, size: 14pt, fill: ink-invert)[#roadmap],
+        text(font: font-mono, size: 14pt, fill: cover-ink)[#roadmap],
       )} else { () },
       ..if contributing != none {(
         text(
           font: font-sans, size: 12pt, fill: accent, tracking: 2pt,
         )[#upper("Hack on it")],
-        text(font: font-mono, size: 14pt, fill: ink-invert)[#contributing],
+        text(font: font-mono, size: 14pt, fill: cover-ink)[#contributing],
       )} else { () },
     ))),
     [],

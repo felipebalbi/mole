@@ -13,17 +13,21 @@ the answer lands on the following slide. The closing slide points
 to the long-form mdBook (`book/`) for everything the deck
 only had time to sketch.
 
+Built on the shared `docs/presentation-template/` design system
+(see that directory's `README.md` for theme switching, slide
+kinds, and authoring guidance).
+
 ## Build
 
 Requirements:
 
 - [Typst](https://typst.app) 0.14.2 or newer.
 - Polylux 0.4.0 and cetz 0.4.2 (resolved automatically from the
-  typst package cache; pinned in `lib.typ` and the figures under
-  `figures/`).
+  typst package cache; pinned in the shared template and in the
+  figures under `figures/`).
 - The [Aporetic](https://github.com/SaschaSommer/aporetic) font
   family installed on the OS font path (`Aporetic Sans`,
-  `Aporetic Serif`, `Aporetic Sans Mono`). The deck declares
+  `Aporetic Serif`, `Aporetic Sans Mono`). The template declares
   Aporetic as a hard requirement; without it typst falls back to
   its bundled default and emits one warning per family until you
   install it.
@@ -32,30 +36,33 @@ Requirements:
 From this directory:
 
 ```sh
-make             # builds slides.pdf
-make notes       # builds slides-notes.pdf (speaker notes inlined)
-make all         # both
+make             # builds slides.pdf (melissa-light)
+make notes       # builds slides-notes.pdf with speaker notes
+make dark        # builds slides-dark.pdf (melissa-dark)
+make all         # all three
 make watch       # auto-rebuild slides.pdf while editing
 make clean       # remove built PDFs
 ```
 
-Or invoke Typst directly:
+Or invoke Typst directly. The `--root ..` flag is mandatory:
+Typst forbids imports that escape the project root, and the
+shared template sits one level up at
+`../presentation-template/`.
 
 ```sh
-typst compile slides.typ                       # slides only
-typst compile --input notes=true slides.typ    # with speaker notes
+typst compile --root .. slides.typ
+typst compile --root .. --input notes=true slides.typ
+typst compile --root .. --input theme=dark slides.typ
 ```
 
-Both produced PDFs (`slides.pdf`, `slides-notes.pdf`) are
-gitignored.
+All produced PDFs (`slides.pdf`, `slides-notes.pdf`,
+`slides-dark.pdf`) are gitignored.
 
 ## Layout
 
 ```text
 slides.typ            ; entry point: page setup, fonts,
                       ;   include list across the eight parts.
-lib.typ               ; design system: tokens, atoms,
-                      ;   slide kinds, notes-mode switch.
 chapters/             ; one .typ file per part.
   00-promise.typ      ; cover, what-you-get, opening hook.
   01-the-problem.typ  ; compliance vs conformance, today's gaps.
@@ -73,28 +80,26 @@ figures/              ; reusable cetz diagrams (typst code,
 Makefile              ; build wrapper.
 ```
 
+Every chapter and every figure imports the shared design system
+explicitly:
+
+```typst
+#import "../../presentation-template/lib.typ": *
+```
+
+Typst's `#include` does not propagate import scope, so each file
+that uses any slide kind, atom, or token must `#import` the
+template itself.
+
 ## Slide kinds
 
-`lib.typ` exposes a small vocabulary of slide kinds so chapters can
-stay terse and the styling stays consistent:
-
-- `cover-slide`, `section-slide`, `thank-you-slide` -- dark chrome,
-  no footer.
-- `content-slide` -- the everyday slide.
-- `stat-slide` -- one big number, optional caption.
-- `definition-slide` -- one word, italic subtitle, body.
-- `try-it-slide` -- prompt + hint + "answer on the next slide"
-  banner, anchored so a long prompt can't push the banner onto
-  an orphan page.
-- `provocation-slide` -- sibling of `try-it-slide` for rhetorical
-  / food-for-thought openers with no follow-up answer (no
-  banner, gentler kicker).
-- `compare-slide` -- two columns + optional verdict.
-- `code-slide` -- titled slide with a dark code panel as body.
-- `quote-slide` -- big italic pull-quote.
-- `recap-slide` -- end-of-part summary with checkmarks, optional
-  "next up" callout, optional "go deeper" pointer into the
-  mdBook.
+The shared template (`../presentation-template/lib.typ`) exposes
+a small vocabulary of slide kinds so chapters can stay terse and
+the styling stays consistent: `cover-slide`, `section-slide`,
+`content-slide`, `stat-slide`, `definition-slide`, `try-it-slide`,
+`provocation-slide`, `compare-slide`, `code-slide`, `quote-slide`,
+`recap-slide`, `thank-you-slide`. See
+`../presentation-template/README.md` for the per-kind reference.
 
 ## Speaker notes
 
@@ -106,9 +111,8 @@ rehearsing the live talk.
 
 ## Palette + typography
 
-- ef-melissa-light (Protesilaos Stavrou) palette: warm honey
-  paper, dark olive ink, burnt-honey accent.
-- Aporetic Sans for kickers / chrome, Aporetic Serif for titles
-  and body, Aporetic Sans Mono for code.
-- Single accent for emphasis, secondary teal for left-side
-  compare cues, muted chestnut for asides.
+The default `melissa-light` theme is warm honey paper with dark
+olive ink and a burnt-honey accent; `melissa-dark` is the
+inverted companion. Both palettes and the Aporetic typography
+choices live in `../presentation-template/theme.typ`; this deck
+inherits them unchanged.

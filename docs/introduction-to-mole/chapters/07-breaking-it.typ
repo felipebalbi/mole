@@ -1,4 +1,4 @@
-#import "../lib.typ": *
+#import "../../presentation-template/lib.typ": *
 #import "../figures/quarter-bit-timing.typ": quarter-bit-figure
 
 // Part 6: Breaking it on purpose. Same engine, same SDA/SCL, but now
