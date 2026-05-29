@@ -847,14 +847,29 @@ case class BitCycleEngineCore(cfg: MoleConfig) extends Component {
 
           // -- JMP --------------------------------------------------
           //
-          // Field layout: [10:0]=addr (11-bit absolute). Wraps
-          // modulo `2^pcWidth` --- the SDK guarantees valid
-          // targets. Out-of-range fetches manifest as reads from
-          // the result-ring SPRAM region; that decodes to garbage
-          // and usually traps to the malformed-instruction HALT.
+          // Field layout: [10:0]=addr (11-bit absolute, wire-format
+          // range 0..2047 per INV-WIRE-JMP-ADDR). The host encoder
+          // enforces only the wire cap; board variants with
+          // `programWordCount < 2048` have a narrower runtime valid
+          // range, so the engine traps when the JMP target falls at
+          // or above the actual program memory.
+          //
+          // The trap fires only on out-of-range targets. With
+          // `programWordCount = 2048` (the default), the comparison
+          // is dead code --- the operand max (2047) is the legal
+          // max --- but the guard stays present so smaller program
+          // memories cannot silently truncate via `.resize(pcWidth)`
+          // (F-FPGA-004). The 12-bit literal width is one bit wider
+          // than the 11-bit operand so the `>=` comparison is
+          // unambiguous at the boundary.
           is(Opcode.jmp) {
-            pc := instrReg(10 downto 0).asUInt.resize(pcWidth)
-            goto(fetchState)
+            val jmpTarget = instrReg(10 downto 0).asUInt
+            when(jmpTarget.resize(12 bits) >= U(programWordCount, 12 bits)) {
+              enterHalt(B"1111")
+            } otherwise {
+              pc := jmpTarget.resize(pcWidth)
+              goto(fetchState)
+            }
           }
 
           // -- BRANCH_ON --------------------------------------------

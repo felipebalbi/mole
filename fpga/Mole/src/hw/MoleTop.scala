@@ -199,6 +199,12 @@ case class MoleTop(
     val sim_engineDone = (!useBlackBox) generate (out Bool ())
     val sim_loaderLoaded = (!useBlackBox) generate (out Bool ())
     val sim_loaderFault = (!useBlackBox) generate (out Bool ())
+
+    /** Sticky observable for host CTS#-contract violations (F-FPGA-007).
+      * Asserts whenever a UART RX byte arrives while the phase FSM is not in
+      * `acceptLoadState`. Sim-only tap.
+      */
+    val sim_ctsViolationObserved = (!useBlackBox) generate (out Bool ())
   }
   noIoPrefix()
 
@@ -387,6 +393,27 @@ case class MoleTop(
       True
     )
 
+    // ----------------------------------------------------------------
+    // CTS#-violation observability (F-FPGA-007).
+    //
+    // During `runningState` / `drainingState` the phase FSM drives
+    // `acceptRxComb := False` and CTS# is deasserted; per the host
+    // CTS contract the host MUST stop sending bytes. If it does
+    // not, the UART RX byte is silently consumed and discarded by
+    // the Mux above. This sticky register latches True on the
+    // first such violation so a post-mortem operator has *some*
+    // visible signal that the host misbehaved.
+    //
+    // Cleared only by fabric reset (no runtime clear path is
+    // exposed by design --- bring-up debug aid, not a recoverable
+    // fault). Routed both to the red LED (OR'd with loaderFault
+    // below) and, in sim builds, to `sim_ctsViolationObserved`.
+    // ----------------------------------------------------------------
+    val ctsViolationObservedReg = Reg(Bool()) init False
+    when(!acceptRxComb && uartRx.io.payload.valid) {
+      ctsViolationObservedReg := True
+    }
+
     loader.io.rxFramingError := uartRx.io.framingError && acceptRxComb
     loader.io.rxParityError := uartRx.io.parityError && acceptRxComb
     loader.io.rxOverrun := uartRx.io.overrun && acceptRxComb
@@ -490,8 +517,12 @@ case class MoleTop(
     // LEDs
     // ----------------------------------------------------------------
 
-    // Red: pulse-stretched loader fault. ~175 ms at 24 MHz so a
-    // 1-cycle pulse is comfortably visible.
+    // Red: pulse-stretched loader fault, OR'd with the sticky
+    // CTS#-violation observable (F-FPGA-007). Both are bring-up
+    // signals indicating a host-protocol violation, so sharing
+    // io_ledR is intentional. Future SKUs with more pins can
+    // route ctsViolationObservedReg to a dedicated LED if
+    // eyeball-distinguishability becomes important.
     val faultStretchWidth = 22
     val faultStretchMax = (1 << faultStretchWidth) - 1
     val faultCounter = Reg(UInt(faultStretchWidth bits)) init 0
@@ -500,7 +531,7 @@ case class MoleTop(
     } elsewhen (faultCounter =/= 0) {
       faultCounter := faultCounter - 1
     }
-    io.io_ledR := faultCounter =/= 0
+    io.io_ledR := (faultCounter =/= 0) || ctsViolationObservedReg
 
     // Green: engine running (engine is busy, not in idle).
     io.io_ledG := !engine.io.done
@@ -527,6 +558,7 @@ case class MoleTop(
       io.sim_engineDone := engine.io.done
       io.sim_loaderLoaded := loader.io.loaded
       io.sim_loaderFault := loader.io.fault
+      io.sim_ctsViolationObserved := ctsViolationObservedReg
     }
   }
 }
