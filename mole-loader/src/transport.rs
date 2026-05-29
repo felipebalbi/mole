@@ -38,8 +38,9 @@ use serialport::{DataBits, FlowControl, Parity, SerialPort, StopBits};
 use crate::error::{TransportError, TransportPhase};
 
 /// Default baud rate the Mole engine speaks (see
-/// `fpga/Mole/WIRE_FORMAT.md`).
-pub const DEFAULT_BAUD: u32 = 1_000_000;
+/// `fpga/Mole/WIRE_FORMAT.md`). Re-exported from
+/// [`mole_abi::DEFAULT_BAUD`] so host and engine share one source.
+pub const DEFAULT_BAUD: u32 = mole_abi::DEFAULT_BAUD;
 
 /// Default per-operation I/O timeout. Big enough that a slow program
 /// run plus the ring drain can complete; small enough that a missing
@@ -56,7 +57,7 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 /// bytes the engine will never send. If you have rebuilt the
 /// engine with a non-default `resultRingByteCount`, pass
 /// `--ring-bytes` to match.
-pub const DEFAULT_RING_BYTES: usize = 8192;
+pub const DEFAULT_RING_BYTES: usize = mole_abi::RESULT_RING_BYTE_COUNT;
 
 /// Maximum I/O chunk size for incremental writes / reads. Small
 /// enough to give `indicatif` a smooth animation; large enough that

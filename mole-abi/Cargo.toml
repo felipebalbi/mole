@@ -1,0 +1,17 @@
+[package]
+name = "mole-abi"
+version = "0.1.0"
+description = "Shared wire-protocol constants for the Mole bytecode engine and its host tools. Mirrors values declared canonically in fpga/Mole/src/hw/."
+edition.workspace = true
+rust-version.workspace = true
+authors.workspace = true
+repository.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+name = "mole_abi"
+path = "src/lib.rs"
+
+# No dependencies --- this is pure constants.
+[dependencies]

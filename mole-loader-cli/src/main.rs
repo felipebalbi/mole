@@ -60,10 +60,12 @@ struct Cli {
 
     /// Result-ring size in bytes the engine will drain back. Default
     /// matches `MoleConfig.resultRingByteCount` on the Verde build
-    /// (4096 words = 8192 bytes). Must match the engine bitstream:
-    /// under-sized leaves the HALT word in the kernel buffer and the
-    /// next decode trips on a mid-ring record; over-sized blocks the
-    /// read on bytes the engine will never send.
+    /// (4096 words = 8192 bytes), mirrored host-side as
+    /// `mole_abi::RESULT_RING_BYTE_COUNT`. Must match the engine
+    /// bitstream: under-sized leaves the HALT word in the kernel
+    /// buffer and the next decode trips on a mid-ring record;
+    /// over-sized blocks the read on bytes the engine will never
+    /// send.
     #[arg(long = "ring-bytes", default_value_t = DEFAULT_RING_BYTES)]
     ring_bytes: usize,
 

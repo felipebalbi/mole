@@ -54,6 +54,7 @@
 //! non-zero.
 
 use crate::error::RingError;
+use mole_abi::{halt, record_tag, record_width_words, revision};
 
 /// REVISION record reported by the engine in the first two ring
 /// words. Format per `fpga/Mole/src/hw/Revision.scala`:
@@ -81,10 +82,12 @@ impl Revision {
     /// (i.e. the patch field); `word_hi` is the upper 16 bits
     /// (major and minor packed `[15:8]` / `[7:0]`).
     pub fn from_words(word_lo: u16, word_hi: u16) -> Self {
+        let word = ((word_hi as u32) << 16) | (word_lo as u32);
+        let (major, minor, patch) = revision::unpack(word);
         Self {
-            major: (word_hi >> 8) as u8,
-            minor: (word_hi & 0xFF) as u8,
-            patch: word_lo,
+            major,
+            minor,
+            patch,
         }
     }
 }
@@ -264,7 +267,7 @@ pub fn decode_ring(bytes: &[u8]) -> Result<DecodedRing, RingError> {
 
     // HALT lives in the very last word (`resultLimit` slot).
     let halt_word = words[total_words - 1];
-    if halt_word >> 14 != 0b11 {
+    if (halt_word >> halt::TAG_SHIFT) & halt::TAG_MASK != halt::TAG_HALT {
         return Err(RingError::NoHaltAtTail { word: halt_word });
     }
     // Reject structurally invalid HALT words first (reserved low
@@ -274,20 +277,20 @@ pub fn decode_ring(bytes: &[u8]) -> Result<DecodedRing, RingError> {
     // `halt_word` for forensic value. 0xF is the documented
     // engine-trap code and passes through to `HaltStatus` where
     // `is_engine_trap()` surfaces it.
-    let reserved = (halt_word & 0x00FF) as u8;
+    let reserved = (halt_word & halt::RESERVED_BITS_MASK) as u8;
     if reserved != 0 {
         return Err(RingError::HaltReservedBitsSet {
             halt_word,
             reserved,
         });
     }
-    let status = ((halt_word >> 8) & 0xF) as u8;
-    if status == 0xD || status == 0xE {
+    let status = ((halt_word >> halt::STATUS_SHIFT) & halt::STATUS_MASK) as u8;
+    if status == halt::STATUS_RESERVED_LOW || status == halt::STATUS_RESERVED_HIGH {
         return Err(RingError::HaltStatusReserved { status, halt_word });
     }
     let halt = HaltStatus {
-        overflow: (halt_word & (1 << 13)) != 0,
-        mismatch: (halt_word & (1 << 12)) != 0,
+        overflow: (halt_word & (1 << halt::OVERFLOW_BIT)) != 0,
+        mismatch: (halt_word & (1 << halt::MISMATCH_BIT)) != 0,
         status,
     };
 
@@ -319,17 +322,17 @@ pub fn decode_ring(bytes: &[u8]) -> Result<DecodedRing, RingError> {
     let mut records = Vec::new();
     while offset < record_end_word {
         let word = words[offset];
-        let tag = word >> 14;
+        let tag = (word >> record_tag::SHIFT) & record_tag::MASK;
         match tag {
-            0b00 => {
+            record_tag::CAPTURE => {
                 records.push(Record::Capture {
                     sda: (word & 1) != 0,
                 });
-                offset += 1;
+                offset += record_width_words::CAPTURE;
             }
-            0b10 => {
+            record_tag::MARK => {
                 let remaining = record_end_word - offset;
-                if remaining < 3 {
+                if remaining < record_width_words::MARK {
                     return Err(RingError::TruncatedMark {
                         offset_words: offset,
                         remaining_words: remaining,
@@ -340,9 +343,9 @@ pub fn decode_ring(bytes: &[u8]) -> Result<DecodedRing, RingError> {
                 let ts_hi = words[offset + 2] as u32;
                 let timestamp = (ts_hi << 16) | ts_lo;
                 records.push(Record::Mark { label, timestamp });
-                offset += 3;
+                offset += record_width_words::MARK;
             }
-            0b01 | 0b11 => {
+            record_tag::RESERVED | record_tag::HALT => {
                 // Reserved tag mid-stream OR HALT-tagged word
                 // before the tail slot. Either way the engine
                 // stopped writing real records at `offset`; the
@@ -350,7 +353,7 @@ pub fn decode_ring(bytes: &[u8]) -> Result<DecodedRing, RingError> {
                 // and bookkeep the gap.
                 break;
             }
-            _ => unreachable!("tag is >> 14 of a u16, only 4 possible values"),
+            _ => unreachable!("tag is 2 bits, only 4 possible values"),
         }
     }
 

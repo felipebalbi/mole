@@ -314,12 +314,10 @@ pub(crate) fn lex(source: &str, filename: &str) -> Result<Vec<Statement>> {
 /// Maximum program-memory budget, in 16-bit words, that the engine
 /// accepts in a single frame. Mirrors the `1..=MAX_PROGRAM_WORDS`
 /// range gate in `frame.rs` (see `WIRE_FORMAT.md` §encoding-width).
-/// Kept here as a local const for now; a follow-up commit
-/// consolidates this and other wire-format constants into a
-/// dedicated `mole-abi` crate so the `.dw` operand-count cap below,
+/// Sourced from `mole_abi` so the `.dw` operand-count cap below,
 /// the pass1 PC overflow gate, and the frame builder cannot drift
 /// apart.
-pub(crate) const MAX_PROGRAM_WORDS: usize = 2048;
+pub(crate) use mole_abi::MAX_PROGRAM_WORDS;
 
 fn pc_advance_for(stmt: &Statement) -> Result<u16> {
     match stmt.directive.as_deref() {

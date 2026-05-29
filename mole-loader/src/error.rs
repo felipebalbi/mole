@@ -89,9 +89,13 @@ pub enum FrameError {
     },
 
     /// Frame's `len` header is outside the engine's accepted range
-    /// `1..=2048`. Symmetric with [`mole_asm`]'s
-    /// `AsmError::FrameTooLarge` on the encoder side.
-    #[error("frame word count {len_words} outside engine range 1..=2048")]
+    /// `1..=mole_abi::MAX_PROGRAM_WORDS` (currently 2048). Symmetric
+    /// with [`mole_asm`]'s `AsmError::FrameTooLarge` on the encoder
+    /// side.
+    #[error(
+        "frame word count {len_words} outside engine range \
+         1..=mole_abi::MAX_PROGRAM_WORDS"
+    )]
     LengthOutOfRange {
         /// Word count the header claims.
         len_words: u16,

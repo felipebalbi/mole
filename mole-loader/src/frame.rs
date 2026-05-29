@@ -54,7 +54,7 @@ pub fn verify_frame(bytes: &[u8]) -> Result<Vec<u16>, FrameError> {
     // as `LengthOutOfRange` is more informative than `TooShort`
     // (which the caller might fix by appending data).
     let len_words = u16::from_le_bytes([bytes[0], bytes[1]]);
-    if !(1..=2048).contains(&len_words) {
+    if !(1..=mole_abi::MAX_PROGRAM_WORDS as u16).contains(&len_words) {
         return Err(FrameError::LengthOutOfRange { len_words });
     }
 
