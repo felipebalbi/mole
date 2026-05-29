@@ -157,6 +157,25 @@ pub enum RingError {
         /// HALT terminator.
         remaining_words: usize,
     },
+
+    /// The buffer size handed to
+    /// [`crate::ring::decode_ring_strict`] does not match the
+    /// configured ring size. Catches the silent-prefix /
+    /// silent-suffix hazard `decode_ring` cannot detect on its own
+    /// (it only checks "even byte count, ≥ 6, HALT tag at tail").
+    #[error(
+        "ring byte count {got} does not match configured ring size {expected} \
+         (engine drains exactly resultRingByteCount per HALT; \
+         mis-sized buffers usually mean the host asked for the wrong \
+         --ring-bytes or the serial link dropped framing)"
+    )]
+    UnexpectedByteCount {
+        /// Actual byte count of the buffer.
+        got: usize,
+        /// Configured ring size (e.g.
+        /// [`crate::transport::DEFAULT_RING_BYTES`]).
+        expected: usize,
+    },
 }
 
 /// Serial-port transport failures.

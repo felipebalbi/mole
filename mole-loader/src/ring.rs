@@ -224,6 +224,15 @@ pub struct DecodedRing {
 /// buffers are rejected because the decoder cannot tell whether a
 /// suffix is missing or just trimmed.
 ///
+/// **This function does *not* enforce that `bytes.len()` equals the
+/// configured ring size.** It happily decodes any buffer whose length
+/// is a non-zero even number ≥ 6 and whose tail word carries the
+/// HALT tag. For production reads --- where you know exactly how
+/// many bytes you asked the engine to drain --- use
+/// [`decode_ring_strict`] instead, which rejects any
+/// length-vs-expected mismatch before parsing. The lax form is kept
+/// for tests and tooling that synthesise short rings on purpose.
+///
 /// # Errors
 ///
 /// See [`RingError`] for the full catalogue. The most common
@@ -335,6 +344,34 @@ pub fn decode_ring(bytes: &[u8]) -> Result<DecodedRing, RingError> {
         halt,
         trailing_garbage_words,
     })
+}
+
+/// Strict wrapper around [`decode_ring`] that first checks
+/// `bytes.len() == expected_bytes`.
+///
+/// Use this in production read paths --- the host always knows the
+/// configured `resultRingByteCount` (see
+/// [`crate::transport::DEFAULT_RING_BYTES`]) and a length mismatch
+/// is the single loudest signal that the drain went sideways
+/// (wrong `--ring-bytes`, serial link dropped framing, host's
+/// kernel buffer kept a stale prefix from the previous run, etc.).
+/// The lax [`decode_ring`] cannot detect a prepended-bytes prefix
+/// or a truncated suffix as long as the resulting tail still
+/// happens to carry a HALT-tagged word; this wrapper closes that
+/// hole at the cost of one extra `usize` argument.
+///
+/// # Errors
+///
+/// [`RingError::UnexpectedByteCount`] if the input is the wrong
+/// size; otherwise whatever [`decode_ring`] would return.
+pub fn decode_ring_strict(bytes: &[u8], expected_bytes: usize) -> Result<DecodedRing, RingError> {
+    if bytes.len() != expected_bytes {
+        return Err(RingError::UnexpectedByteCount {
+            got: bytes.len(),
+            expected: expected_bytes,
+        });
+    }
+    decode_ring(bytes)
 }
 
 #[cfg(test)]
@@ -665,6 +702,45 @@ mod tests {
             ]
         );
         assert_eq!(ring.trailing_garbage_words, 0);
+    }
+
+    #[test]
+    fn decode_ring_strict_rejects_size_mismatch() {
+        // A perfectly-valid 3-word ring (REVISION + HALT) handed to
+        // `decode_ring_strict` with a 4096-word expectation must be
+        // rejected --- this is the silent-prefix / silent-suffix
+        // hazard the strict wrapper exists to close.
+        let bytes = build_ring((0, 0), &[], 0xC000, 3);
+        let err = decode_ring_strict(&bytes, 8192).unwrap_err();
+        assert_eq!(
+            err,
+            RingError::UnexpectedByteCount {
+                got: 6,
+                expected: 8192,
+            }
+        );
+        // Exact match passes through and decodes identically to the
+        // lax form.
+        assert_eq!(
+            decode_ring_strict(&bytes, bytes.len()).unwrap(),
+            decode_ring(&bytes).unwrap(),
+        );
+    }
+
+    #[test]
+    fn decode_ring_strict_catches_prefix_garbage() {
+        // The capability-gap test in tests/adversarial.rs documents
+        // that `decode_ring` happily accepts a prepended-prefix
+        // buffer if the tail still tags as HALT. The strict wrapper
+        // is exactly the fix for production reads.
+        let inner = build_ring((0x0001, 0x0203), &[], 0xC000, 3);
+        let mut buf = vec![0xAA, 0xBB];
+        buf.extend_from_slice(&inner);
+        // Lax accepts (documented hazard).
+        assert!(decode_ring(&buf).is_ok());
+        // Strict refuses because buf.len() != expected ring size.
+        let err = decode_ring_strict(&buf, inner.len()).unwrap_err();
+        assert!(matches!(err, RingError::UnexpectedByteCount { .. }));
     }
 
     #[test]
