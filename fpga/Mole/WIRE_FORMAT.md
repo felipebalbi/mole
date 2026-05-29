@@ -370,6 +370,27 @@ port.write(build_frame([0x9000, 0x6000]))   # placeholder opcodes
 
 ---
 
+---
+
+## 6a. Bus-safety invariant (INV-BUS-NO-CONTENTION)
+
+This document covers the host-link wire format. The companion
+invariant on the *electrical* bus (SDA / SCL) is that the engine
+never simultaneously asserts both `driveLow` and `driveHigh` on
+the same `MoleBus` line --- doing so would cause push-pull
+shoot-through on PP-class `BUS_MODE`s. The canonical statement
+of this rule, the decode truth table, and the rationale live in
+[`AGENTS.md`](AGENTS.md) §"Open-drain primitive: custom MoleBus";
+that file is the single source of truth. Defense-in-depth is
+layered: `SymbolDecoder` is structurally incapable of producing
+the contention pair, a sim-time `assert` in `BitCycleEngineCore`
+catches any future writer that bypasses the decoder, and a second
+`assert` in `MoleIoBufUp5k` guards the pad boundary. The
+exhaustive sweep at `sim-symbol-decoder-contention` audits every
+`(BUS_MODE, tx_symbol)` cell on every CI run.
+
+---
+
 ## 7. Versioning
 
 This is the **v0** wire format, frozen at the Phase 2 release.

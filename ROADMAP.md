@@ -802,6 +802,19 @@ for a future `raw_override` escape, see v0.5). In OD modes
 floats high via the external pull-up); in PP modes `recessive`
 is an *active* logic 1 while `hiz` is genuine driver-off.
 
+- **Bus-safety invariant (INV-BUS-NO-CONTENTION).** No
+  `(BUS_MODE, tx_symbol)` cell of the decode table above
+  produces `(driveLow=1, driveHigh=1)`; doing so would
+  shoot-through the PP driver against itself on PP-class
+  bus modes. The canonical statement, decode table, and
+  rationale live in
+  [`fpga/Mole/AGENTS.md`](fpga/Mole/AGENTS.md) §"Open-drain
+  primitive: custom MoleBus". Defense-in-depth: structural
+  guarantee in `SymbolDecoder`, sim-time `assert` in
+  `BitCycleEngineCore`, sim-time `assert` in
+  `MoleIoBufUp5k`, and an exhaustive `(BUS_MODE,
+  tx_symbol)` sweep at `make sim-symbol-decoder-contention`.
+
 `hdr-ddr` uses the same push-pull SCL driver class as `i3c-PP`
 but reads its quarter-bit timing word from a separate
 `LOAD_TIMING reg=11` slot (`hdr-ddr-freq`) so that HDR-DDR's

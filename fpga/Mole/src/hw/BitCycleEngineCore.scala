@@ -208,6 +208,32 @@ case class BitCycleEngineCore(cfg: MoleConfig) extends Component {
   io.bus.scl.driveLow := sclDriveLow
   io.bus.scl.driveHigh := sclDriveHigh
 
+  // Defense-in-depth for INV-BUS-NO-CONTENTION
+  // (`fpga/Mole/AGENTS.md` §"Open-drain primitive: custom MoleBus").
+  //
+  // `SymbolDecoder` makes contention structurally impossible for every
+  // (BUS_MODE, tx_symbol) pair, but this assert catches any future
+  // writer that bypasses the decoder and sets both driver enables
+  // directly on these registers. The pad-level assert in
+  // `MoleIoBufUp5k` is the second line of defense and does NOT fire
+  // under `useBlackBox = true` on silicon (SB_IO interprets the
+  // illegal combination as PP-drive-high), so the engine-side check
+  // is the canonical sim-time guard.
+  //
+  // SpinalHDL `assert(...)` in non-formal context emits a sim-only
+  // check; it does NOT synthesise into the bitstream, so there is no
+  // area cost on the FPGA.
+  assert(
+    !(sdaDriveLow && sdaDriveHigh),
+    "BitCycleEngineCore: SDA bus contention " +
+      "(driveLow && driveHigh both set)"
+  )
+  assert(
+    !(sclDriveLow && sclDriveHigh),
+    "BitCycleEngineCore: SCL bus contention " +
+      "(driveLow && driveHigh both set)"
+  )
+
   // ------------------------------------------------------------------
   // Engine state
   // ------------------------------------------------------------------

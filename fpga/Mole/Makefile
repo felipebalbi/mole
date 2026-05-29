@@ -91,7 +91,7 @@ sim: sim-config sim-opendrain sim-baud-gen sim-rx-sync \
      sim-uart-tx sim-uart-rx sim-uart sim-spram sim-isa \
      sim-engine-smoke sim-engine-full sim-engine-target sim-pll \
      sim-crc sim-iobuf sim-loader-fsm sim-drainer-fsm sim-top \
-     sim-top-flow-control ## Run all simulations
+     sim-top-flow-control sim-symbol-decoder-contention ## Run all simulations
 
 # Per-block sim / gen targets land here once their hint blocks in
 # TODO.md flip from 🔲 to ✅. The naming contract is fixed:
@@ -192,6 +192,9 @@ sim-top: ## End-to-end MoleTop sim: UART load -> engine -> UART results (Step 14
 sim-top-flow-control: ## End-to-end MoleTop sim: UART RTS#/CTS# hardware flow control
 	$(SBT) -batch "runMain $(PACKAGE).MoleTopFlowControlSim"
 
+sim-symbol-decoder-contention: ## Exhaustive (BUS_MODE, tx_symbol) no-contention sweep
+	$(SBT) -batch "runMain $(PACKAGE).SymbolDecoderContentionSim"
+
 # gen target -- the canonical Verilog entrypoint is MoleTopVerilog;
 # generated module is MoleTop. The generated file lives at gen/MoleTop.v
 # and is gitignored.
@@ -228,4 +231,5 @@ help: ## Show this help (every target with a ## description)
         sim-uart-tx sim-uart-rx sim-uart sim-spram sim-isa \
         sim-engine-smoke sim-engine-full sim-engine-target sim-pll \
         sim-crc sim-iobuf sim-loader-fsm sim-drainer-fsm sim-top \
-        sim-top-flow-control gen waves flash clean distclean help
+        sim-top-flow-control sim-symbol-decoder-contention \
+        gen waves flash clean distclean help
