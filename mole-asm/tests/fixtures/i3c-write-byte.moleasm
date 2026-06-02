@@ -1,0 +1,187 @@
+; i3c-write-byte --- minimal I3C SDR controller-write of one data
+; byte to a target at 7-bit dynamic address 0x4A. Designed as the
+; first-light Step 18 program (TODO Step 18 --- MCXA dev board as
+; I3C target): the smallest I3C SDR transaction the engine can
+; drive, exercising every OD <-> PP bus-mode transition and the
+; T-bit (odd-parity) calculation that distinguishes I3C SDR from
+; I2C.
+;
+; Transaction shape:
+;
+;   SET_BUS_MODE i3c-OD       ; open-drain phase
+;   START                     ; SDA fall while SCL high (OD)
+;   addr+W = 0x94 (8 bits)    ; 7-bit 0x4A << 1 | RnW=0, OD
+;   slave ACK (controller releases SDA, target pulls low) -- OD
+;
+;   SET_BUS_MODE i3c-PP       ; switch to push-pull for SDR data
+;   data byte 0xA5 (8 bits)   ; controller drives MSB-first, PP
+;   T-bit                     ; odd parity of the 8 data bits,
+;                             ; controller-driven PP; for 0xA5
+;                             ; (popcount = 4, even) the T-bit
+;                             ; is 1 (recessive). See "T-bit
+;                             ; calculation" below.
+;
+;   SET_BUS_MODE i3c-OD       ; back to OD for STOP
+;   STOP                      ; SDA rise while SCL high (OD)
+;   HALT 0                    ; clean halt
+;
+; If the slave ACK is missed (line stays high during the ACK
+; slot) we branch to a wedge handler that HALTs with status=1.
+;
+; -------------------------------------------------------------------------
+; Address override
+; -------------------------------------------------------------------------
+;
+; The Step 18 bring-up gate is the embassy-mcxa I3C target
+; (sibling repo `embassy-mcxa/src/i3c/target.rs`). Its dynamic
+; address is assigned by DAA at runtime --- inspect the target's
+; RTT log or whatever address-reporting hook it exposes and
+; either:
+;
+;   1. Update `addr_w` below and re-assemble, or
+;   2. Build a wrapper script that templates the address at
+;      assembly time and feeds the resulting `.mole.bin` to
+;      `mole-loader`.
+;
+; Either is fine; this fixture commits to 0x4A so the byte-for-
+; byte golden is deterministic.
+;
+; -------------------------------------------------------------------------
+; T-bit calculation (I3C SDR controller-write)
+; -------------------------------------------------------------------------
+;
+; The 9th bit of every controller-driven SDR data byte is the
+; T-bit: an odd-parity bit such that the total count of 1s in
+; the 9-bit field (8 data + T) is odd.
+;
+;   T = ~(popcount(data) & 1)             (equivalently: T = 1 if
+;                                          popcount is even, 0 if odd)
+;
+; Worked examples (helpful when changing the data byte):
+;
+;   data    popcount  T-bit
+;   0x00    0         1
+;   0x01    1         0
+;   0x55    4         1
+;   0xA5    4         1   <- THIS PROGRAM
+;   0xAA    4         1
+;   0xFF    8         1
+;
+; If you change the data byte below, recompute the T-bit and
+; update the `EMIT_BIT tx=...` line at the end of the PP block.
+;
+; -------------------------------------------------------------------------
+; Bus mode mapping (per ROADMAP §"Bus mode register")
+; -------------------------------------------------------------------------
+;
+; In i3c-OD, `tx=dominant` pulls SDA low (NMOS on), `tx=recessive`
+; releases SDA (Hi-Z + external pull-up wins), `tx=hiz` is also
+; release. SCL high-half is OD-released (pull-up).
+;
+; In i3c-PP, `tx=dominant` actively drives 0 (PP), `tx=recessive`
+; actively drives 1 (PP), `tx=hiz` is genuine driver-off. SCL
+; high-half is actively driven high.
+;
+; The hardware contract is structurally enforced by SymbolDecoder
+; in fpga/Mole/src/hw/BusMode.scala --- the engine cannot
+; accidentally produce bus contention on any (BUS_MODE, tx_symbol)
+; combination.
+;
+; -------------------------------------------------------------------------
+; Divider math (24 MHz fabric)
+; -------------------------------------------------------------------------
+;
+; I3C-OD divider = 5 -> reload counter every 6 fabric cycles per
+; quarter -> 4 MHz quarter rate -> 1 MHz SCL during OD phase.
+;
+; I3C-PP divider = 1 -> reload counter every 2 fabric cycles per
+; quarter -> 12 MHz quarter rate -> 3 MHz SCL during PP phase.
+; (Verde fabric caps at 24 MHz so the absolute SCL ceiling is
+; 6 MHz / div=0; 3 MHz / div=1 is the next-fastest and a
+; comfortable bring-up target.)
+
+.equ od_div, 5              ; 1 MHz SCL during OD phase
+.equ pp_div, 1              ; 3 MHz SCL during PP phase
+
+        LOAD_TIMING   i3c_od_freq, od_div
+        LOAD_TIMING   i3c_pp_freq, pp_div
+        SET_BUS_MODE  i3c-OD
+        SET_ROLE      controller
+
+        ;; -- START: SDA fall while SCL high (4 idle + 2 SDA-fall + 2 SCL-down) --
+        EMIT_QUARTER  sda=recessive scl=recessive
+        EMIT_QUARTER  sda=recessive scl=recessive
+        EMIT_QUARTER  sda=recessive scl=recessive
+        EMIT_QUARTER  sda=recessive scl=recessive
+        EMIT_QUARTER  sda=dominant  scl=recessive
+        EMIT_QUARTER  sda=dominant  scl=recessive
+        EMIT_QUARTER  sda=dominant  scl=dominant
+        EMIT_QUARTER  sda=dominant  scl=dominant
+
+        ;; -- addr+W = 0x94 = 1001 0100 (target 0x4A, R/W=0) --
+        EMIT_BIT      tx=recessive       ; bit 7 = 1
+        EMIT_BIT      tx=dominant        ; bit 6 = 0
+        EMIT_BIT      tx=dominant        ; bit 5 = 0
+        EMIT_BIT      tx=recessive       ; bit 4 = 1
+        EMIT_BIT      tx=dominant        ; bit 3 = 0
+        EMIT_BIT      tx=recessive       ; bit 2 = 1
+        EMIT_BIT      tx=dominant        ; bit 1 = 0
+        EMIT_BIT      tx=dominant        ; bit 0 = R/W = 0 (write)
+
+        ;; -- ACK slot: controller releases SDA, target pulls low --
+        ;; OD mode -> tx=hiz releases SDA -> external pull-up + target NMOS
+        ;; decide the level. expect=0 mask=1 flags MISMATCH_FLAG if the
+        ;; line stays high (= target did not ACK).
+        EMIT_BIT      tx=hiz expect=0 mask=1 capture=1
+        BRANCH_ON     MISMATCH, 1
+        JMP           wedge_addr_w
+
+        ;; -- switch to push-pull for SDR data + T-bit --
+        SET_BUS_MODE  i3c-PP
+
+        ;; -- data byte 0xA5 = 1010 0101 (controller-driven PP) --
+        EMIT_BIT      tx=recessive       ; bit 7 = 1
+        EMIT_BIT      tx=dominant        ; bit 6 = 0
+        EMIT_BIT      tx=recessive       ; bit 5 = 1
+        EMIT_BIT      tx=dominant        ; bit 4 = 0
+        EMIT_BIT      tx=dominant        ; bit 3 = 0
+        EMIT_BIT      tx=recessive       ; bit 2 = 1
+        EMIT_BIT      tx=dominant        ; bit 1 = 0
+        EMIT_BIT      tx=recessive       ; bit 0 = 1
+
+        ;; -- T-bit: odd parity of 0xA5 (popcount=4 even) -> T=1 (recessive) --
+        EMIT_BIT      tx=recessive
+
+        ;; -- switch back to OD for STOP --
+        SET_BUS_MODE  i3c-OD
+
+        ;; -- STOP: SDA rise while SCL high --
+        EMIT_QUARTER  sda=dominant  scl=dominant
+        EMIT_QUARTER  sda=dominant  scl=dominant
+        EMIT_QUARTER  sda=dominant  scl=recessive
+        EMIT_QUARTER  sda=dominant  scl=recessive
+        EMIT_QUARTER  sda=recessive scl=recessive
+        EMIT_QUARTER  sda=recessive scl=recessive
+
+        MARK          label=0
+        HALT          status=0
+
+; -------------------------------------------------------------------------
+; Wedge handler: reached when the slave NAKs the address byte.
+;
+; A wedged I3C target manifests to the controller as "no one
+; pulled SDA low during the ACK slot". The MARK label mirrors
+; the HALT status so the host result-ring decoder can identify
+; the failure site even without re-reading the bytecode.
+;
+; HALT status discriminates the failure for the host:
+;   1 = NAK on the address byte's ACK slot
+;
+; Extend with separate wedge handlers (e.g. wedge_t_bit_mismatch)
+; if you add MISMATCH checks on the T-bit (which only makes sense
+; in a target program; controller programs drive the T-bit).
+; -------------------------------------------------------------------------
+
+wedge_addr_w:
+        MARK          label=1
+        HALT          status=1

@@ -17,6 +17,7 @@ partner-bench reproducers (currently `i2c-soak`).
 | `i2c-write-one-byte.moleasm`  | ROADMAP §"I2C write-one-byte" example, used as an assembler golden in the self-check suite.                            |
 | `loop-counter-demo.moleasm`   | Bounded-loop worked example (LOAD_LOOP / DEC_BRANCH with both LCRs nested), used as the loop-counter golden.           |
 | `i2c-soak.moleasm`            | Back-to-back combined-format I²C transactions at 400 kHz against the embassy-imxrt I²C slave on rt685s-evk; partner-bench reproducer for OpenDevicePartnership/embassy-imxrt PR #565. |
+| `i3c-write-byte.moleasm`      | Minimal I3C SDR controller-write to a target at 7-bit address 0x4A; OD address phase + PP data byte + T-bit (odd parity); first-light fixture for Step 18 (MCXA dev board as I3C target). |
 | `*.molecode`                  | Raw 16-bit LE bytecode (2 bytes × N instructions). Committed (un-ignored under this directory) so Rust goldens run offline. |
 | `*.mole.bin`                  | Framed UART payload (len + words + CRC-16/XMODEM). Committed (un-ignored under this directory) so Rust goldens run offline. |
 

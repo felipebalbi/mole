@@ -83,6 +83,11 @@ fn i2c_soak_golden() {
     check_fixture("i2c-soak");
 }
 
+#[test]
+fn i3c_write_byte_golden() {
+    check_fixture("i3c-write-byte");
+}
+
 // ---------------------------------------------------------------------------
 // Range boundary tests at the assembler level (encoder unit tests cover
 // the raw bit-pack; these confirm the assembler's PC math gets the
@@ -213,6 +218,7 @@ fn python_parity_against_reference() {
         "i2c-write-one-byte",
         "loop-counter-demo",
         "i2c-soak",
+        "i3c-write-byte",
     ] {
         let src = dir.join(format!("{name}.moleasm"));
         let tmp_dir = std::env::temp_dir().join("mole-asm-parity");
