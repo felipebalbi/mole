@@ -62,7 +62,7 @@ contract. See `../../ROADMAP.md` §"Layer 0" and `AGENTS.md`
 - [x] **Step 14 --- `MoleTopSim`.** End-to-end Verilator sim under one `MoleTopSimDut` compile (sim-side `UartTx` / `UartRx` so the host pushes / pops bytes via Spinal Streams instead of bit-banging the wire). 4 cases: short-halt round-trip (HALT word + Revision asserts), bus-toggle (SDA driveLow + release observed during execution), bad-CRC recovery (loaderLoaded never pulses, engineDone never goes low, fault LED lights; then a good frame loads cleanly after the resync gap), back-to-back frames (phase FSM cycles cleanly twice). Small test config (`programWordCount=16`, `resultRingByteCount=32`) keeps each case under ~50 K cycles.
 - [x] **Step 15 --- `MoleTopVerilog`.** Canonical Verilog generation entrypoint. `useBlackBox = true` so yosys infers SB_PLL40_PAD + SB_IO as hard cells; `defaultClockDomainFrequency = 24 MHz` so derived dividers infer the right size. Output at `gen/MoleTop.v`; gitignored via `.gitignore`'s per-project rule.
 - [x] **Step 16 --- Flashable bitstream + synth chain.** `make gen` / `make all` / `make flash` enabled end-to-end. `nextpnr --freq 12` bumped to `--freq 24` (the actual fabric clock after the PLL; originally `--freq 48`, retargeted to 24 MHz after the first real synth on UP5K SG48I came in at Fmax ~28 MHz --- see `MoleConfig.scala` and ROADMAP §"Clocks" for the rationale); timing now reports against the real budget. Bring-up procedure (build, flash, talk, three smoke programs) documented in `BRINGUP.md`.
-- [x] **Step 16 --- Flashable bitstream + synth chain.** `make gen` / `make all` / `make flash` enabled end-to-end. `nextpnr --freq 12` bumped to `--freq 24` (the actual fabric clock after the PLL; originally `--freq 48`, retargeted to 24 MHz after the first real synth on UP5K SG48I came in at Fmax ~28 MHz --- see `MoleConfig.scala` and ROADMAP §"Clocks" for the rationale); timing now reports against the real budget. Bring-up procedure (build, flash, talk, three smoke programs) documented in `BRINGUP.md`.
+- [x] **Step 17 --- TMP108 over hand-encoded I²C.** Real-silicon validation of the engine + loader + drainer path against a TMP108 on PMOD1A. `mole-asm/tests/fixtures/tmp108.moleasm` round-trips at ~100 kHz SCL; the 19 CAPTURE records (3 slave ACKs + 8 MSB + 8 LSB) decode to a sane temperature reading at room ambient and HALT comes back clean. The bring-up surfaced (and drove the fixes for) the result-ring trailing-garbage tag-walk hazard (commit `6edd139`), the host-side ring-bytes default mismatch (`b8a81a0`), the strict ring decode + length check (`3d02ec2`, `5094d4d`), serialport hardware flow control set on the builder rather than post-open (`70a723d`), and `BRINGUP.md`'s mandatory `crtscts` documentation (`4d8fe25`). Phase 3 still partial --- Step 18 (MCXA I3C target soak) outstanding.
 - [x] **Step 19 --- `SAMPLE_BIT_ON_SCL` + `DRIVE_BIT_ON_SCL` (target role).** New `EngineRole` sealed trait + `MoleConfig.role` compile-time toggle (Controller default; Target opt-in). Engine FSM grows two Scala-gated states plus an external-SCL edge-detector factor-out (`BusObserver`). `EMIT_BIT` in target role releases SCL. New `BitCycleEngineTargetSim` covers six cases under two compiles; DAA arbitration uses two engines on a sim-side wired-AND bus.
 - [x] **Step 20 --- `LOAD_LOOP` + `DEC_BRANCH` (ISA ergonomics).** Two new v0 opcodes claim reserved slots 0xC / 0xD, displacing `WAIT_ADDRESSED` (lowest-priority of the v0.5 reservations) and `MISMATCH_CLEAR` (subsumed by the still-reserved `FLAG_CLEAR` at 0xE). Two 8-bit loop-counter registers (`LCR0`, `LCR1`) enable bounded loops with one level of nesting, no scratch-slot spill. Wire encoding `[15:12]op [11]reg [10:8]reserved=0 [7:0]imm-or-offset`; the 3-bit pad reserves room for a 16-LCR widening with no wire-format break. Out of declared phase order (lands ahead of Steps 17--19 which are hardware-bring-up gated). See Phase 5 below for the closeout block.
 
@@ -1097,15 +1097,127 @@ flash`, smoke programs loaded over `/dev/ttyUSB0`.
 
 ## 🔲 Phase 3 --- Validation against a real DUT
 
-### 🔲 Step 17 --- TMP108 over hand-encoded I²C
+### ✅ Step 17 --- TMP108 over hand-encoded I²C
 
-**Goal:** hand-encode a TMP108-read program (no Scheme compiler
-yet), drive it from the host over UART, decode the temperature
-value out of the result ring on the host. Validates the entire
-toolchain against a real I²C target on PMOD1A.
+**What landed:**
 
-**Bring-up gate:** Phase-3 done means real silicon + real DUT,
-matching room temperature. Sim-only success does not count.
+- **Files (the bring-up assets):**
+  `mole-asm/tests/fixtures/tmp108.moleasm` (122 lines, hand-
+  encoded full TMP108 read), the matching golden
+  `tmp108.molecode` (raw bytecode) and `tmp108.mole.bin`
+  (framed UART payload), and the Python reference assembler
+  `mole-asm/tests/fixtures/mole-asm.py`. The fixture is also
+  the wire-format golden the Rust `mole-asm` crate is
+  byte-for-byte diffed against (`mole-asm/tests/golden.rs::tmp108_golden`).
+- **Files (the bring-up-driven engine + host fixes):** the
+  bench session surfaced (and drove the fixes for) several
+  bugs the sim coverage did not catch:
+  - **Result-ring trailing-garbage hazard** (commit `6edd139`,
+    `fix(loader): stop ring walk at first garbage tag, not
+    error out`). SPRAM on real silicon comes up uninitialised;
+    slots between the last record and the HALT terminator
+    hold arbitrary values. The first tmp108 run tripped on a
+    `0x630e`-shaped garbage word at offset 21 (right past the
+    last real capture); the decoder previously errored out on
+    the reserved tag instead of stopping cleanly. Now `decode_ring`
+    walks until it hits the first non-record tag and reports
+    `trailing_garbage_words` for caller-side warnings. The
+    regression test
+    `tmp108_shaped_real_silicon_ring_decodes_to_19_captures`
+    in `mole-loader/src/ring.rs` pins the exact byte sequence
+    observed on the bench.
+  - **Host ring-bytes default** (commit `b8a81a0`,
+    `fix(loader): match engine ring-bytes default (8192, not 4096)`).
+    The CLI shipped with a 4096-byte default; the engine drains
+    `resultRingByteCount = 8192` per HALT, leaving the HALT
+    word stuck in the kernel buffer for the next read to trip
+    on. Now both sides agree via the shared
+    `mole_abi::RESULT_RING_BYTE_COUNT` constant.
+  - **Strict ring decode + length check** (commits
+    `3d02ec2`, `5094d4d`). `decode_ring_strict(bytes, expected)`
+    closes the silent-prefix / silent-suffix hole that the lax
+    walker could not detect; the CLI now uses it for production
+    reads.
+  - **Transport hardware flow control** (commit `70a723d`,
+    `fix(loader): set hardware flow control on the builder,
+    not post-open`). On Windows the serialport-rs
+    `set_flow_control(Hardware)` post-open path does not
+    reliably reconfigure the DCB's `fRtsControl` to
+    `RTS_CONTROL_HANDSHAKE`; the bench session caught the
+    resulting "drain bytes never reach the host" failure mode.
+  - **BRINGUP RTS#/CTS# wiring + mandatory `crtscts`**
+    (commit `4d8fe25`). The wire format silently assumed
+    hardware flow control; the bench session formalised it as
+    mandatory and documented the PMOD1A pin wiring +
+    `stty crtscts -ixon -ixoff -ixany raw` recipe.
+- **Bench setup (from `mole-asm/tests/fixtures/README.md`):**
+  PMOD1A.1 → SCL, PMOD1A.2 → SDA, 4.7 kΩ pull-ups to 3V3,
+  TMP108 at 7-bit address 0x48. Host: `/dev/ttyUSB0` at
+  1 Mbaud, 8N1, hardware RTS/CTS on FT2232H channel A.
+- **Command line:**
+  `mole-loader --port /dev/ttyUSB0
+  mole-asm/tests/fixtures/tmp108.mole.bin`. Default
+  `--ring-bytes 8192` matches the Verde build's
+  `MoleConfig.resultRingByteCount`.
+- **Pass criterion (met):** the decoded ring carries
+  19 CAPTURE records --- 3 slave ACKs (0xA0 / 0x00 / 0xA1
+  address+pointer+read-address) plus 8 MSB + 8 LSB
+  temperature bits; the 16 read bits decode (MSB-first) to a
+  TMP108 temperature word within ±5 °C of room ambient via
+  the datasheet conversion (`temp_c = raw / 256.0` with the
+  signed two's-complement interpretation in `tmp108.moleasm`'s
+  header). `halt.status = 0`, `halt.overflow = false`,
+  `halt.mismatch` may or may not be set depending on whether
+  the bench TMP108 driver is responsive on every ACK slot ---
+  document the observation when re-running.
+- **Bring-up gate:** met. Phase 3 is now *partial* --- this
+  step closes the I²C controller path against a real DUT.
+  Step 18 (MCXA I3C target soak) still open; that step is the
+  hard v0 acceptance criterion, after which the Scheme SDK
+  (ROADMAP §"Phase 2") can begin on a stable engine + host.
+
+**Divergence from the original hint:**
+
+- **Not "no Scheme compiler yet" any more.** The Rust
+  `mole-asm` crate landed during the bring-up effort, plus
+  the `mole-loader` runtime and CLI. The hint anticipated
+  hand-pasting hex bytes over `cat > /dev/ttyUSB0`; what
+  actually shipped is the full host-side toolchain
+  (`mole-asm` + `mole-loader`) plus its CLI front-ends. The
+  TMP108 program itself is still hand-authored moleasm
+  (Scheme SDK is Phase 2 / ROADMAP, out of scope until
+  Step 18 closes).
+- **The bring-up generated more deliverables than the hint
+  anticipated.** The bench session was the forcing function
+  for the host-side polish (strict ring decode, transport
+  flow control fixes, BRINGUP.md), not just for confirming
+  the engine drives SCL / SDA at the right times.
+
+**Bring-up evidence (re-run on every bench session):**
+
+Re-run `mole-loader --port <port>
+mole-asm/tests/fixtures/tmp108.mole.bin` and confirm:
+
+1. `revision: X.Y.Z` matches the deployed Mole bitstream
+   (`Revision.scala`'s `revision.{major,minor,patch}`).
+2. `records: 19 total (19 CAPTURE, 0 MARK)`.
+3. The two byte values reconstructed from the trailing
+   16 CAPTUREs (MSB first) decode to a sensible temperature
+   per the TMP108 datasheet at the bench ambient.
+4. `halt: status=0x0 mismatch=false overflow=false`. (A
+   `mismatch=true` here means at least one slave ACK slot
+   was sampled as high --- usually a wiring or address
+   issue.)
+5. `(note: ... unused record slots ...)` is expected on a
+   default 8192-byte ring (the 19 records consume ~21 words
+   out of the 4093 available, so the remainder is reported
+   as trailing garbage --- this is the documented hazard,
+   not a failure).
+
+**Sim:** none new for this step --- the engine + loader sim
+coverage shipped in Steps 12 + 14. The bring-up evidence
+lives in the regression tests added alongside the host-side
+fixes listed under "Files" above.
 
 ### 🔲 Step 18 --- MCXA dev board as I3C target
 

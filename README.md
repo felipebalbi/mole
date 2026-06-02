@@ -65,8 +65,19 @@ will stay separate.
 
 ## Status
 
-Phase 2 complete --- the `MoleTop` integration under
-[`fpga/Mole/`](./fpga/Mole/) wires the UART loader, the
+Phase 3 in progress --- Step 17 (TMP108 over hand-encoded I²C)
+closed against a real DUT on the iCEbreaker. The bench session
+drove a set of host-side fixes (result-ring trailing-garbage
+tag-walk, ring-bytes default mismatch, strict ring decode with
+length check, transport hardware flow control on the builder,
+mandatory `crtscts` in `BRINGUP.md`) that the sim coverage did
+not catch. Step 18 (MCXA dev board as I3C target soak,
+≥10⁵ iterations without mismatch) is the remaining v0
+acceptance gate; once it closes, the Scheme SDK (ROADMAP
+§"Phase 2") can begin on a stable engine + host substrate.
+
+The Phase 2 substrate underneath: the `MoleTop` integration
+under [`fpga/Mole/`](./fpga/Mole/) wires the UART loader, the
 `BitCycleEngineCore`, the `SpramController`, and the result-ring
 drainer into a single synthesisable top-level. A 3-state phase
 FSM (`acceptLoad` -> `running` -> `draining`) gates `engine.start`,
@@ -96,8 +107,7 @@ Coverage: `sim-config`, `sim-opendrain`, eight UART block sims +
 (per-cycle bus-driver trace under `i3c-OD` vs `i3c-PP`),
 `sim-engine-full` (17 named tests covering every opcode + the
 trap paths + ring overflow), `sim-pll`, `sim-crc`, `sim-iobuf`,
-`sim-loader-fsm`, `sim-drainer-fsm`, `sim-top`. Next up: Phase 3
-(validation against a real DUT --- TMP108 over I2C). See
+`sim-loader-fsm`, `sim-drainer-fsm`, `sim-top`. See
 **ROADMAP.md §Phased plan** and
 [`fpga/Mole/TODO.md`](./fpga/Mole/TODO.md) for current
 bring-up state.

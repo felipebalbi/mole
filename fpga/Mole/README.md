@@ -9,8 +9,11 @@ For the product-wide design and rationale, see
 live in [`../../AGENTS.md`](../../AGENTS.md); this project's
 specifics are in [`AGENTS.md`](AGENTS.md).
 
-Status: **Phase 2 done** --- end-to-end UART loader -> bit engine
--> drainer integration ships as `MoleTop`; smoke procedure in
+Status: **Phase 3 in progress** --- Step 17 (TMP108 over hand-encoded
+I²C) closed against a real DUT on PMOD1A; Step 18 (MCXA dev board
+as I3C target soak) is the remaining v0 acceptance gate. The
+Phase 2 `MoleTop` integration (UART loader -> bit engine ->
+drainer) ships and is the bring-up substrate; smoke procedure in
 [`BRINGUP.md`](BRINGUP.md). Outstanding work tracked in
 [`TODO.md`](TODO.md).
 
