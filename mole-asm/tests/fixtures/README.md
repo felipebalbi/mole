@@ -1,10 +1,11 @@
 # Phase 3 bring-up assets
 
-The Python reference assembler (`mole-asm.py`), the three bundled
+The Python reference assembler (`mole-asm.py`), the bundled
 `.moleasm` source programs, and the assembled `.molecode` /
 `.mole.bin` artifacts they produce. Used to validate the Phase 2
-bitstream against real silicon and to seed the Rust `mole-asm`
-crate's golden-test suite (see `../golden.rs`).
+bitstream against real silicon, seed the Rust `mole-asm`
+crate's golden-test suite (see `../golden.rs`), and host
+partner-bench reproducers (currently `i2c-soak`).
 
 ## What's here
 
@@ -14,6 +15,8 @@ crate's golden-test suite (see `../golden.rs`).
 | `first-light.moleasm`         | Infinite loop, no `HALT`. Scope-sanity program (~98.8 kHz SCL, 0x90 pattern).                                          |
 | `tmp108.moleasm`              | Full TMP108 read: START / write addr+ptr / Sr / read 16 bits / STOP / HALT. Triggers 8192-byte result drain.           |
 | `i2c-write-one-byte.moleasm`  | ROADMAP §"I2C write-one-byte" example, used as an assembler golden in the self-check suite.                            |
+| `loop-counter-demo.moleasm`   | Bounded-loop worked example (LOAD_LOOP / DEC_BRANCH with both LCRs nested), used as the loop-counter golden.           |
+| `i2c-soak.moleasm`            | Back-to-back combined-format I²C transactions at 400 kHz against the embassy-imxrt I²C slave on rt685s-evk; partner-bench reproducer for OpenDevicePartnership/embassy-imxrt PR #565. |
 | `*.molecode`                  | Raw 16-bit LE bytecode (2 bytes × N instructions). Committed (un-ignored under this directory) so Rust goldens run offline. |
 | `*.mole.bin`                  | Framed UART payload (len + words + CRC-16/XMODEM). Committed (un-ignored under this directory) so Rust goldens run offline. |
 
@@ -41,8 +44,8 @@ python mole-asm.py [-h] [--frame] [-o OUT] INPUT.moleasm
 
 - Default output: `INPUT.molecode` (raw bytecode, no frame).
 - `--frame`: also writes `INPUT.mole.bin` (framed for UART).
-- No `INPUT`: runs the bundled batch (the three programs above) +
-  self-checks.
+- No `INPUT`: runs the bundled batch (every `*.moleasm` source
+  listed in `_BUNDLED_PROGRAMS` above) + self-checks.
 
 ## moleasm grammar (locked --- AGENTS §3.16, ROADMAP §"moleasm conventions")
 

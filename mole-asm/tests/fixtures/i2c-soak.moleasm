@@ -1,0 +1,193 @@
+; i2c-soak --- back-to-back combined-format write+read soak at 400 kHz
+; against the embassy-imxrt I2C target-trait slave running on rt685s-evk
+; at 7-bit address 0x20 (i2c-slave-async-target-trait.rs / FC2).
+;
+; Companion to OpenDevicePartnership/embassy-imxrt PR #565:
+; reproducer for the slv_state -> addressed mid-DMA HW race jerrysxie
+; reported. Loops forever, hitting ACK slots with `expect=0 mask=1` on
+; every controller-driven byte; on the first NACK / line-stuck-high
+; (which is how a wedged slave manifests to the controller) we
+; BRANCH_ON MISMATCH into a fail-fast handler that MARKs the wedge
+; site and HALTs. The host (mole-loader) drains the ring and returns
+; non-zero; the slave-side RTT log identifies whether the slave's own
+; RACE WATCH telemetry caught the mis-classification.
+;
+; Transaction shape (every iteration):
+;   START
+;   addr+W (0x40)             ; slave at 7-bit 0x20, R/W=0
+;   write 32 bytes of 0x55    ; max edge density: SDA toggles every bit-time
+;   Sr (repeated START)
+;   addr+R (0x41)             ; same slave, R/W=1
+;   read  32 bytes            ; controller releases SDA; ACKs bytes 0..30,
+;                             ; NACKs byte 31 to terminate
+;   STOP
+;   STRETCH_SCL 3             ; tBUF >= 1.3 us (3 quarters = 1.875 us @ 400 kHz)
+;
+; Note: the slave example overwrites its 8-byte buffer with
+; [0,1,2,3,4,5,6,7] at the top of each respond_* iteration, so the
+; wire pattern on the read side is that 8-byte sequence repeated four
+; times across the NeedMore continuations, NOT 32x 0xAA. Since this
+; program does not capture read bits (no `capture=1` in the read body),
+; the wire-side values don't affect the test --- we're hunting state-
+; machine race, not byte values.
+;
+; Loop counters:
+;   LCR1 = outer heartbeat counter (255 transactions per MARK 0xAA)
+;   LCR0 = inner byte counter (re-primed every transaction for writes
+;                              and again for ACKed reads)
+;
+; START / STOP / Sr edges doubled (each canonical quarter held for two
+; ticks) to match the empirically-validated tmp108.moleasm timing.
+
+.equ fast_div, 14            ; 400 kHz exact at 24 MHz fabric (book divider table)
+
+        LOAD_TIMING   i2c_freq, fast_div
+        SET_BUS_MODE  i2c
+        SET_ROLE      controller
+
+loop_reset:
+        LOAD_LOOP     lcr1, 255         ; 255 transactions per heartbeat MARK
+
+inner_loop:
+        ; -- START: 4 idle + 2 SDA-falls + 2 SCL-down (8 quarters total) --
+        EMIT_QUARTER  sda=recessive scl=recessive
+        EMIT_QUARTER  sda=recessive scl=recessive
+        EMIT_QUARTER  sda=recessive scl=recessive
+        EMIT_QUARTER  sda=recessive scl=recessive
+        EMIT_QUARTER  sda=dominant  scl=recessive
+        EMIT_QUARTER  sda=dominant  scl=recessive
+        EMIT_QUARTER  sda=dominant  scl=dominant
+        EMIT_QUARTER  sda=dominant  scl=dominant
+
+        ; -- addr_w = 0x40 = 0100 0000 (slave at 0x20, R/W=0) --
+        EMIT_BIT      tx=dominant
+        EMIT_BIT      tx=recessive
+        EMIT_BIT      tx=dominant
+        EMIT_BIT      tx=dominant
+        EMIT_BIT      tx=dominant
+        EMIT_BIT      tx=dominant
+        EMIT_BIT      tx=dominant
+        EMIT_BIT      tx=dominant
+
+        ; -- slave ACK + fail-fast --
+        EMIT_BIT      tx=recessive expect=0 mask=1
+        BRANCH_ON     MISMATCH, 1
+        JMP           wedge_addr_w
+
+        ; -- 32x write 0x55 (0101 0101, MSB-first) using LCR0 --
+        LOAD_LOOP     lcr0, 32
+write_byte_body:
+        EMIT_BIT      tx=dominant       ; bit 7 = 0
+        EMIT_BIT      tx=recessive      ; bit 6 = 1
+        EMIT_BIT      tx=dominant       ; bit 5 = 0
+        EMIT_BIT      tx=recessive      ; bit 4 = 1
+        EMIT_BIT      tx=dominant       ; bit 3 = 0
+        EMIT_BIT      tx=recessive      ; bit 2 = 1
+        EMIT_BIT      tx=dominant       ; bit 1 = 0
+        EMIT_BIT      tx=recessive      ; bit 0 = 1
+
+        EMIT_BIT      tx=recessive expect=0 mask=1
+        BRANCH_ON     MISMATCH, 1
+        JMP           wedge_data_w
+
+        DEC_BRANCH    lcr0, write_byte_body
+
+        ; -- Sr (repeated START): 2 SCL-up + 2 SDA-up + 2 SDA-down + 2 SCL-down --
+        EMIT_QUARTER  sda=dominant  scl=dominant
+        EMIT_QUARTER  sda=dominant  scl=dominant
+        EMIT_QUARTER  sda=recessive scl=dominant
+        EMIT_QUARTER  sda=recessive scl=dominant
+        EMIT_QUARTER  sda=recessive scl=recessive
+        EMIT_QUARTER  sda=recessive scl=recessive
+        EMIT_QUARTER  sda=dominant  scl=recessive
+        EMIT_QUARTER  sda=dominant  scl=recessive
+        EMIT_QUARTER  sda=dominant  scl=dominant
+        EMIT_QUARTER  sda=dominant  scl=dominant
+
+        ; -- addr_r = 0x41 = 0100 0001 --
+        EMIT_BIT      tx=dominant
+        EMIT_BIT      tx=recessive
+        EMIT_BIT      tx=dominant
+        EMIT_BIT      tx=dominant
+        EMIT_BIT      tx=dominant
+        EMIT_BIT      tx=dominant
+        EMIT_BIT      tx=dominant
+        EMIT_BIT      tx=recessive
+
+        ; -- slave ACK + fail-fast --
+        EMIT_BIT      tx=recessive expect=0 mask=1
+        BRANCH_ON     MISMATCH, 1
+        JMP           wedge_addr_r
+
+        ; -- 31x read with controller ACK (no capture; we're not
+        ;    validating bytes, only provoking the race) --
+        LOAD_LOOP     lcr0, 31
+read_byte_body:
+        EMIT_BIT      tx=recessive
+        EMIT_BIT      tx=recessive
+        EMIT_BIT      tx=recessive
+        EMIT_BIT      tx=recessive
+        EMIT_BIT      tx=recessive
+        EMIT_BIT      tx=recessive
+        EMIT_BIT      tx=recessive
+        EMIT_BIT      tx=recessive
+        EMIT_BIT      tx=dominant            ; controller ACK
+        DEC_BRANCH    lcr0, read_byte_body
+
+        ; -- 32nd (last) read byte: same 8 bits + controller NACK --
+        EMIT_BIT      tx=recessive
+        EMIT_BIT      tx=recessive
+        EMIT_BIT      tx=recessive
+        EMIT_BIT      tx=recessive
+        EMIT_BIT      tx=recessive
+        EMIT_BIT      tx=recessive
+        EMIT_BIT      tx=recessive
+        EMIT_BIT      tx=recessive
+        EMIT_BIT      tx=recessive          ; controller NACK (release for STOP)
+
+        ; -- STOP: SDA rises while SCL high --
+        EMIT_QUARTER  sda=dominant  scl=dominant
+        EMIT_QUARTER  sda=dominant  scl=dominant
+        EMIT_QUARTER  sda=dominant  scl=recessive
+        EMIT_QUARTER  sda=dominant  scl=recessive
+        EMIT_QUARTER  sda=recessive scl=recessive
+        EMIT_QUARTER  sda=recessive scl=recessive
+
+        ; -- tBUF: hold both lines recessive >= 1.3 us before next START --
+        STRETCH_SCL   3
+
+        ; -- back-edge: 254 more iterations before MARK + reset --
+        DEC_BRANCH    lcr1, inner_loop
+
+        ; -- heartbeat: one MARK per 255 transactions --
+        MARK          label=0xAA
+
+        ; -- back to reload lcr1 and run another 255 transactions --
+        JMP           loop_reset
+
+; -------------------------------------------------------------------------
+;  Wedge handlers.  Reached via JMP from the BRANCH_ON MISMATCH,+1 skip-
+;  ahead pattern; the JMP gives us full 11-bit absolute reach to the
+;  bottom of the program from any ACK slot in the loop body.
+;
+;  HALT status discriminates the failure site for the host:
+;    1 = NACK on the write-address ACK slot
+;    2 = NACK on a write-data ACK slot (any of bytes 0..31)
+;    3 = NACK on the read-address ACK slot
+;
+;  All three are symptomatic of a wedged slave (no one pulling SDA low
+;  during the ACK slot). The MARK label mirrors the HALT status for
+;  result-ring decode redundancy.
+; -------------------------------------------------------------------------
+
+wedge_addr_w:
+        MARK          label=1
+        HALT          status=1
+
+wedge_data_w:
+        MARK          label=2
+        HALT          status=2
+
+wedge_addr_r:
+        MARK          label=3
+        HALT          status=3

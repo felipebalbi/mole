@@ -1270,7 +1270,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         nargs="?",
         help="path to the .moleasm source file. If omitted, runs the "
         "bundled batch (regenerates first-light / tmp108 / "
-        "i2c-write-one-byte next to this script) plus the self-check suite.",
+        "i2c-write-one-byte / loop-counter-demo / i2c-soak next to "
+        "this script) plus the self-check suite.",
     )
     parser.add_argument(
         "-o",
@@ -1334,6 +1335,7 @@ _BUNDLED_PROGRAMS = (
     "tmp108",
     "i2c-write-one-byte",
     "loop-counter-demo",
+    "i2c-soak",
 )
 
 
