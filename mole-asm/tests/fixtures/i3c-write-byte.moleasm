@@ -133,7 +133,7 @@
         ;; decide the level. expect=0 mask=1 flags MISMATCH_FLAG if the
         ;; line stays high (= target did not ACK).
         EMIT_BIT      tx=hiz expect=0 mask=1 capture=1
-        BRANCH_ON     MISMATCH, 1
+        BRANCH_ON     NOT_MISMATCH, 1
         JMP           wedge_addr_w
 
         ;; -- switch to push-pull for SDR data + T-bit --

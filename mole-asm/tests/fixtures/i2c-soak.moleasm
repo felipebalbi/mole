@@ -7,10 +7,15 @@
 ; reported. Loops forever, hitting ACK slots with `expect=0 mask=1` on
 ; every controller-driven byte; on the first NACK / line-stuck-high
 ; (which is how a wedged slave manifests to the controller) we
-; BRANCH_ON MISMATCH into a fail-fast handler that MARKs the wedge
-; site and HALTs. The host (mole-loader) drains the ring and returns
-; non-zero; the slave-side RTT log identifies whether the slave's own
-; RACE WATCH telemetry caught the mis-classification.
+; fall through into a JMP to a fail-fast handler that MARKs the
+; wedge site and HALTs. The skip-on-ACK is encoded as
+; `BRANCH_ON NOT_MISMATCH, 1` --- if the slave ACKed, mismatchFlag
+; is clear, so we skip the wedge JMP and continue. If the slave
+; NACKed (line stuck high), mismatchFlag is set, BRANCH_ON
+; NOT_MISMATCH is not taken, and we fall into the wedge JMP. The
+; host (mole-loader) drains the ring and returns non-zero; the
+; slave-side RTT log identifies whether the slave's own RACE WATCH
+; telemetry caught the mis-classification.
 ;
 ; Transaction shape (every iteration):
 ;   START
@@ -71,7 +76,7 @@ inner_loop:
 
         ; -- slave ACK + fail-fast --
         EMIT_BIT      tx=recessive expect=0 mask=1
-        BRANCH_ON     MISMATCH, 1
+        BRANCH_ON     NOT_MISMATCH, 1
         JMP           wedge_addr_w
 
         ; -- 32x write 0x55 (0101 0101, MSB-first) using LCR0 --
@@ -87,7 +92,7 @@ write_byte_body:
         EMIT_BIT      tx=recessive      ; bit 0 = 1
 
         EMIT_BIT      tx=recessive expect=0 mask=1
-        BRANCH_ON     MISMATCH, 1
+        BRANCH_ON     NOT_MISMATCH, 1
         JMP           wedge_data_w
 
         DEC_BRANCH    lcr0, write_byte_body
@@ -116,7 +121,7 @@ write_byte_body:
 
         ; -- slave ACK + fail-fast --
         EMIT_BIT      tx=recessive expect=0 mask=1
-        BRANCH_ON     MISMATCH, 1
+        BRANCH_ON     NOT_MISMATCH, 1
         JMP           wedge_addr_r
 
         ; -- 31x read with controller ACK (no capture; we're not
@@ -166,9 +171,13 @@ read_byte_body:
         JMP           loop_reset
 
 ; -------------------------------------------------------------------------
-;  Wedge handlers.  Reached via JMP from the BRANCH_ON MISMATCH,+1 skip-
-;  ahead pattern; the JMP gives us full 11-bit absolute reach to the
-;  bottom of the program from any ACK slot in the loop body.
+;  Wedge handlers.  Reached via the BRANCH_ON NOT_MISMATCH,+1 / JMP
+;  pattern at every ACK slot in the loop body: if the slave ACKed
+;  (mismatchFlag clear), NOT_MISMATCH is true and we branch *over*
+;  the JMP; if the slave NACKed (mismatchFlag set), NOT_MISMATCH is
+;  false, we fall through into the JMP, and the JMP gives us full
+;  11-bit absolute reach to the wedge handler at the bottom of the
+;  program (well outside BRANCH_ON's signed-7-bit reach).
 ;
 ;  HALT status discriminates the failure site for the host:
 ;    1 = NACK on the write-address ACK slot
