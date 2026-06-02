@@ -203,8 +203,62 @@ case class BitCycleEngineCore(cfg: MoleConfig) extends Component {
   val sclDriveLow = Reg(Bool()) init (False)
   val sclDriveHigh = Reg(Bool()) init (False)
 
-  io.bus.sda.driveLow := sdaDriveLow
-  io.bus.sda.driveHigh := sdaDriveHigh
+  // SDA output pipeline: one fabric cycle of `tHD;DAT` data-hold
+  // between the FSM-side `sdaDrive*` regs and the pad.
+  //
+  // Per UM10204 rev 7 (NXP I2C-bus specification) the controller
+  // must hold SDA stable for `tHD;DAT >= 0 ns` after SCL falls in
+  // every supported I2C mode (Std, Fast, Fast+). The spec min is
+  // zero but several mainstream slaves (NXP LPI2C on MCXA266,
+  // FlexComm on RT685-EVK) run a strict START/STOP edge detector
+  // clocked off their own input synchroniser and will mis-classify
+  // a same-edge SDA-change-with-SCL-fall as a spurious START /
+  // STOP, dropping the transfer mid-byte. TMP108's input glitch
+  // filter is wide enough to swallow the race, which is why
+  // `tmp108.moleasm` works against the engine even when
+  // `i2c-soak.moleasm` does not.
+  //
+  // The pre-fix engine wrote `sdaDrive*` and `sclDrive*` from the
+  // same `decodeState` cycle (FSM body), so SCL fell and SDA
+  // changed on the same fabric `posedge clk`. Pad-skew +
+  // asymmetric SDA/SCL pad timing on the slave then let SDA's
+  // edge race ahead of SCL on the wire.
+  //
+  // The fix lives at the pad boundary, NOT inside the FSM: a
+  // single-cycle pipeline reg sits between `sdaDrive*` and
+  // `io.bus.sda.*`. SCL stays unpipelined. The result is that
+  // SCL reaches the pad one fabric cycle ahead of SDA for every
+  // possible SDA transition (EMIT_BIT bit-to-bit, EMIT_QUARTER
+  // between quarters, STRETCH_SCL release, idle release) ---
+  // ~41.67 ns @ 24 MHz fabric, comfortably above 0 ns in every
+  // supported mode and small enough to keep `tSU;DAT` well above
+  // its min too.
+  //
+  // Putting the pipeline at the pad boundary rather than inside
+  // the FSM is deliberately *timing-friendly*: no extra mux
+  // levels on the FSM's critical path, just two registered FFs
+  // with no combinational logic between source and pipeline ---
+  // trivially clean for nextpnr's 24 MHz timing closure on the
+  // UP5K-SG48 (which already runs at ~2 % slack per the Makefile
+  // seed-pin note). See `BitCycleEngineEmitBitDataHoldSim` for
+  // the regression that asserts the SCL-leads-SDA ordering on
+  // bit-to-bit transitions.
+  //
+  // The sample point for MISMATCH / CAPTURE is unaffected: those
+  // read from the *observer* (`sdaSampled`), which is fed by
+  // `io.bus.sda.read` (a pad input, independent of this output
+  // pipeline). At default `quarterPeriodCyclesReset = 6`, Q2
+  // sample fires ~24 fabric cycles after Q0 entry; the 1-cycle
+  // pad-output delay plus 2-cycle 2-FF input synchroniser still
+  // leaves ~21 cycles of margin.
+  //
+  // The contention assert below still reads the source regs (the
+  // FSM's *intent*) rather than the pipelined pad outputs ---
+  // catching a malformed (low && high) at the source is what we
+  // want; the pipeline cannot manufacture contention that the
+  // source did not commit to one cycle earlier.
+  io.bus.sda.driveLow := RegNext(sdaDriveLow) init (False)
+  io.bus.sda.driveHigh := RegNext(sdaDriveHigh) init (False)
   io.bus.scl.driveLow := sclDriveLow
   io.bus.scl.driveHigh := sclDriveHigh
 
@@ -700,6 +754,14 @@ case class BitCycleEngineCore(cfg: MoleConfig) extends Component {
           // (latched at Q2 same as MISMATCH, routed to
           // `captureWriteState` at Q3 instead of straight to
           // `fetchState`).
+          //
+          // The wire-level `tHD;DAT` data-hold (SDA stable for at
+          // least one fabric cycle after SCL falls) is enforced by
+          // a dedicated one-cycle SDA output pipeline downstream
+          // --- see the `io.bus.sda.*` driver block above. The
+          // engine FSM keeps the simpler "latch SDA + SCL in the
+          // same cycle" shape so no extra mux levels appear on
+          // the critical path.
           is(Opcode.emitBit) {
             val txRaw = instrReg(10 downto 9)
             when(txRaw === B"11") {

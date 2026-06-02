@@ -92,7 +92,8 @@ sim: sim-config sim-opendrain sim-baud-gen sim-rx-sync \
      sim-engine-smoke sim-engine-full sim-engine-target sim-pll \
      sim-crc sim-iobuf sim-loader-fsm sim-drainer-fsm sim-top \
      sim-top-flow-control sim-symbol-decoder-contention \
-     sim-engine-jmp-boundary sim-top-cts-violation ## Run all simulations
+     sim-engine-jmp-boundary sim-top-cts-violation \
+     sim-engine-emit-bit-data-hold ## Run all simulations
 
 # Per-block sim / gen targets land here once their hint blocks in
 # TODO.md flip from 🔲 to ✅. The naming contract is fixed:
@@ -202,6 +203,9 @@ sim-engine-jmp-boundary: ## JMP out-of-range guard regression (F-FPGA-004)
 sim-top-cts-violation: ## CTS#-violation sticky observable (F-FPGA-007)
 	$(SBT) -batch "runMain $(PACKAGE).MoleTopCtsViolationSim"
 
+sim-engine-emit-bit-data-hold: ## EMIT_BIT inter-bit tHD;DAT hold (MCXA266/RT685 regression)
+	$(SBT) -batch "runMain $(PACKAGE).BitCycleEngineEmitBitDataHoldSim"
+
 # gen target -- the canonical Verilog entrypoint is MoleTopVerilog;
 # generated module is MoleTop. The generated file lives at gen/MoleTop.v
 # and is gitignored.
@@ -240,4 +244,5 @@ help: ## Show this help (every target with a ## description)
         sim-crc sim-iobuf sim-loader-fsm sim-drainer-fsm sim-top \
         sim-top-flow-control sim-symbol-decoder-contention \
         sim-engine-jmp-boundary sim-top-cts-violation \
+        sim-engine-emit-bit-data-hold \
         gen waves flash clean distclean help

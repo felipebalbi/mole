@@ -656,7 +656,11 @@ Concretely:
   bit (Q0, Q1) and high for the second half (Q2, Q3); the
   "high" half is OD-release or PP-driven-high depending on the
   current `BUS_MODE` register.
-- SDA holds the specified bit value across all 4 quarters,
+- SDA holds the specified bit value across the bit: the FSM
+  latches the new value on Q0 entry, then a single-cycle output
+  pipeline reg delays its arrival at the pad by one fabric cycle
+  so SDA changes one cycle after SCL falls (the `tHD;DAT`
+  data-hold described below). SDA is then stable through Q3,
   driven per the `tx_symbol` field (decoded against the active
   `BUS_MODE`).
 - The receiving side samples SDA at the SCL rising edge (Q1→Q2);
@@ -666,6 +670,33 @@ Concretely:
   wire. A complete I2C/I3C frame is `EMIT_BIT` × N where each
   bit is one instruction, bracketed by `SET_BUS_MODE`s when the
   phase changes between OD and PP.
+
+#### Bit-to-bit transition: `tHD;DAT` data-hold
+
+The bit-to-bit boundary --- end of bit N's Q3 (SCL high) to start
+of bit N+1's Q0 (SCL low) --- requires SDA to remain stable for at
+least `tHD;DAT` *after* SCL falls. Per UM10204 rev 7 (NXP I2C-bus
+specification) the minimum is 0 ns in all three I2C modes
+(Standard, Fast, Fast+), but several mainstream slaves
+(NXP LPI2C on MCXA266, FlexComm on RT685-EVK) run a strict
+START/STOP edge detector clocked off their own input synchroniser
+and will mis-classify a same-edge SDA-change-with-SCL-fall as a
+spurious START / STOP, dropping the transfer mid-byte.
+
+The engine satisfies this with a single-cycle output pipeline reg
+on `io.bus.sda.*` only; SCL is unpipelined. The FSM still latches
+SDA and SCL on the same cycle (one fewer mux level than an in-FSM
+data-hold shape, important for nextpnr's 24 MHz timing closure on
+UP5K-SG48); the pad-boundary pipeline then delays SDA by one
+fabric cycle relative to SCL on every transition --- EMIT_BIT
+bit-to-bit, EMIT_QUARTER between quarters, STRETCH_SCL release,
+idle release. The result is ~41.67 ns of SCL-low-with-SDA-stable
+@ 24 MHz fabric, comfortably above 0 ns in every supported mode
+and small enough that the next bit's `tSU;DAT` setup window stays
+well above its spec min in Standard / Fast / Fast+. See
+`BitCycleEngineEmitBitDataHoldSim` for the regression. The
+mismatch / capture sample point is unaffected (it reads from the
+observer on the pad *input*, independent of the output pipeline).
 
 This is the *contract* between the SDK and the engine: the SDK
 emits one `EMIT_BIT` per wire bit, never has to spell out the SCL

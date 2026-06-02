@@ -112,13 +112,17 @@ This means:
   boundary --- no half-bit, no "between quarters" state.
 - `EMIT_BIT` carries the **canonical bit shape** for all 4
   quarters: SCL low / low / high / high (engine-generated, not
-  in the bitstream), SDA held at the bit's `tx_symbol`
-  throughout. The `tx_symbol` is decoded against the active
-  `BUS_MODE` (dominant → OD-low or PP-drive-0; recessive →
-  OD-release or PP-drive-1; hiz → driver-off). The SDK emits
-  one `EMIT_BIT` per wire bit and never has to reason about
-  the SCL waveform. See ROADMAP §"Canonical EMIT_BIT shape"
-  for the wire-level contract.
+  in the bitstream), SDA held at the bit's `tx_symbol`. A
+  single-cycle pad-boundary output pipeline on SDA only (SCL is
+  unpipelined) gives every SDA transition --- bit-to-bit,
+  between EMIT_QUARTERs, idle release --- a one-fabric-cycle lag
+  behind the corresponding SCL change. That is the `tHD;DAT`
+  data-hold; see ROADMAP §"Canonical EMIT_BIT shape" for the
+  spec rationale and the LPI2C / FlexComm motivation. The
+  `tx_symbol` is decoded against the active `BUS_MODE`
+  (dominant → OD-low or PP-drive-0; recessive → OD-release or
+  PP-drive-1; hiz → driver-off). The SDK emits one `EMIT_BIT`
+  per wire bit and never has to reason about the SCL waveform.
 - **SCL is engine-generated during `EMIT_BIT`, bitstream-
   controlled during `EMIT_QUARTER`.** This is the only path to
   per-quarter SCL control; `EMIT_BIT`'s bitstream does not carry
