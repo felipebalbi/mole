@@ -77,16 +77,15 @@ import spinal.core._
   *   engine itself imposes no upper bound here.
   *
   * @param stretchTimeoutCycles
-  *   Stretch-wait timeout in fabric cycles, applied at the Q1->Q2 boundary
-  *   of every controller-role `EMIT_BIT` when the slave is observed to be
+  *   Stretch-wait timeout in fabric cycles, applied at the Q1->Q2 boundary of
+  *   every controller-role `EMIT_BIT` when the slave is observed to be
   *   stretching SCL low. Default 2^20 ~= 44 ms at 24 MHz fabric, comfortably
   *   above SMBus tTIMEOUT (35 ms) and any plausible I2C/I3C wakeup; small
-  *   enough that a genuinely wedged slave produces a deterministic HALT
-  *   rather than an infinite spin. See `ROADMAP.md` §"Stretch-aware Q2
-  *   entry" for the engine-side contract. Set to 1 in a custom MoleConfig
-  *   to make the engine HALT immediately on any observed stretch (useful
-  *   for compliance tests that need to surface stretch as a violation
-  *   rather than tolerate it).
+  *   enough that a genuinely wedged slave produces a deterministic HALT rather
+  *   than an infinite spin. See `ROADMAP.md` §"Stretch-aware Q2 entry" for the
+  *   engine-side contract. Set to 1 in a custom MoleConfig to make the engine
+  *   HALT immediately on any observed stretch (useful for compliance tests that
+  *   need to surface stretch as a violation rather than tolerate it).
   *
   * @param role
   *   Boot-default engine role. Defaults to [[EngineRole.Controller]] ---

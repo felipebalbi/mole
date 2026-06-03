@@ -7,44 +7,38 @@ import spinal.lib._
 /** Stretch-aware controller-role `EMIT_BIT` timing scenarios.
   *
   * Regression coverage for the spec at
-  * `docs/superpowers/specs/2026-06-02-stretch-aware-emit-bit-design.md`.
-  * The new behaviour: at every Q1->Q2 timer tick in controller role
-  * the engine commits the SCL recessive symbol and then observes
-  * `observer.sclSampled`. Under OD-class `BUS_MODE` it pauses the
-  * quarter timer until SCL releases (bounded by
-  * `MoleConfig.stretchTimeoutCycles`); under PP-class `BUS_MODE`
-  * it HALTs 0xD immediately.
+  * `docs/superpowers/specs/2026-06-02-stretch-aware-emit-bit-design.md`. The
+  * new behaviour: at every Q1->Q2 timer tick in controller role the engine
+  * commits the SCL recessive symbol and then observes `observer.sclSampled`.
+  * Under OD-class `BUS_MODE` it pauses the quarter timer until SCL releases
+  * (bounded by `MoleConfig.stretchTimeoutCycles`); under PP-class `BUS_MODE` it
+  * HALTs 0xD immediately.
   *
   * ==Cases==
   *
-  *   1. `stretchQ1ToQ2_releasesBeforeTimeout` --- slave holds SCL low
-  *      for ~30 fabric cycles past nominal Q2 entry, then releases.
-  *      Engine should pause + resume + complete bit cleanly.
-  *   2. `stretchQ3ToQ0_crossBitBoundary` --- slave holds SCL low across
-  *      two adjacent EMIT_BITs' nominal boundaries; next bit's Q1->Q2
-  *      catches it.
-  *   3. `stretchNeverReleased_timesOutAndHalts` --- slave wedges SCL
-  *      low forever; engine eventually times out with HALT 0xD,
-  *      MISMATCH set.
-  *      NOTE: this case runs with the DEFAULT
-  *      `stretchTimeoutCycles` (2^20 ~ 44 ms simulated time) once the
-  *      stretch-aware engine lands. With Verilator that is ~5 s of
-  *      wall-clock. We deliberately do NOT reference a
-  *      `cfg.stretchTimeoutCycles` field today because the field does
-  *      not yet exist in `MoleConfig`; introducing it here would block
-  *      the OTHER three cases from compiling on the current head.
-  *      TODO: after Task 4 (the coder's MoleConfig change) lands,
-  *      tighten this case to use `cfg.copy(stretchTimeoutCycles = 64)`
-  *      for a sub-second sim.
-  *   4. `stretchUnderPpMode_haltsImmediately` --- I3C-PP slave that
-  *      attempts to stretch is a spec violation; engine HALTs 0xD
-  *      within 200 fabric cycles, no wait-state spin.
+  *   1. `stretchQ1ToQ2_releasesBeforeTimeout` --- slave holds SCL low for ~30
+  *      fabric cycles past nominal Q2 entry, then releases. Engine should pause
+  *      + resume + complete bit cleanly.
+  *   2. `stretchQ3ToQ0_crossBitBoundary` --- slave holds SCL low across two
+  *      adjacent EMIT_BITs' nominal boundaries; next bit's Q1->Q2 catches it.
+  *   3. `stretchNeverReleased_timesOutAndHalts` --- slave wedges SCL low
+  *      forever; engine eventually times out with HALT 0xD, MISMATCH set. NOTE:
+  *      this case runs with the DEFAULT `stretchTimeoutCycles` (2^20 ~ 44 ms
+  *      simulated time) once the stretch-aware engine lands. With Verilator
+  *      that is ~5 s of wall-clock. We deliberately do NOT reference a
+  *      `cfg.stretchTimeoutCycles` field today because the field does not yet
+  *      exist in `MoleConfig`; introducing it here would block the OTHER three
+  *      cases from compiling on the current head. TODO: after Task 4 (the
+  *      coder's MoleConfig change) lands, tighten this case to use
+  *      `cfg.copy(stretchTimeoutCycles = 64)` for a sub-second sim.
+  *   4. `stretchUnderPpMode_haltsImmediately` --- I3C-PP slave that attempts to
+  *      stretch is a spec violation; engine HALTs 0xD within 200 fabric cycles,
+  *      no wait-state spin.
   *
-  * On the CURRENT engine head (no stretch awareness), cases 3 and 4
-  * fail: the engine sails through, HALTs status=0, and our assertions
-  * expect 0xD. Cases 1 and 2 pass trivially today (engine doesn't
-  * observe SCL, so it completes either way). After Task 4 / Task 5
-  * land, all four go green.
+  * On the CURRENT engine head (no stretch awareness), cases 3 and 4 fail: the
+  * engine sails through, HALTs status=0, and our assertions expect 0xD. Cases 1
+  * and 2 pass trivially today (engine doesn't observe SCL, so it completes
+  * either way). After Task 4 / Task 5 land, all four go green.
   *
   * Run: `sbt "runMain mole.BitCycleEngineStretchSim"`
   */

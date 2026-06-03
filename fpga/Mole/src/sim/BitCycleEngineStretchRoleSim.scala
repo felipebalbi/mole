@@ -6,26 +6,23 @@ import spinal.lib._
 
 /** Role-gating coverage for the stretch-aware `EMIT_BIT` guard.
   *
-  * The new auto-sync at the Q1->Q2 boundary is supposed to fire
-  * ONLY in controller role; target-role `EMIT_BIT` must bypass it
-  * (the engine does not generate SCL there --- there's nothing to
-  * wait for).
+  * The new auto-sync at the Q1->Q2 boundary is supposed to fire ONLY in
+  * controller role; target-role `EMIT_BIT` must bypass it (the engine does not
+  * generate SCL there --- there's nothing to wait for).
   *
-  * NOTE: This sim is a REGRESSION GUARD, not a TDD-red test. Both
-  * cases will pass on the current head (pre-stretch-aware engine);
-  * they exist to catch the case where the coder accidentally makes
-  * the new guard fire in target role, or breaks the runtime
-  * SET_ROLE path.
+  * NOTE: This sim is a REGRESSION GUARD, not a TDD-red test. Both cases will
+  * pass on the current head (pre-stretch-aware engine); they exist to catch the
+  * case where the coder accidentally makes the new guard fire in target role,
+  * or breaks the runtime SET_ROLE path.
   *
   * ==Cases==
   *
-  *   1. `targetRole_emitBitNoStretchGuard` --- boot with
-  *      `cfg.role = Target`; EMIT_BIT with SCL held low must
-  *      complete quickly (no spin in the stretch wait state).
-  *   2. `midProgramSetRole_switchesPathCleanly` --- Controller
-  *      EMIT_BIT (with stretch + release), then SET_ROLE target,
-  *      then SAMPLE_BIT_ON_SCL paced by an external SCL rising
-  *      edge; both arms work in one bitstream.
+  *   1. `targetRole_emitBitNoStretchGuard` --- boot with `cfg.role = Target`;
+  *      EMIT_BIT with SCL held low must complete quickly (no spin in the
+  *      stretch wait state).
+  *   2. `midProgramSetRole_switchesPathCleanly` --- Controller EMIT_BIT (with
+  *      stretch + release), then SET_ROLE target, then SAMPLE_BIT_ON_SCL paced
+  *      by an external SCL rising edge; both arms work in one bitstream.
   *
   * Run: `sbt "runMain mole.BitCycleEngineStretchRoleSim"`
   */
