@@ -76,6 +76,18 @@ import spinal.core._
   *   Rojo (ECP5, faster fabric) will revisit the production baud default; the
   *   engine itself imposes no upper bound here.
   *
+  * @param stretchTimeoutCycles
+  *   Stretch-wait timeout in fabric cycles, applied at the Q1->Q2 boundary
+  *   of every controller-role `EMIT_BIT` when the slave is observed to be
+  *   stretching SCL low. Default 2^20 ~= 44 ms at 24 MHz fabric, comfortably
+  *   above SMBus tTIMEOUT (35 ms) and any plausible I2C/I3C wakeup; small
+  *   enough that a genuinely wedged slave produces a deterministic HALT
+  *   rather than an infinite spin. See `ROADMAP.md` §"Stretch-aware Q2
+  *   entry" for the engine-side contract. Set to 1 in a custom MoleConfig
+  *   to make the engine HALT immediately on any observed stretch (useful
+  *   for compliance tests that need to surface stretch as a violation
+  *   rather than tolerate it).
+  *
   * @param role
   *   Boot-default engine role. Defaults to [[EngineRole.Controller]] ---
   *   today's shipping behaviour and the only role exercised by Steps 1..18. Set
@@ -96,6 +108,7 @@ case class MoleConfig(
     resultRingByteCount: Int = 8192,
     captureMaxBits: Int = 65536,
     uartBaud: Int = 1_000_000,
+    stretchTimeoutCycles: Int = 1 << 20,
     role: EngineRole = EngineRole.Controller
 ) {
 
@@ -130,6 +143,11 @@ case class MoleConfig(
   )
 
   require(uartBaud >= 1, s"uartBaud=$uartBaud must be >= 1")
+
+  require(
+    stretchTimeoutCycles >= 1,
+    s"stretchTimeoutCycles=$stretchTimeoutCycles must be >= 1"
+  )
 
   /** Convert a target wire-quarter rate into a fabric-cycle divider.
     *

@@ -290,6 +290,13 @@ object Instruction {
     * part of the bitstream. The compare against the sampled SDA value, gated by
     * `mask`, updates the sticky `MISMATCH_FLAG`. `capture=1` also writes the
     * sampled bit to the result ring.
+    *
+    * Stretch-aware Q2 entry: in controller role under OD-class BUS_MODE,
+    * the engine auto-pauses the Q1->Q2 advance until the slave releases
+    * SCL (or `MoleConfig.stretchTimeoutCycles` fabric cycles elapse,
+    * whichever comes first). Under PP-class BUS_MODE the slave is in
+    * violation; the engine HALTs with status 0xD. See ROADMAP
+    * §"Stretch-aware Q2 entry".
     */
   case class EmitBit(
       txSymbol: TxSymbol.E,
@@ -336,6 +343,14 @@ object Instruction {
     * stretching (fuzz) and target-role canonical clock stretching. The SDK
     * chains multiple `STRETCH_SCL` calls when a single 11-bit field is not
     * enough.
+    *
+    * `STRETCH_SCL` is the controller-role *forced-stretch* primitive (also
+    * the canonical target-role stretching mechanic). It holds SCL low for
+    * exactly N quarters regardless of any slave stretching --- the
+    * auto-stretch-sync that `EMIT_BIT` does at Q1->Q2 is NOT applied here.
+    * If a slave is also stretching during a `STRETCH_SCL`, the engine
+    * still releases SCL after N quarters; the next `EMIT_BIT`'s Q1->Q2
+    * guard catches any residual slave stretch.
     */
   case class StretchScl(nQuarters: Int) extends Instruction
 

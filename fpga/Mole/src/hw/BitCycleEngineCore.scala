@@ -432,6 +432,50 @@ case class BitCycleEngineCore(cfg: MoleConfig) extends Component {
   val stretchQs = Reg(UInt(11 bits)) init (0)
 
   // ------------------------------------------------------------------
+  // Stretch-wait countdown counter (see ROADMAP §"Stretch-aware Q2
+  // entry" and docs/superpowers/specs/2026-06-02-stretch-aware-
+  // emit-bit-design.md §11.6).
+  //
+  // 21-bit raw fabric-cycle counter loaded on entry to
+  // `emitBitStretchWait` and decremented every active cycle of that
+  // state. When it reaches zero the wait state HALTs with status 0xD
+  // and sets TIMEOUT_FLAG + MISMATCH_FLAG. Init value is 0 because
+  // the FSM never reads the reg before `onEntry` writes it. Width is
+  // 21 (not 20) so the documented default `cfg.stretchTimeoutCycles
+  // = 1 << 20` (~44 ms at 24 MHz) fits as a literal; the spec's
+  // "20-bit" wording predates the inclusive-default decision.
+  //
+  // `stretchTimeoutCtrIsZero` pipelines the `=== 0` comparison so the
+  // FSM's `elsewhen` reads a single registered bit instead of a
+  // 21-input OR-reduction. The combinational form fans the
+  // FSM-state-active mesh through the counter's clock-enable and blew
+  // nextpnr's 24 MHz timing budget by ~12 ns on UP5K-SG48 across all
+  // seeds. Init=True so an out-of-state read defaults to the safe
+  // "already expired, don't decrement" view. The price is one extra
+  // FF and one fabric cycle of timeout latency (timeout fires at N+1
+  // cycles instead of N); at the 44 ms design timeout that is noise.
+  // ------------------------------------------------------------------
+  val stretchTimeoutCtr = Reg(UInt(21 bits)) init (U(0, 21 bits))
+  val stretchTimeoutCtrIsZero = Reg(Bool()) init (True)
+  stretchTimeoutCtrIsZero := stretchTimeoutCtr === 0
+
+  // Inline pause-flag for the stretch-wait. Set True when the
+  // Q1->Q2 guard observes !sclSampled in controller/OD-class
+  // mode; cleared when SCL is observed rising (release) or the
+  // timeout fires. Gates the timer's `enable` and the qIdx
+  // advance inside `emitBitState`. Replaces an earlier
+  // dedicated `emitBitStretchWait` FSM state --- adding a new
+  // state widened the `fsm_stateReg` decode mux fan-in across
+  // every engine sub-block consuming the FSM state register
+  // (SPRAM write-data, write-addr, programReadCmd.valid, ...),
+  // which cost ~5 MHz Fmax on UP5K-SG48 and prevented closing
+  // the 24 MHz timing floor at any seed. Inline gate keeps the
+  // FSM state count at the pre-change 17 and recovers the
+  // budget. Init False so a power-on engine outside the wait
+  // never spuriously pauses.
+  val waitingForStretch = Reg(Bool()) init (False)
+
+  // ------------------------------------------------------------------
   // Quarter-bit timing registers (Step 11 `LOAD_TIMING`)
   //
   // Four 9-bit divider words, one per `BUS_MODE.mode[1:0]` slot:
@@ -602,9 +646,17 @@ case class BitCycleEngineCore(cfg: MoleConfig) extends Component {
     //   - `0xF` (engine-internal) is the trap code for malformed
     //     instructions: reserved opcode, reserved cond code,
     //     reserved tx_symbol, invalid SET_BUS_MODE wire value.
-    def enterHalt(status: Bits): Unit = {
+    //
+    // `forceMismatch` lets a trap path that has just written
+    // `mismatchFlag := True` on the same cycle override the
+    // `haltMismatchLatch := mismatchFlag` sample (which would
+    // otherwise see the previously-registered value, not the
+    // about-to-be-written True). Used by the stretch-aware
+    // EMIT_BIT trap paths (HALT 0xD). Default False preserves
+    // pre-existing behaviour for every other caller.
+    def enterHalt(status: Bits, forceMismatch: Bool = False): Unit = {
       haltStatusLatch := status
-      haltMismatchLatch := mismatchFlag
+      haltMismatchLatch := mismatchFlag | forceMismatch
       haltOverflowLatch := resultOverflow
       goto(haltWriteLoState)
     }
@@ -1139,55 +1191,96 @@ case class BitCycleEngineCore(cfg: MoleConfig) extends Component {
     // -------------------------------------------------- EmitBit ----
     val emitBitState: State = new State {
       whenIsActive {
-        timerEnable := True
-
-        when(timer.io.tick) {
-          // Sample SDA at the Q2 → Q3 transition --- the latest
-          // possible point inside the SCL-high half, with the
-          // synchronizer's 2-cycle delay reflecting a value well
-          // inside Q2 (~10 fabric cycles after SCL went high at
-          // 12 cycles per quarter). `mask = 0` is don't-care:
-          // leave `MISMATCH_FLAG` sticky from its last writer.
-          // Same sample point feeds CAPTURE.
-          when(qIdx === 2) {
-            when(instrReg(Instruction.MASK_BIT)) {
-              mismatchFlag :=
-                sdaSampled =/= instrReg(Instruction.EXPECT_BIT)
-            }
-            when(instrReg(Instruction.CAPTURE_BIT)) {
-              captureValueReg := sdaSampled
-            }
-          }
-
-          when(qIdx === 3) {
-            // Bit complete. PC++ now; if capture is set, route
-            // through `captureWriteState` to write the record
-            // before refetching --- it goes straight back to
-            // `fetchState` after the write fires. SDA / SCL regs
-            // keep their Q3 values until the next instruction
-            // overrides them --- which is exactly the "SCL stays
-            // high between bits" contract.
-            pc := pc + 1
-            when(instrReg(Instruction.CAPTURE_BIT)) {
-              goto(captureWriteState)
-            } otherwise {
-              goto(fetchState)
-            }
+        when(waitingForStretch) {
+          // ---- Stretch-wait phase ---------------------------
+          // Q1->Q2 guard observed !sclSampled and committed
+          // the SCL recessive symbol. Timer paused (timerEnable
+          // defaults False). SDA untouched (preserves tHD;DAT
+          // hold). Exit on SCL release or timeout.
+          when(observer.sclRising) {
+            waitingForStretch := False
+            timerLoad := True
+            qIdx := 2
+          } elsewhen (stretchTimeoutCtrIsZero) {
+            timeoutFlag := True
+            mismatchFlag := True
+            waitingForStretch := False
+            enterHalt(B"1101", forceMismatch = True)
           } otherwise {
-            val nextQ = qIdx + 1
-            qIdx := nextQ
-            // Update SCL for the new quarter. SDA stays as latched on
-            // entry to this state (held for the full bit per spec).
-            // Target-role: leave SCL released (set in decodeState's
-            // emitBit arm); the runtime `when(!roleReg)` here gates
-            // the per-quarter SclWaveformGen drive the same way the
-            // entry arm gates the Q0 latch. SclWaveformGen and the
-            // symbol decoder elaborate unconditionally.
-            val sclSym = SclWaveformGen(nextQ)
-            val scl = SymbolDecoder(sclSym, busModeReg)
-            when(!roleReg) {
-              sclDriveLow := scl.driveLow
-              sclDriveHigh := scl.driveHigh
+            stretchTimeoutCtr := stretchTimeoutCtr - 1
+          }
+        } otherwise {
+          timerEnable := True
+
+          when(timer.io.tick) {
+            // Sample SDA at the Q2 → Q3 transition --- the latest
+            // possible point inside the SCL-high half, with the
+            // synchronizer's 2-cycle delay reflecting a value well
+            // inside Q2 (~10 fabric cycles after SCL went high at
+            // 12 cycles per quarter). `mask = 0` is don't-care:
+            // leave `MISMATCH_FLAG` sticky from its last writer.
+            // Same sample point feeds CAPTURE.
+            when(qIdx === 2) {
+              when(instrReg(Instruction.MASK_BIT)) {
+                mismatchFlag :=
+                  sdaSampled =/= instrReg(Instruction.EXPECT_BIT)
+              }
+              when(instrReg(Instruction.CAPTURE_BIT)) {
+                captureValueReg := sdaSampled
+              }
+            }
+
+            when(qIdx === 3) {
+              // Bit complete. PC++ now; if capture is set, route
+              // through `captureWriteState` to write the record
+              // before refetching --- it goes straight back to
+              // `fetchState` after the write fires. SDA / SCL regs
+              // keep their Q3 values until the next instruction
+              // overrides them --- which is exactly the "SCL stays
+              // high between bits" contract.
+              pc := pc + 1
+              when(instrReg(Instruction.CAPTURE_BIT)) {
+                goto(captureWriteState)
+              } otherwise {
+                goto(fetchState)
+              }
+            } otherwise {
+              val nextQ = qIdx + 1
+              // Update SCL for the new quarter. SDA stays as latched
+              // on entry to this state (held for the full bit per
+              // spec). Target-role: leave SCL released.
+              val sclSym = SclWaveformGen(nextQ)
+              val scl = SymbolDecoder(sclSym, busModeReg)
+              when(!roleReg) {
+                sclDriveLow := scl.driveLow
+                sclDriveHigh := scl.driveHigh
+              }
+
+              // Stretch-aware Q2 entry guard (controller role only).
+              // On the Q1->Q2 tick the SCL recessive symbol was just
+              // committed above; if the slave is holding SCL low we
+              // must NOT advance qIdx into Q2 (sample would land in
+              // slave-stretched dead time). Under OD-class BUS_MODE
+              // we pause inline (waitingForStretch flag); under
+              // PP-class the slave is in violation and we HALT 0xD
+              // immediately. qIdx update is conditional on NOT
+              // entering the stretch path.
+              when(qIdx === 1 && !roleReg && !observer.sclSampled) {
+                when(BusModeOps.isPpClass(busModeReg)) {
+                  mismatchFlag := True
+                  enterHalt(B"1101", forceMismatch = True)
+                } otherwise {
+                  waitingForStretch := True
+                  stretchTimeoutCtr :=
+                    U(cfg.stretchTimeoutCycles, 21 bits)
+                  // Force the pipelined zero-flag False this cycle
+                  // so the wait-phase's first tick doesn't see the
+                  // pre-load (0 → flag True) and HALT immediately.
+                  stretchTimeoutCtrIsZero := False
+                }
+              } otherwise {
+                qIdx := nextQ
+              }
             }
           }
         }
