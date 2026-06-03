@@ -80,7 +80,7 @@ inner_loop:
         JMP           wedge_addr_w
 
         ; -- 32x write 0x55 (0101 0101, MSB-first) using LCR0 --
-        LOAD_LOOP     lcr0, 32
+        LOAD_LOOP     lcr0, 8
 write_byte_body:
         EMIT_BIT      tx=dominant       ; bit 7 = 0
         EMIT_BIT      tx=recessive      ; bit 6 = 1
@@ -126,7 +126,7 @@ write_byte_body:
 
         ; -- 31x read with controller ACK (no capture; we're not
         ;    validating bytes, only provoking the race) --
-        LOAD_LOOP     lcr0, 31
+        LOAD_LOOP     lcr0, 7
 read_byte_body:
         EMIT_BIT      tx=recessive
         EMIT_BIT      tx=recessive

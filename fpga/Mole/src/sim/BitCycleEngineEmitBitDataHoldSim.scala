@@ -11,22 +11,22 @@ import spinal.lib._
   * cause was that the `EMIT_BIT` decode arm in [[BitCycleEngineCore]] wrote
   * `sdaDrive*` and `sclDrive*` from the same `decodeState` cycle, so at every
   * bit-to-bit boundary SCL fell *and* SDA changed on the same fabric edge.
-  * Spec-strict I2C slaves (NXP LPI2C on MCXA266, FlexComm on RT685) sample
-  * SDA via a START/STOP edge detector clocked off their own input
-  * synchroniser; pad-to-pad output skew + the slave's asymmetric SDA/SCL
-  * input timing let SDA's edge race ahead of SCL's resolved-low on the wire,
-  * which the slave's edge detector then mis-classifies as a spurious
-  * START/STOP and drops the transfer mid-address.
+  * Spec-strict I2C slaves (NXP LPI2C on MCXA266, FlexComm on RT685) sample SDA
+  * via a START/STOP edge detector clocked off their own input synchroniser;
+  * pad-to-pad output skew + the slave's asymmetric SDA/SCL input timing let
+  * SDA's edge race ahead of SCL's resolved-low on the wire, which the slave's
+  * edge detector then mis-classifies as a spurious START/STOP and drops the
+  * transfer mid-address.
   *
   * The TMP108 on the bring-up rig has an input glitch filter wide enough to
   * swallow the race, which is why `tmp108.moleasm` works against the same
   * engine. A spec-strict slave does not.
   *
-  * The fix is to delay SDA's bit-to-bit transition by one fabric cycle
-  * relative to SCL's Q3-recessive → Q0-dominant fall, giving a `tHD;DAT`
-  * hold of ~41.67 ns @ 24 MHz fabric. That comfortably exceeds the I2C-FM
-  * (UM10204 rev 7) minimum of 0 ns in every supported mode (Standard,
-  * Fast, Fast+) without eating measurably into the next bit's setup window:
+  * The fix is to delay SDA's bit-to-bit transition by one fabric cycle relative
+  * to SCL's Q3-recessive → Q0-dominant fall, giving a `tHD;DAT` hold of ~41.67
+  * ns @ 24 MHz fabric. That comfortably exceeds the I2C-FM (UM10204 rev 7)
+  * minimum of 0 ns in every supported mode (Standard, Fast, Fast+) without
+  * eating measurably into the next bit's setup window:
   *
   * {{{
   *   mode    SCL     tHD;DAT min   achieved   tSU;DAT remaining
@@ -38,20 +38,20 @@ import spinal.lib._
   * ==Test strategy==
   *
   * Run a controller-role program that emits two adjacent `EMIT_BIT`s with
-  * *different* SDA values --- specifically `dominant` (logical 0) followed
-  * by `recessive` (logical 1), which is the bit-7→bit-6 transition the
-  * `i2c-soak` `addr_w = 0x40 = 0100_0000` byte starts with. Capture a
-  * per-cycle bus-driver trace; identify the cycle of the inter-bit SCL
-  * falling edge (the cycle where `sclDriveLow` transitions False → True
-  * after the first SCL-high region); assert that on that cycle SDA still
-  * carries bit 1's `(driveLow=True, driveHigh=False)` decode, *not* bit 2's
-  * `(False, False)` release. The new SDA value must appear no earlier than
-  * one fabric cycle later.
+  * *different* SDA values --- specifically `dominant` (logical 0) followed by
+  * `recessive` (logical 1), which is the bit-7→bit-6 transition the `i2c-soak`
+  * `addr_w = 0x40 = 0100_0000` byte starts with. Capture a per-cycle bus-driver
+  * trace; identify the cycle of the inter-bit SCL falling edge (the cycle where
+  * `sclDriveLow` transitions False → True after the first SCL-high region);
+  * assert that on that cycle SDA still carries bit 1's
+  * `(driveLow=True, driveHigh=False)` decode, *not* bit 2's `(False, False)`
+  * release. The new SDA value must appear no earlier than one fabric cycle
+  * later.
   *
   * To keep the sim portable across BUS_MODE classes, the test runs the same
   * assertion under both `i2c` (OD class, recessive → release `(0, 0)`) and
-  * `i3c-PP` (PP class, recessive → drive-high `(0, 1)`); each surfaces the
-  * race as a different `sdaDriveHigh` transition timing.
+  * `i3c-PP` (PP class, recessive → drive-high `(0, 1)`); each surfaces the race
+  * as a different `sdaDriveHigh` transition timing.
   *
   * The pre-fix engine fails the assertion: SDA's drivers change on the same
   * cycle SCL's drivers do. The post-fix engine passes it: SCL changes one
@@ -156,8 +156,22 @@ object BitCycleEngineEmitBitDataHoldSim extends App {
     import Instruction._
     Seq(
       encode(SetBusMode(mode)),
-      encode(EmitBit(TxSymbol.dominant,  expect = false, mask = false, capture = false)),
-      encode(EmitBit(TxSymbol.recessive, expect = false, mask = false, capture = false)),
+      encode(
+        EmitBit(
+          TxSymbol.dominant,
+          expect = false,
+          mask = false,
+          capture = false
+        )
+      ),
+      encode(
+        EmitBit(
+          TxSymbol.recessive,
+          expect = false,
+          mask = false,
+          capture = false
+        )
+      ),
       encode(Halt(0))
     )
   }
@@ -173,13 +187,14 @@ object BitCycleEngineEmitBitDataHoldSim extends App {
     // Skip the initial idle window (both drivers low). The first
     // sclDriveLow True is the START of bit 1; we want the SECOND
     // such region's start. Walk: in-low → in-high → in-low(2).
-    var phase = 0 // 0 = pre-bit1-low, 1 = bit1-low, 2 = high-gap, 3 = bit2-low (target)
+    var phase =
+      0 // 0 = pre-bit1-low, 1 = bit1-low, 2 = high-gap, 3 = bit2-low (target)
     for ((s, idx) <- trace.zipWithIndex) {
       phase match {
-        case 0 if s.sclLow => phase = 1
+        case 0 if s.sclLow  => phase = 1
         case 1 if !s.sclLow => phase = 2
-        case 2 if s.sclLow => return idx
-        case _ =>
+        case 2 if s.sclLow  => return idx
+        case _              =>
       }
     }
     -1
