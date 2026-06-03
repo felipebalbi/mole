@@ -706,6 +706,82 @@ bit shapes for compliance error injection) are expressed by
 emitting 4 explicit `EMIT_QUARTER`s in place of one `EMIT_BIT` ---
 that is the only path to per-quarter SCL control.
 
+#### Stretch-aware Q2 entry
+
+The Q1→Q2 boundary is the one place in the controller-role bit
+cycle where the engine looks at the wire instead of the timer.
+At every Q1→Q2 timer tick the engine commits the SCL `recessive`
+symbol (so the pad releases under OD or drops PMOS-drive under
+PP) and immediately reads `observer.sclSampled`. If the slave is
+holding SCL low, the engine pauses execution inside `EMIT_BIT`
+itself --- a `waitingForStretch` register gates two wait
+branches inside `emitBitState.whenIsActive`, so no dedicated FSM
+state is added (folding the wait into the existing state keeps
+the FSM-decode mux fan-in flat, which is what allowed the change
+to close timing at the 24 MHz floor; see the feat commit message
+for the timing history). The engine spins in that wait branch,
+with the `QuarterBitTimer` held disabled, until either
+`observer.sclRising` fires (slave released) or a 21-bit
+fabric-cycle countdown reaches zero.
+
+The countdown counter is **21 bits wide**, not 20: the documented
+default `MoleConfig.stretchTimeoutCycles = 1 << 20` is exactly a
+21-bit unsigned literal. The `=== 0` comparison is pipelined
+through a separate `stretchTimeoutCtrIsZero` register to keep the
+21-input OR-reduction out of the FSM-state-active mesh that feeds
+the SPRAM write-data and counter clock-enable paths; the
+observable cost is one extra fabric cycle of timeout latency
+(timeout fires at N+1 cycles instead of N), which is noise at the
+44 ms default.
+
+On release, the QuarterBitTimer is reloaded with a full fresh Q2
+period and the bit completes normally; the MISMATCH / CAPTURE
+sample point at the (new) Q2→Q3 transition still lands well
+inside the slave's SCL-high window thanks to the conservative
+full-period reload (do not subtract synchroniser latency: the
+2-FF `BusObserver` already delays `sclRising` by 2 fabric cycles,
+and the reload absorbs that delay implicitly).
+
+On timeout the engine sets `TIMEOUT_FLAG` + `MISMATCH_FLAG` and
+HALTs with status `0xD`. The host loader decodes `0xD` as
+"engine-detected stretch fault"; a `BRANCH_ON TIMEOUT` or
+`BRANCH_ON MISMATCH` placed *before* the next `EMIT_BIT` cannot
+read these flags because the HALT lands first --- the diagnostic
+is meant for the host, not for in-program recovery.
+
+Under PP-class `BUS_MODE` (`i3c-PP`, `hdr-ddr`) the slave is in
+spec violation if it stretches at all (the slave's NMOS fighting
+the controller's PMOS is bus contention); the engine treats any
+observed stretch as a hard error and HALTs `0xD` immediately, no
+wait branch entered. `MISMATCH_FLAG` is set on both the OD-timeout
+and the PP-violation paths; `TIMEOUT_FLAG` is set only on the OD
+path.
+
+The auto-guard applies **only** to controller-role `EMIT_BIT`:
+
+- `EMIT_QUARTER` is the user's literal-wire-shape escape hatch
+  and does not consult `sclSampled`.
+- `STRETCH_SCL` is the controller-role forced-stretch primitive
+  (also the canonical target-role stretching mechanic) and runs
+  for exactly N quarters regardless of slave behaviour.
+- Target role (`!roleReg`) bypasses the guard --- the engine
+  doesn't generate SCL there, so there's nothing to wait for.
+
+The implementation lives in
+`fpga/Mole/src/hw/BitCycleEngineCore.scala` (the Q1→Q2 guard
+inline in `emitBitState` plus the `waitingForStretch` /
+`stretchTimeoutCtr` / `stretchTimeoutCtrIsZero` registers). See
+`BitCycleEngineStretchSim` and `BitCycleEngineStretchRoleSim`
+under `fpga/Mole/src/sim/` for the regression coverage.
+
+This is the *contract* between the SDK and the engine: the SDK
+emits one `EMIT_BIT` per wire bit, never has to spell out the SCL
+waveform, and cannot accidentally produce a non-canonical bit
+shape. Per-quarter deviations (SCL or SDA glitches, non-canonical
+bit shapes for compliance error injection) are expressed by
+emitting 4 explicit `EMIT_QUARTER`s in place of one `EMIT_BIT` ---
+that is the only path to per-quarter SCL control.
+
 #### Worked SDK example
 
 ```scheme
@@ -1591,11 +1667,22 @@ substitute for the formal CTS lab.
    Rojo (ECP5) by design --- see §"Clocks (v0)" for the
    reasoning. Mitigation: Verde positioning as I2C + low-rate
    I3C; bench-tier (Rojo) for full-rate SDR and HDR-DDR.
-4. **Async clock-stretching semantics**: `WAIT_ON SCL_HIGH, t`
+4. **Async clock-stretching semantics**: ~~`WAIT_ON SCL_HIGH, t`
    is the one "real-time, not pre-computed" operation in the
    engine. Need to specify cleanly how it composes with the
-   quarter-bit clock (recommend: pauses the divider, resumes
-   from the same quarter).
+   quarter-bit clock~~ **RESOLVED.** `EMIT_BIT` auto-syncs at
+   the Q1→Q2 boundary in controller role: the engine commits
+   SCL `recessive`, then pauses execution inside `EMIT_BIT`
+   while observing `sclSampled`, resuming on `sclRising` with a
+   fresh full Q2 period. Bounded by
+   `MoleConfig.stretchTimeoutCycles` (default 2^20 fabric cycles
+   ≈ 44 ms at 24 MHz). Surfaces as HALT status `0xD` on timeout;
+   PP-class slave stretching is treated as a compliance violation
+   (immediate HALT `0xD`). See §"Stretch-aware Q2 entry" below
+   for the wire-level contract and
+   `docs/superpowers/specs/2026-06-02-stretch-aware-emit-bit-design.md`
+   for the full design. Final Fmax after the change: 24.70 MHz
+   at the pinned seed (PASS at the 24 MHz floor).
 5. **Result ring overflow on long runs**: 128 KB SPRAM caps single-
    run capture. Mitigation: stream results out over UART concurrently
    with execution, or split long tests into chunks.

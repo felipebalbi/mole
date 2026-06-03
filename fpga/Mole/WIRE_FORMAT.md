@@ -442,7 +442,26 @@ A clean run reports `overflow = 0`; a run that dropped at least
 one record reports `overflow = 1`. The host loader decodes this
 bit via `HaltStatus.overflow` in `mole-loader/src/ring.rs`.
 
-### 7.4 Sources
+### 7.4 HALT status codes
+
+The 4-bit `status` field at HALT word bits `[11:8]` carries one
+of three code classes:
+
+| Code range | Class | Meaning |
+|---|---|---|
+| `0x0..0xC` | Caller-defined | The program author chooses. By convention `0x0` = clean exit; higher codes used per-program (e.g. `i2c-soak.moleasm` uses `0x1`/`0x2`/`0x3` to discriminate wedge-handler sites). |
+| `0xD` | **Engine-detected: stretch fault.** | The slave held SCL low past `MoleConfig.stretchTimeoutCycles` at a Q1→Q2 boundary of `EMIT_BIT` under an OD-class `BUS_MODE`, OR the slave stretched at all under a PP-class `BUS_MODE` (a spec violation). `MISMATCH_FLAG` is set on **both** paths; `TIMEOUT_FLAG` is set only on the OD-timeout path. |
+| `0xE` | Reserved | For future engine traps. |
+| `0xF` | **Engine-detected: malformed instruction.** | One of: reserved opcode word, reserved condition code, reserved `tx_symbol` (`0b11`), invalid `SET_BUS_MODE` wire value, JMP target out of range. |
+
+Callers SHOULD restrict their status codes to `0x0..0xC` so the
+host loader can unambiguously distinguish caller halts from engine
+traps. The loader's `HaltStatus` decoder (in
+`mole-loader/src/ring.rs`) reports the raw 4-bit value; downstream
+logic (e.g. the CLI's `halt_indicates_failure` check) decides
+which codes are considered failures.
+
+### 7.5 Sources
 
 - Engine: `BitCycleEngineCore.scala` ---
   `enterHalt(status)`, `captureWriteState`, `markWriteState`,
