@@ -67,7 +67,7 @@ $(JSON): $(V)
 #   - it is deterministic so bring-up bitstreams are reproducible.
 # If a future change moves the criticality and seed 3 stops passing,
 # re-run a seed sweep (`for s in $(seq 0 15); do nextpnr-ice40 ... \
-# --seed $s; done`) and pick a passing seed. The deeper fix lives on
+# --seed 3$s; done`) and pick a passing seed. The deeper fix lives on
 # the `timing-closure` branch; this seed pin is the interim guarantee
 # that every build of `master` produces a working bitstream.
 $(ASC): $(JSON) $(PCF)
@@ -93,7 +93,8 @@ sim: sim-config sim-opendrain sim-baud-gen sim-rx-sync \
      sim-crc sim-iobuf sim-loader-fsm sim-drainer-fsm sim-top \
      sim-top-flow-control sim-symbol-decoder-contention \
      sim-engine-jmp-boundary sim-top-cts-violation \
-     sim-engine-emit-bit-data-hold ## Run all simulations
+     sim-engine-emit-bit-data-hold \
+     sim-engine-stretch sim-engine-stretch-role ## Run all simulations
 
 # Per-block sim / gen targets land here once their hint blocks in
 # TODO.md flip from 🔲 to ✅. The naming contract is fixed:
@@ -206,6 +207,12 @@ sim-top-cts-violation: ## CTS#-violation sticky observable (F-FPGA-007)
 sim-engine-emit-bit-data-hold: ## EMIT_BIT inter-bit tHD;DAT hold (MCXA266/RT685 regression)
 	$(SBT) -batch "runMain $(PACKAGE).BitCycleEngineEmitBitDataHoldSim"
 
+sim-engine-stretch: ## Stretch-aware EMIT_BIT timing scenarios (Q1->Q2 guard)
+	$(SBT) -batch "runMain $(PACKAGE).BitCycleEngineStretchSim"
+
+sim-engine-stretch-role: ## Stretch-aware EMIT_BIT role-gating (Controller vs Target)
+	$(SBT) -batch "runMain $(PACKAGE).BitCycleEngineStretchRoleSim"
+
 # gen target -- the canonical Verilog entrypoint is MoleTopVerilog;
 # generated module is MoleTop. The generated file lives at gen/MoleTop.v
 # and is gitignored.
@@ -245,4 +252,5 @@ help: ## Show this help (every target with a ## description)
         sim-top-flow-control sim-symbol-decoder-contention \
         sim-engine-jmp-boundary sim-top-cts-violation \
         sim-engine-emit-bit-data-hold \
+        sim-engine-stretch sim-engine-stretch-role \
         gen waves flash clean distclean help
