@@ -123,6 +123,22 @@ This means:
   (dominant → OD-low or PP-drive-0; recessive → OD-release or
   PP-drive-1; hiz → driver-off). The SDK emits one `EMIT_BIT`
   per wire bit and never has to reason about the SCL waveform.
+- **Stretch-aware Q2 entry on controller-role `EMIT_BIT`.** The
+  engine auto-syncs to slave-stretched SCL at the Q1→Q2 boundary:
+  if `observer.sclSampled` is low when the engine would have
+  advanced to Q2, it pauses the `QuarterBitTimer` and spins in a
+  wait branch *inside* `emitBitState` (gated by an inline
+  `waitingForStretch` register, not a dedicated FSM state ---
+  the inline shape was needed to close 24 MHz timing) until SCL
+  releases or `MoleConfig.stretchTimeoutCycles` fabric cycles
+  elapse (default 2^20 ≈ 44 ms at 24 MHz, counted in a 21-bit
+  countdown with a pipelined zero-comparator). PP-class
+  `BUS_MODE` slaves that stretch are treated as compliance
+  violations: immediate HALT `0xD`, no wait. The guard is
+  bypassed in target role (`!roleReg`), and `EMIT_QUARTER` /
+  `STRETCH_SCL` are untouched (user retains literal-wire-shape
+  control / forced-stretch semantics). See ROADMAP §"Stretch-
+  aware Q2 entry" for the wire contract.
 - **SCL is engine-generated during `EMIT_BIT`, bitstream-
   controlled during `EMIT_QUARTER`.** This is the only path to
   per-quarter SCL control; `EMIT_BIT`'s bitstream does not carry
