@@ -1,24 +1,39 @@
-//! Lexer + symbol table + two-pass assembler.
+//! Lexer + symbol table + two-pass assembler for Mole v0.2 moleasm.
 //!
-//! Mirrors the reference Python at `tests/fixtures/mole-asm.py`. Each
-//! source line becomes a [`Statement`], pass 1 assigns PCs and builds
-//! the symbol table, pass 2 encodes each statement into a 16-bit word.
+//! Source files may begin with the raw-primitives pragma:
+//! `(use-raw-primitives)` — enables reserved tx symbols, capture-to-
+//! non-R7, and suppresses the EMIT_BYTE pairing check.
 //!
-//! Reading order matches the Python: lexer first, then pass 1, then
-//! the per-opcode parsers in pass 2.
+//! ## Two-pass structure
+//!
+//! - **Lex:** tokenise each line into a [`Statement`].
+//! - **Pass 1:** walk statements in order, assign PCs, build symbol
+//!   table (labels + `.equ` names).
+//! - **Pass 2:** encode each statement; resolve labels as PC-relative
+//!   offsets; check EMIT_BYTE pairing; build preamble.
 
 use std::collections::HashMap;
 
-use crate::encoder::{self};
+use crate::encoder::{self, SHIFT_ARIGHT, SHIFT_LEFT, SHIFT_RIGHT};
 use crate::error::{AsmError, Result, SourceLocation};
-use crate::symbols::{
-    self, BUS_MODES, COND_CODES, LOOP_REG_ALIASES, MNEMONICS, RESERVED_V05_MNEMONICS, ROLE_ALIASES,
-    TIMING_REG_ALIASES, TX_SYMBOLS,
-};
+use crate::symbols::{self, BUS_MODES, COND_CODES, MNEMONICS, ROLE_NAMES, SHIFT_DIRS, TX_SYMBOLS};
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------
+// Wire-format preamble constants
+// FIXME(B5): replace with mole_abi::MAGIC / FORMAT_VERSION /
+//            MAX_PROGRAM_WORDS + PREAMBLE_WORDS once B5 updates mole-abi.
+// -----------------------------------------------------------------------
+
+/// Preamble magic + version word: bytes 4C 4D 02 00 (little-endian).
+/// The magic u16 is 0x4D4C; version u16 is 0x0002.
+const PREAMBLE_MAGIC: u32 = 0x0002_4D4C;
+
+/// Maximum body length in 32-bit words (§10/§16).
+const MAX_PROGRAM_WORDS: usize = 8192;
+
+// -----------------------------------------------------------------------
 // Statement
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------
 
 #[derive(Debug, Clone)]
 pub(crate) struct Statement {
@@ -29,9 +44,9 @@ pub(crate) struct Statement {
     pub operands: Vec<String>,
 }
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------
 // Symbol table
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum SymbolKind {
@@ -65,15 +80,15 @@ impl SymbolTable {
         if !is_valid_ident(name) {
             return Err(AsmError::symbol(
                 loc,
-                format!("invalid {} name: '{name}'", sym.kind.name()),
+                format!("E-SYM-001: invalid {} name: '{name}'", sym.kind.name()),
             ));
         }
         if symbols::is_reserved_name(name) {
             return Err(AsmError::symbol(
                 loc,
                 format!(
-                    "{} name '{name}' collides with a reserved mnemonic / \
-                     symbol / alias",
+                    "E-SYM-005: {} name '{name}' collides with a reserved \
+                     mnemonic / symbol",
                     sym.kind.name()
                 ),
             ));
@@ -82,8 +97,12 @@ impl SymbolTable {
             return Err(AsmError::symbol(
                 loc,
                 format!(
-                    "{} '{name}' re-defined (prior {} on line {})",
-                    sym.kind.name(),
+                    "{}: '{name}' re-defined (prior {} on line {})",
+                    if sym.kind == SymbolKind::Label {
+                        "E-SYM-001"
+                    } else {
+                        "E-SYM-002"
+                    },
                     prior.kind.name(),
                     prior.line_no
                 ),
@@ -98,14 +117,24 @@ impl SymbolTable {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Identifier helpers (hand-rolled to avoid pulling in the regex crate)
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------
+// Identifier helpers
+// -----------------------------------------------------------------------
 
-/// `[A-Za-z_][A-Za-z0-9_-]*` --- the Python `_IDENT_RE`. Used by the
-/// symbol-table binder so user names allow embedded dashes (matches
-/// the named bus modes like `i3c-od`).
+/// Label pattern: `[A-Za-z_][A-Za-z0-9_]*` (no embedded dashes per §12.1).
 fn is_valid_ident(s: &str) -> bool {
+    let mut chars = s.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    if !(first.is_ascii_alphabetic() || first == '_') {
+        return false;
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Bus-mode identifiers allow hyphens: `[A-Za-z_][A-Za-z0-9_-]*`.
+fn is_valid_bus_mode_ident(s: &str) -> bool {
     let mut chars = s.chars();
     let Some(first) = chars.next() else {
         return false;
@@ -116,18 +145,12 @@ fn is_valid_ident(s: &str) -> bool {
     chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
 }
 
-/// Cheap "this token looks like an identifier reference" test used by
-/// the literal-or-equate resolvers. Matches the (deliberate) Python
-/// behaviour: any token starting with an ASCII letter or underscore is
-/// resolved through the symbol table; anything else falls through to
-/// numeric parsing.
 fn looks_like_identifier(tok: &str) -> bool {
     matches!(tok.chars().next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
 }
 
-/// Try to split `body` as `LABEL:rest`. Label pattern is the stricter
-/// `[A-Za-z_][A-Za-z0-9_]*` --- no dashes --- matching the Python
-/// `_LABEL_DEF_RE`. Whitespace is allowed around the `:`.
+/// Try to split `body` as `LABEL:rest`. Label uses the stricter
+/// no-dashes pattern.
 fn try_split_label(body: &str) -> Option<(&str, &str)> {
     let colon_pos = body.find(':')?;
     let label = body[..colon_pos].trim_end();
@@ -146,9 +169,9 @@ fn try_split_label(body: &str) -> Option<(&str, &str)> {
     Some((label, rest))
 }
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------
 // Numeric literal parser
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------
 
 fn parse_int(tok: &str, loc: &SourceLocation) -> Result<i64> {
     if tok.is_empty() {
@@ -158,12 +181,22 @@ fn parse_int(tok: &str, loc: &SourceLocation) -> Result<i64> {
         Some(rest) => (true, rest),
         None => (false, tok),
     };
-    let parsed = if let Some(hex) = body.strip_prefix("0x").or_else(|| body.strip_prefix("0X")) {
+    // Strip visual separators (underscores) from numeric literals so
+    // `0xDEAD_BEEF` and `1_000_000` are accepted.
+    let clean: String = body.chars().filter(|&c| c != '_').collect();
+    let clean_body = clean.as_str();
+    let parsed = if let Some(hex) = clean_body
+        .strip_prefix("0x")
+        .or_else(|| clean_body.strip_prefix("0X"))
+    {
         i64::from_str_radix(hex, 16)
-    } else if let Some(bin) = body.strip_prefix("0b").or_else(|| body.strip_prefix("0B")) {
+    } else if let Some(bin) = clean_body
+        .strip_prefix("0b")
+        .or_else(|| clean_body.strip_prefix("0B"))
+    {
         i64::from_str_radix(bin, 2)
     } else {
-        body.parse::<i64>()
+        clean_body.parse::<i64>()
     };
     let val = parsed
         .map_err(|_| AsmError::range(loc, format!("not a valid integer literal: '{tok}'")))?;
@@ -172,15 +205,15 @@ fn parse_int(tok: &str, loc: &SourceLocation) -> Result<i64> {
 
 fn resolve_literal_or_equate(tok: &str, syms: &SymbolTable, loc: &SourceLocation) -> Result<i64> {
     if looks_like_identifier(tok) {
-        let sym = syms
-            .get(tok)
-            .ok_or_else(|| AsmError::symbol(loc, format!("undefined symbol: '{tok}'")))?;
+        let sym = syms.get(tok).ok_or_else(|| {
+            AsmError::symbol(loc, format!("E-SYM-004: undefined symbol: '{tok}'"))
+        })?;
         if sym.kind != SymbolKind::Equate {
             return Err(AsmError::symbol(
                 loc,
                 format!(
-                    "'{tok}' is a label (PC address), not a constant; \
-                     expected an .equ value here"
+                    "E-SYM-004: '{tok}' is a label (PC address), not a \
+                     constant; expected an .equ value here"
                 ),
             ));
         }
@@ -189,9 +222,9 @@ fn resolve_literal_or_equate(tok: &str, syms: &SymbolTable, loc: &SourceLocation
     parse_int(tok, loc)
 }
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------
 // Lexer
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------
 
 fn strip_comment(line: &str) -> &str {
     match line.find(';') {
@@ -200,8 +233,6 @@ fn strip_comment(line: &str) -> &str {
     }
 }
 
-/// Split the operand region on commas, then split each comma-piece on
-/// whitespace. Yields a flat list of tokens with empties filtered.
 fn tokenize_operands(operand_region: &str) -> Vec<String> {
     let mut out = Vec::new();
     for piece in operand_region.split(',') {
@@ -214,8 +245,6 @@ fn tokenize_operands(operand_region: &str) -> Vec<String> {
     out
 }
 
-/// Split `body` on the first run of ASCII whitespace into `(head, rest)`.
-/// `rest` is trimmed; `head` is the longest non-whitespace prefix.
 fn split_head(body: &str) -> (&str, &str) {
     let head_end = body
         .find(|c: char| c.is_ascii_whitespace())
@@ -226,15 +255,47 @@ fn split_head(body: &str) -> (&str, &str) {
 
 const ALLOWED_DIRECTIVES: &[&str] = &[".equ", ".dw"];
 
-pub(crate) fn lex(source: &str, filename: &str) -> Result<Vec<Statement>> {
+/// Raw-primitives pragma token (§12.1).
+const RAW_PRAGMA: &str = "(use-raw-primitives)";
+
+pub(crate) fn lex(source: &str, filename: &str) -> Result<(Vec<Statement>, bool)> {
     let mut statements = Vec::new();
-    for (idx, raw) in source.lines().enumerate() {
+    let mut raw_mode = false;
+    let mut first_instruction_seen = false;
+
+    for (idx, raw_line) in source.lines().enumerate() {
         let line_no = idx + 1;
         let loc = SourceLocation::new(filename, line_no);
 
-        let body = strip_comment(raw).trim();
+        // Strip CRLF: `.lines()` strips `\n` but leaves `\r`.
+        let trimmed_line = raw_line.trim_end_matches('\r');
+        let body = strip_comment(trimmed_line).trim();
+
         if body.is_empty() {
             continue;
+        }
+
+        // Check for the raw-primitives pragma (§12.1).
+        if body == RAW_PRAGMA {
+            if first_instruction_seen {
+                return Err(AsmError::operand(
+                    &loc,
+                    "E-RAW-002: raw pragma must be the first non-comment line",
+                ));
+            }
+            raw_mode = true;
+            continue;
+        }
+        // Detect a malformed pragma attempt (starts with `(` but isn't the
+        // exact token).
+        if body.starts_with('(') {
+            return Err(AsmError::operand(
+                &loc,
+                format!(
+                    "E-RAW-003: pragma must read exactly '{RAW_PRAGMA}'; \
+                     got '{body}'"
+                ),
+            ));
         }
 
         let (label, body) = match try_split_label(body) {
@@ -262,11 +323,12 @@ pub(crate) fn lex(source: &str, filename: &str) -> Result<Vec<Statement>> {
                 return Err(AsmError::lex(
                     &loc,
                     format!(
-                        "unknown directive '{directive}' \
+                        "E-LEX-005: unknown directive '{directive}' \
                          (allowed: .equ, .dw)"
                     ),
                 ));
             }
+            first_instruction_seen = true;
             statements.push(Statement {
                 loc,
                 label,
@@ -277,91 +339,72 @@ pub(crate) fn lex(source: &str, filename: &str) -> Result<Vec<Statement>> {
             continue;
         }
 
-        if head != head.to_ascii_uppercase() {
-            return Err(AsmError::lex(
-                &loc,
-                format!("mnemonic must be UPPER CASE: got '{head}'"),
-            ));
-        }
-        if RESERVED_V05_MNEMONICS.contains(&head) {
+        // Mnemonic: v0.2 is case-insensitive; normalise to UPPER-CASE.
+        let upper = head.to_ascii_uppercase();
+
+        // LOOP-group check (§4.4, E-LEX-003): no live opcodes in group=0b11.
+        // We surface this by checking for a heuristic prefix that would
+        // land in the LOOP group. Since we have no LOOP mnemonics, any
+        // unrecognised mnemonic just falls through to E-LEX-001.
+
+        if !MNEMONICS.contains(&upper.as_str()) {
             return Err(AsmError::lex(
                 &loc,
                 format!(
-                    "{head} is a reserved-v0.5 opcode; use `.dw` to inject \
-                     the raw word if you really mean it"
+                    "E-LEX-001: unknown mnemonic: '{upper}' \
+                     (note: in v0.2 mnemonics are case-insensitive)"
                 ),
             ));
         }
-        if !MNEMONICS.contains(&head) {
-            return Err(AsmError::lex(&loc, format!("unknown mnemonic: '{head}'")));
-        }
 
+        first_instruction_seen = true;
         statements.push(Statement {
             loc,
             label,
-            mnemonic: Some(head.to_string()),
+            mnemonic: Some(upper),
             directive: None,
             operands: tokenize_operands(rest),
         });
     }
-    Ok(statements)
+
+    Ok((statements, raw_mode))
 }
 
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------
 // Pass 1: build symbol table + assign PC slots
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------
 
-/// Maximum program-memory budget, in 16-bit words, that the engine
-/// accepts in a single frame. Mirrors the `1..=MAX_PROGRAM_WORDS`
-/// range gate in `frame.rs` (see `WIRE_FORMAT.md` §encoding-width).
-/// Sourced from `mole_abi` so the `.dw` operand-count cap below,
-/// the pass1 PC overflow gate, and the frame builder cannot drift
-/// apart.
-pub(crate) use mole_abi::MAX_PROGRAM_WORDS;
-
-fn pc_advance_for(stmt: &Statement) -> Result<u16> {
+fn pc_advance_for(stmt: &Statement) -> Result<usize> {
     match stmt.directive.as_deref() {
         Some(".equ") => Ok(0),
         Some(".dw") => {
-            // Cap before the `usize as u16` narrowing. Without the
-            // gate, a `.dw` with >= 65536 operands wraps the
-            // advance to a small u16 and the pass1 PC-overflow
-            // check at the caller can be evaded entirely if the
-            // wrapped sum lands <= 2048 --- silent miscompilation.
             if stmt.operands.len() > MAX_PROGRAM_WORDS {
                 return Err(AsmError::range(
                     &stmt.loc,
                     format!(
-                        ".dw operand count {} exceeds program-memory \
-                         budget of {} words (see WIRE_FORMAT.md \
-                         §encoding-width)",
+                        "E-FRM-001: .dw operand count {} exceeds \
+                         program-memory budget of {} words",
                         stmt.operands.len(),
                         MAX_PROGRAM_WORDS,
                     ),
                 ));
             }
-            Ok(stmt.operands.len() as u16)
+            Ok(stmt.operands.len())
         }
-        Some(_) => Ok(0), // ALLOWED_DIRECTIVES gate keeps us here only for .equ/.dw
-        None => {
-            if stmt.mnemonic.is_some() {
-                Ok(1)
-            } else {
-                Ok(0) // label-only line
-            }
-        }
+        Some(_) => Ok(0),
+        None => Ok(if stmt.mnemonic.is_some() { 1 } else { 0 }),
     }
 }
 
 pub(crate) struct Pass1Output {
     pub symbols: SymbolTable,
-    pub pc_stmts: Vec<(u16, Statement)>,
+    pub pc_stmts: Vec<(usize, Statement)>,
 }
 
-pub(crate) fn pass1(statements: Vec<Statement>, _filename: &str) -> Result<Pass1Output> {
+pub(crate) fn pass1(statements: Vec<Statement>) -> Result<Pass1Output> {
     let mut symbols = SymbolTable::default();
-    let mut pc_stmts: Vec<(u16, Statement)> = Vec::new();
-    let mut pc: u16 = 0;
+    let mut pc_stmts: Vec<(usize, Statement)> = Vec::new();
+    let mut pc: usize = 0;
 
     for stmt in statements {
         if let Some(label) = &stmt.label {
@@ -377,7 +420,7 @@ pub(crate) fn pass1(statements: Vec<Statement>, _filename: &str) -> Result<Pass1
             if stmt.operands.len() != 2 {
                 return Err(AsmError::operand(
                     &stmt.loc,
-                    ".equ takes exactly two operands: NAME, VALUE",
+                    "E-OP-001: .equ takes exactly two operands: NAME, VALUE",
                 ));
             }
             let name = stmt.operands[0].clone();
@@ -388,7 +431,7 @@ pub(crate) fn pass1(statements: Vec<Statement>, _filename: &str) -> Result<Pass1
                 line_no: stmt.loc.line,
             };
             symbols.bind(&stmt.loc, &name, sym)?;
-            continue; // .equ consumes no PC slots
+            continue;
         }
 
         let advance = pc_advance_for(&stmt)?;
@@ -398,11 +441,14 @@ pub(crate) fn pass1(statements: Vec<Statement>, _filename: &str) -> Result<Pass1
         }
         pc = pc
             .checked_add(advance)
-            .ok_or_else(|| AsmError::range(&stmt_loc, "PC overflow"))?;
-        if pc as usize > MAX_PROGRAM_WORDS {
+            .ok_or_else(|| AsmError::range(&stmt_loc, "E-RNG-002: PC overflow"))?;
+        if pc > MAX_PROGRAM_WORDS {
             return Err(AsmError::range(
                 &stmt_loc,
-                "program exceeds 2048 instruction slots (PC overflow)",
+                format!(
+                    "E-RNG-002: program exceeds {MAX_PROGRAM_WORDS} \
+                     instruction slots (PC overflow)"
+                ),
             ));
         }
     }
@@ -410,9 +456,9 @@ pub(crate) fn pass1(statements: Vec<Statement>, _filename: &str) -> Result<Pass1
     Ok(Pass1Output { symbols, pc_stmts })
 }
 
-// ---------------------------------------------------------------------------
-// Pass 2 helpers --- per-opcode operand parsing
-// ---------------------------------------------------------------------------
+// -----------------------------------------------------------------------
+// Pass 2 helpers — operand parsing
+// -----------------------------------------------------------------------
 
 fn parse_kv_operands(stmt: &Statement, allowed: &[&str]) -> Result<HashMap<String, String>> {
     let mut out: HashMap<String, String> = HashMap::new();
@@ -420,7 +466,10 @@ fn parse_kv_operands(stmt: &Statement, allowed: &[&str]) -> Result<HashMap<Strin
         let Some((key, val)) = tok.split_once('=') else {
             return Err(AsmError::operand(
                 &stmt.loc,
-                format!("expected key=value operand, got positional token '{tok}'"),
+                format!(
+                    "E-OP-004: expected key=value operand, got positional \
+                     token '{tok}'"
+                ),
             ));
         };
         if !allowed.contains(&key) {
@@ -428,13 +477,16 @@ fn parse_kv_operands(stmt: &Statement, allowed: &[&str]) -> Result<HashMap<Strin
             sorted.sort();
             return Err(AsmError::operand(
                 &stmt.loc,
-                format!("unknown operand key '{key}' (allowed: {sorted:?})"),
+                format!(
+                    "E-OP-002: unknown operand key '{key}' \
+                     (allowed: {sorted:?})"
+                ),
             ));
         }
         if out.contains_key(key) {
             return Err(AsmError::operand(
                 &stmt.loc,
-                format!("duplicate operand key '{key}'"),
+                format!("E-OP-003: duplicate operand key '{key}'"),
             ));
         }
         out.insert(key.to_string(), val.to_string());
@@ -482,8 +534,8 @@ fn resolve_flag_triple(
         if mask {
             return Err(AsmError::operand(
                 loc,
-                "expect=X is don't-care and cannot be combined with mask=1; \
-                 set an explicit expect=0|1 if you want to compare",
+                "E-OP-005: expect=X is don't-care and cannot be combined \
+                 with mask=1; set an explicit expect=0|1",
             ));
         }
         false
@@ -494,455 +546,854 @@ fn resolve_flag_triple(
     Ok((expect, mask, capture))
 }
 
-fn resolve_tx_key(kv: &HashMap<String, String>, key: &str, loc: &SourceLocation) -> Result<u8> {
+/// Resolve a `tx=<sym>` key from a kv map.
+/// Accepts case-insensitive names; short forms `dom`/`rec` accepted.
+/// `raw_mode` enables `tx=reserved` (0b11).
+fn resolve_tx_key(
+    kv: &HashMap<String, String>,
+    key: &str,
+    loc: &SourceLocation,
+    raw_mode: bool,
+) -> Result<u8> {
     let Some(sym) = kv.get(key) else {
         return Err(AsmError::operand(
             loc,
-            format!("missing required operand: {key}=<symbol>"),
+            format!("E-OP-001: missing required operand: {key}=<tx-symbol>"),
         ));
     };
-    symbols::lookup(TX_SYMBOLS, sym).ok_or_else(|| {
-        AsmError::operand(
-            loc,
-            format!(
-                "{key}='{sym}' is not a named tx symbol (allowed: {:?})",
-                symbols::sorted_names(TX_SYMBOLS)
-            ),
-        )
-    })
+    let lower = sym.to_ascii_lowercase();
+    // Try standard table first.
+    if let Some(v) = symbols::lookup(TX_SYMBOLS, &lower) {
+        return Ok(v);
+    }
+    // raw/ mode: accept "reserved" → 0b11.
+    if raw_mode && (lower == "reserved" || lower == "0b11" || lower == "3") {
+        return Ok(0b11);
+    }
+    // Numeric literals 0..3 also accepted (round-trips from disassembler).
+    if let Ok(n) = sym.parse::<u8>() {
+        if n <= 2 {
+            return Ok(n);
+        }
+        if n == 3 {
+            if raw_mode {
+                return Ok(3);
+            }
+            return Err(AsmError::operand(
+                loc,
+                format!(
+                    "E-WIRE-001: tx=reserved (0b11) requires \
+                     '(use-raw-primitives)' pragma"
+                ),
+            ));
+        }
+    }
+    Err(AsmError::operand(
+        loc,
+        format!(
+            "E-OP-002: {key}='{sym}' is not a named tx symbol \
+             (allowed: {:?})",
+            symbols::sorted_names(TX_SYMBOLS)
+        ),
+    ))
 }
 
 fn resolve_cond(tok: &str, loc: &SourceLocation) -> Result<u8> {
-    symbols::lookup(COND_CODES, tok).ok_or_else(|| {
+    let upper = tok.to_ascii_uppercase();
+    symbols::lookup(COND_CODES, &upper).ok_or_else(|| {
         AsmError::operand(
             loc,
             format!(
-                "cond code '{tok}' is not named (allowed: {:?})",
+                "E-LEX-004: cond code '{tok}' is not named \
+                 (allowed: {:?})",
                 symbols::sorted_names(COND_CODES)
             ),
         )
     })
 }
 
+fn resolve_register(tok: &str, loc: &SourceLocation) -> Result<u8> {
+    symbols::parse_reg(tok).ok_or_else(|| {
+        AsmError::operand(
+            loc,
+            format!("E-OP-007: register '{tok}' is not valid; use R0..R7"),
+        )
+    })
+}
+
 fn resolve_branch_target(
     tok: &str,
-    branch_pc: u16,
+    branch_pc: usize,
     syms: &SymbolTable,
     loc: &SourceLocation,
 ) -> Result<i64> {
-    let offset = if looks_like_identifier(tok) {
-        let sym = syms
-            .get(tok)
-            .ok_or_else(|| AsmError::symbol(loc, format!("undefined branch target: '{tok}'")))?;
-        if sym.kind != SymbolKind::Label {
-            return Err(AsmError::symbol(
-                loc,
-                format!("BRANCH_ON target '{tok}' is an .equ constant, not a label"),
-            ));
-        }
-        sym.value - (branch_pc as i64) - 1
-    } else {
-        parse_int(tok, loc)?
-    };
-    if !(-64..=63).contains(&offset) {
-        return Err(AsmError::range(
-            loc,
-            format!(
-                "BRANCH_ON offset {offset} out of signed 7-bit range \
-                 (branch_pc={branch_pc})"
-            ),
-        ));
-    }
-    Ok(offset)
-}
-
-fn resolve_jmp_target(tok: &str, syms: &SymbolTable, loc: &SourceLocation) -> Result<i64> {
-    if looks_like_identifier(tok) {
-        let sym = syms
-            .get(tok)
-            .ok_or_else(|| AsmError::symbol(loc, format!("undefined jump target: '{tok}'")))?;
-        if sym.kind != SymbolKind::Label {
-            return Err(AsmError::symbol(
-                loc,
-                format!(
-                    "JMP target '{tok}' is an .equ constant, not a label \
-                     (use a numeric literal if you really want an .equ as addr)"
-                ),
-            ));
-        }
-        return Ok(sym.value);
-    }
-    parse_int(tok, loc)
-}
-
-fn resolve_loop_reg(tok: &str, loc: &SourceLocation) -> Result<i64> {
-    // Source uses `lcr0` / `lcr1`; the encoder takes the wire value.
-    if let Some(v) = symbols::lookup(LOOP_REG_ALIASES, tok) {
-        return Ok(v as i64);
-    }
-    // Numeric `0` / `1` also accepted so disassembler output round-trips.
-    parse_int(tok, loc).and_then(|n| {
-        if (0..2).contains(&n) {
-            Ok(n)
-        } else {
-            Err(AsmError::operand(
-                loc,
-                format!(
-                    "loop reg '{tok}' must be lcr0|lcr1 or a literal 0|1 \
-                     (allowed names: {:?})",
-                    symbols::sorted_names(LOOP_REG_ALIASES)
-                ),
-            ))
-        }
-    })
-}
-
-fn resolve_role(tok: &str, loc: &SourceLocation) -> Result<bool> {
-    // Source uses `controller` / `target`; the encoder takes a bool
-    // (false = controller, true = target). Numeric `0` / `1` also
-    // accepted so disassembler output round-trips.
-    let lower = tok.to_ascii_lowercase();
-    if let Some(v) = symbols::lookup(ROLE_ALIASES, &lower) {
-        return Ok(v != 0);
-    }
-    parse_int(tok, loc).and_then(|n| match n {
-        0 => Ok(false),
-        1 => Ok(true),
-        _ => Err(AsmError::operand(
-            loc,
-            format!(
-                "SET_ROLE operand '{tok}' must be controller|target or a \
-                 literal 0|1 (allowed names: {:?})",
-                symbols::sorted_names(ROLE_ALIASES)
-            ),
-        )),
-    })
-}
-
-fn resolve_dec_branch_target(
-    tok: &str,
-    branch_pc: u16,
-    syms: &SymbolTable,
-    loc: &SourceLocation,
-) -> Result<i64> {
-    // Same shape and PC-relative arithmetic as `resolve_branch_target`,
-    // distinct only in the error message label so users debugging a
-    // out-of-range loop see "DEC_BRANCH" not "BRANCH_ON".
     let offset = if looks_like_identifier(tok) {
         let sym = syms.get(tok).ok_or_else(|| {
-            AsmError::symbol(loc, format!("undefined DEC_BRANCH target: '{tok}'"))
+            AsmError::symbol(loc, format!("E-SYM-003: undefined branch target: '{tok}'"))
         })?;
         if sym.kind != SymbolKind::Label {
             return Err(AsmError::symbol(
                 loc,
-                format!("DEC_BRANCH target '{tok}' is an .equ constant, not a label"),
+                format!(
+                    "E-SYM-003: BRANCH_ON target '{tok}' is an .equ \
+                     constant, not a label"
+                ),
             ));
         }
         sym.value - (branch_pc as i64) - 1
     } else {
         parse_int(tok, loc)?
     };
-    if !(-128..=127).contains(&offset) {
+    if !(-512..=511).contains(&offset) {
         return Err(AsmError::range(
             loc,
             format!(
-                "DEC_BRANCH offset {offset} out of signed 8-bit range \
-                 (branch_pc={branch_pc})"
+                "E-RNG-003: BRANCH_ON offset {offset} out of signed \
+                 10-bit range (branch_pc={branch_pc})"
             ),
         ));
     }
     Ok(offset)
 }
 
-// ---------------------------------------------------------------------------
-// Pass 2: encode each (pc, statement) into a 16-bit word
-// ---------------------------------------------------------------------------
+/// True iff `bus_mode_wire` is a push-pull class (§9, AGENTS §3.13).
+/// PP classes are `i3c-pp` (wire=2) and `hdr-ddr` (wire=3).
+fn bus_mode_is_pp(wire: u8) -> bool {
+    matches!(wire, 2 | 3)
+}
 
-pub(crate) fn pass2(syms: &SymbolTable, pc_stmts: &[(u16, Statement)]) -> Result<Vec<u16>> {
-    let mut out = Vec::with_capacity(pc_stmts.len());
-    // Linear `(role, bus_mode)` tracker for the AGENTS.md §3.13 check
-    // ("target role never PP-drives SCL"). State is whatever the
-    // most recent `SET_ROLE` / `SET_BUS_MODE` opcode set it to,
-    // walking pc_stmts in PC order.
-    //
-    // Limitations (documented here so future readers don't expect
-    // more than this can deliver):
-    //   * We do NOT follow branches. A JMP / BRANCH_ON / DEC_BRANCH
-    //     that lands in a region with different active state will
-    //     execute under that state at runtime, but the linear scan
-    //     here sees only the textually-prior SET_*. A program that
-    //     legitimately switches role/mode through a jump can defeat
-    //     the check (false negative). A program that sets state in
-    //     a never-taken branch could trip the check (false
-    //     positive); use `.dw` to bypass if you really mean it.
-    //   * Engine power-on defaults are not assumed. Until the
-    //     program issues a `SET_ROLE`, role is treated as Unknown
-    //     and the §3.13 check is skipped --- existing programs that
-    //     never call `SET_ROLE` keep working unchanged.
-    //   * `.dw` words are opaque; they neither update nor consult
-    //     the tracker.
-    //
-    // This is a "linter, not a verifier" --- catches the obvious
-    // mistakes that a careful reading of the source would also
-    // catch, without claiming to be sound under branching.
+// -----------------------------------------------------------------------
+// EMIT_BYTE pairing check (§5.5, E-WIRE-003)
+// -----------------------------------------------------------------------
+
+/// Opaque marker for what can pair with EMIT_BYTE mask=1.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum PairKind {
+    BranchOnMismatch,
+    FlagClearBit0,
+}
+
+/// Scan `pc_stmts` starting at index `start` for a pairing opcode,
+/// skipping `.dw` directives. Returns `Some(PairKind)` if a
+/// valid pairing is found before any non-directive-non-pairing instruction,
+/// `None` otherwise.
+fn find_emit_byte_pair(
+    pc_stmts: &[(usize, Statement)],
+    start: usize,
+    syms: &SymbolTable,
+) -> Option<PairKind> {
+    for (_, stmt) in pc_stmts.iter().skip(start) {
+        let Some(mne) = stmt.mnemonic.as_deref() else {
+            // .dw directive: skip.
+            continue;
+        };
+        // BRANCH_ON MISMATCH, <target> — case-insensitive per spec §12.
+        if mne == "BRANCH_ON"
+            && stmt
+                .operands
+                .first()
+                .map(|s| s.eq_ignore_ascii_case("MISMATCH"))
+                == Some(true)
+        {
+            return Some(PairKind::BranchOnMismatch);
+        }
+        // FLAG_CLEAR with bit 0 set in the mask operand.
+        // Resolve equate names against the symbol table (M4 fix).
+        if mne == "FLAG_CLEAR" {
+            if let Some(mask_tok) = stmt.operands.first() {
+                let resolved = if looks_like_identifier(mask_tok) {
+                    syms.get(mask_tok)
+                        .filter(|s| s.kind == SymbolKind::Equate)
+                        .map(|s| s.value)
+                } else {
+                    parse_int_raw(mask_tok).ok().map(|v| v as i64)
+                };
+                if let Some(m) = resolved {
+                    if m & 1 != 0 {
+                        return Some(PairKind::FlagClearBit0);
+                    }
+                }
+            }
+        }
+        // Any other instruction: unpaired.
+        return None;
+    }
+    None
+}
+
+/// Parse an integer without a SourceLocation (used for pairing check).
+fn parse_int_raw(tok: &str) -> std::result::Result<i64, ()> {
+    let clean: String = tok.chars().filter(|&c| c != '_').collect();
+    let s = clean.as_str();
+    if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        i64::from_str_radix(hex, 16).map_err(|_| ())
+    } else if let Some(bin) = s.strip_prefix("0b").or_else(|| s.strip_prefix("0B")) {
+        i64::from_str_radix(bin, 2).map_err(|_| ())
+    } else {
+        s.parse::<i64>().map_err(|_| ())
+    }
+}
+
+// -----------------------------------------------------------------------
+// Pass 2: encode each (pc, statement) into a 32-bit word
+// -----------------------------------------------------------------------
+
+pub(crate) fn pass2(
+    syms: &SymbolTable,
+    pc_stmts: &[(usize, Statement)],
+    raw_mode: bool,
+) -> Result<Vec<u32>> {
+    let mut out: Vec<u32> = Vec::with_capacity(pc_stmts.len());
+
+    // Linear (role, bus_mode) tracker for §3.13 PP-SCL target check.
     let mut active_role: Option<bool> = None; // false=ctrl, true=tgt
-    let mut active_bus_mode: Option<u8> = None; // BUS_MODES wire value
-    for (pc, stmt) in pc_stmts {
+    let mut active_bus_mode: Option<u8> = None;
+
+    for (i, (pc, stmt)) in pc_stmts.iter().enumerate() {
+        // --- .dw directive ---
         if stmt.directive.as_deref() == Some(".dw") {
             for tok in &stmt.operands {
                 let val = resolve_literal_or_equate(tok, syms, &stmt.loc)?;
-                if !(0..=0xFFFF).contains(&val) {
+                if !(0..=0xFFFF_FFFF_u64 as i64).contains(&val) {
                     return Err(AsmError::range(
                         &stmt.loc,
-                        format!(".dw value {val:#x} out of 16-bit range"),
+                        format!("E-FRM-002: .dw value {val:#x} out of 32-bit range"),
                     ));
                 }
-                out.push((val & 0xFFFF) as u16);
+                out.push(val as u32);
             }
             continue;
         }
+
         let mnemonic = stmt
             .mnemonic
             .as_deref()
-            .expect("pc_stmts only contains directives or mnemonic-bearing lines");
-        let word = encode_mnemonic(mnemonic, stmt, *pc, syms, active_role, active_bus_mode)?;
-        // Update the tracker *after* a successful encode, using the
-        // statement we just encoded. Centralising here (rather than
-        // sprinkling updates inside the per-opcode arms) keeps the
-        // tracking model in one place.
+            .expect("pc_stmts only contains directives or mnemonic lines");
+
+        let word = encode_mnemonic(
+            mnemonic,
+            stmt,
+            *pc,
+            syms,
+            active_role,
+            active_bus_mode,
+            raw_mode,
+            pc_stmts,
+            i,
+        )?;
+
+        // Update linear tracker.
         match mnemonic {
             "SET_ROLE" => {
-                // Role bit is at [10] of the encoded word.
-                active_role = Some((word & (1 << 10)) != 0);
+                // Role bit at [3] of the encoded word.
+                active_role = Some((word & (1 << 3)) != 0);
             }
             "SET_BUS_MODE" => {
-                // Mode wire value is at [10:8] of the encoded word.
-                active_bus_mode = Some(((word >> 8) & 0x7) as u8);
+                // Mode wire at [6:3]: extract 4-bit field.
+                active_bus_mode = Some(((word >> 3) & 0xF) as u8);
             }
             _ => {}
         }
+
         out.push(word);
     }
     Ok(out)
 }
 
-/// `true` if `bus_mode_wire` is a push-pull class for AGENTS.md
-/// §3.13 ("target role never PP-drives SCL"). PP classes are
-/// `i3c-pp` (wire 6) and `hdr-ddr` (wire 7). OD classes (`i2c` 0,
-/// `i3c-od` 1) and the reserved-mode slots are not PP.
-fn bus_mode_is_pp(wire: u8) -> bool {
-    matches!(wire, 6 | 7)
-}
-
+#[allow(clippy::too_many_arguments)]
 fn encode_mnemonic(
     m: &str,
     stmt: &Statement,
-    pc: u16,
+    pc: usize,
     syms: &SymbolTable,
     active_role: Option<bool>,
     active_bus_mode: Option<u8>,
-) -> Result<u16> {
+    raw_mode: bool,
+    pc_stmts: &[(usize, Statement)],
+    stmt_idx: usize,
+) -> Result<u32> {
     let loc = &stmt.loc;
     let rangify = |s: String| AsmError::range(loc, s);
+    let operify = |s: String| AsmError::operand(loc, s);
+
     match m {
+        // -----------------------------------------------------------------
         "HALT" => {
             let kv = parse_kv_operands(stmt, &["status"])?;
             let status_tok = kv.get("status").cloned().unwrap_or_else(|| "0".into());
             let status = resolve_literal_or_equate(&status_tok, syms, loc)?;
             encoder::enc_halt(status).map_err(rangify)
         }
-        "EMIT_BIT" => {
+
+        // -----------------------------------------------------------------
+        "EMIT_BIT_IMM" => {
             let kv = parse_kv_operands(stmt, &["tx", "expect", "mask", "capture"])?;
-            let tx = resolve_tx_key(&kv, "tx", loc)?;
+            let tx = resolve_tx_key(&kv, "tx", loc, raw_mode)?;
             let (e, mk, c) = resolve_flag_triple(&kv, loc)?;
-            encoder::enc_emit_bit(tx, e, mk, c).map_err(rangify)
+            encoder::enc_emit_bit_imm(tx, e, mk, c, raw_mode).map_err(operify)
         }
-        "EMIT_QUARTER" => {
-            let kv = parse_kv_operands(stmt, &["sda", "scl", "expect", "mask", "capture"])?;
-            let sda = resolve_tx_key(&kv, "sda", loc)?;
-            let scl = resolve_tx_key(&kv, "scl", loc)?;
+
+        // -----------------------------------------------------------------
+        "EMIT_BIT_REG" => {
+            let kv = parse_kv_operands(stmt, &["src", "expect", "mask", "capture"])?;
+            let src_tok = kv.get("src").ok_or_else(|| {
+                AsmError::operand(loc, "E-OP-001: EMIT_BIT_REG requires src=<reg>")
+            })?;
+            let src = resolve_register(src_tok, loc)?;
             let (e, mk, c) = resolve_flag_triple(&kv, loc)?;
-            // AGENTS.md §3.13: in target role, under a push-pull
-            // class BUS_MODE (i3c-pp, hdr-ddr), driving SCL to
-            // `recessive` is illegal --- that would be active-high
-            // PP drive of SCL from the target side. `dominant`
-            // (pull low: stretch / fuzz) and `hiz` (release) are
-            // always legal in target role; this check only fires
-            // on `scl=recessive`.
-            //
-            // Linear-scan caveat: only fires when the textually-
-            // most-recent SET_ROLE/SET_BUS_MODE pair establishes
-            // (target, PP). Programs that flip state through a
-            // branch will not trip this check --- see the
-            // tracking-model note on `pass2`.
-            if active_role == Some(true)
+            encoder::enc_emit_bit_reg(src, e, mk, c).map_err(operify)
+        }
+
+        // -----------------------------------------------------------------
+        "EMIT_QUARTER_IMM" => {
+            let kv = parse_kv_operands(stmt, &["sda", "scl", "expect", "mask", "capture"])?;
+            let sda = resolve_tx_key(&kv, "sda", loc, raw_mode)?;
+            let scl = resolve_tx_key(&kv, "scl", loc, raw_mode)?;
+            let (e, mk, c) = resolve_flag_triple(&kv, loc)?;
+
+            // §3.13 / §5.3: in target role under PP-class, scl=recessive
+            // is illegal (would active-PP-drive SCL from target).
+            if !raw_mode
+                && active_role == Some(true)
                 && active_bus_mode.is_some_and(bus_mode_is_pp)
-                // tx_symbol wire: 0=dominant, 1=recessive, 2=hiz.
                 && scl == 0b01
+            // recessive
             {
                 let mode_name = match active_bus_mode {
-                    Some(6) => "i3c-pp",
-                    Some(7) => "hdr-ddr",
+                    Some(2) => "i3c-PP",
+                    Some(3) => "hdr-ddr",
                     _ => "<pp>",
                 };
                 return Err(AsmError::operand(
                     loc,
                     format!(
-                        "EMIT_QUARTER scl=recessive is illegal in target \
-                         role under PP-class BUS_MODE ({mode_name}): target \
-                         must not active-high PP-drive SCL (AGENTS.md §3.13). \
-                         Use scl=dominant (stretch / fuzz) or scl=hiz \
-                         (release) instead."
+                        "E-WIRE-002: EMIT_QUARTER scl=recessive is illegal \
+                         in target role under PP-class BUS_MODE ({mode_name})"
                     ),
                 ));
             }
-            encoder::enc_emit_quarter(sda, scl, e, mk, c).map_err(rangify)
+            encoder::enc_emit_quarter_imm(sda, scl, e, mk, c, raw_mode).map_err(operify)
         }
-        "SAMPLE_BIT_ON_SCL" => {
+
+        // -----------------------------------------------------------------
+        "EMIT_QUARTER_REG" => {
+            let kv = parse_kv_operands(stmt, &["src", "expect", "mask", "capture"])?;
+            let src_tok = kv.get("src").ok_or_else(|| {
+                AsmError::operand(loc, "E-OP-001: EMIT_QUARTER_REG requires src=<reg>")
+            })?;
+            let src = resolve_register(src_tok, loc)?;
+            let (e, mk, c) = resolve_flag_triple(&kv, loc)?;
+            encoder::enc_emit_quarter_reg(src, e, mk, c).map_err(operify)
+        }
+
+        // -----------------------------------------------------------------
+        "EMIT_BYTE" => {
             let kv = parse_kv_operands(stmt, &["expect", "mask", "capture"])?;
             let (e, mk, c) = resolve_flag_triple(&kv, loc)?;
-            Ok(encoder::enc_sample_bit(e, mk, c))
+
+            // §5.5 E-WIRE-003: every EMIT_BYTE with mask=1 must be
+            // followed by BRANCH_ON MISMATCH or FLAG_CLEAR bit-0-set.
+            if mk && !raw_mode {
+                let paired = find_emit_byte_pair(pc_stmts, stmt_idx + 1, syms);
+                if paired.is_none() {
+                    return Err(AsmError::operand(
+                        loc,
+                        format!(
+                            "E-WIRE-003: EMIT_BYTE mask=1 at line {} must \
+                             be followed by BRANCH_ON MISMATCH or \
+                             FLAG_CLEAR with bit 0 set; declare \
+                             '(use-raw-primitives)' to suppress",
+                            loc.line
+                        ),
+                    ));
+                }
+            }
+            Ok(encoder::enc_emit_byte(e, mk, c))
         }
-        "DRIVE_BIT_ON_SCL" => {
-            let kv = parse_kv_operands(stmt, &["tx", "expect", "mask", "capture"])?;
-            let tx = resolve_tx_key(&kv, "tx", loc)?;
-            let (e, mk, c) = resolve_flag_triple(&kv, loc)?;
-            encoder::enc_drive_bit(tx, e, mk, c).map_err(rangify)
-        }
-        "MARK" => {
-            let kv = parse_kv_operands(stmt, &["label"])?;
-            let Some(label_tok) = kv.get("label") else {
-                return Err(AsmError::operand(loc, "MARK requires label=<0..255>"));
+
+        // -----------------------------------------------------------------
+        "SAMPLE_BIT_ON_SCL" => {
+            // Allowed keys: expect, mask, capture.
+            // Under raw/, also dst=Rx.
+            let allowed: &[&str] = if raw_mode {
+                &["dst", "expect", "mask", "capture"]
+            } else {
+                &["expect", "mask", "capture"]
             };
-            let label_val = resolve_literal_or_equate(label_tok, syms, loc)?;
-            encoder::enc_mark(label_val).map_err(rangify)
+            let kv = parse_kv_operands(stmt, allowed)?;
+            let (e, mk, c) = resolve_flag_triple(&kv, loc)?;
+            let dst: u8 = if let Some(dst_tok) = kv.get("dst") {
+                let d = resolve_register(dst_tok, loc)?;
+                if d != 7 && !raw_mode {
+                    return Err(AsmError::operand(
+                        loc,
+                        "E-REG-001: capture must write to R7; use raw/ \
+                         pragma to override",
+                    ));
+                }
+                d
+            } else {
+                7 // canonical: R7
+            };
+            encoder::enc_sample_bit_on_scl(dst, e, mk, c, raw_mode).map_err(operify)
         }
-        "STRETCH_SCL" => {
+
+        // -----------------------------------------------------------------
+        "DRIVE_BIT_ON_SCL" => {
+            let allowed: &[&str] = if raw_mode {
+                &["tx", "dst", "expect", "mask", "capture"]
+            } else {
+                &["tx", "expect", "mask", "capture"]
+            };
+            let kv = parse_kv_operands(stmt, allowed)?;
+            let tx = resolve_tx_key(&kv, "tx", loc, raw_mode)?;
+            let (e, mk, c) = resolve_flag_triple(&kv, loc)?;
+            if let Some(dst_tok) = kv.get("dst") {
+                if !raw_mode {
+                    return Err(AsmError::operand(
+                        loc,
+                        "E-RAW-001: dst override on DRIVE_BIT_ON_SCL \
+                         requires '(use-raw-primitives)'",
+                    ));
+                }
+                let dst = resolve_register(dst_tok, loc)?;
+                encoder::enc_drive_bit_on_scl_raw(dst, tx, e, mk, c).map_err(operify)
+            } else {
+                encoder::enc_drive_bit_on_scl(tx, e, mk, c, raw_mode).map_err(operify)
+            }
+        }
+
+        // -----------------------------------------------------------------
+        "STRETCH_SCL_IMM" => {
             if stmt.operands.len() != 1 {
                 return Err(AsmError::operand(
                     loc,
-                    "STRETCH_SCL takes one positional operand: n_quarters",
+                    "E-OP-001: STRETCH_SCL_IMM takes one positional \
+                     operand: n_quarters",
                 ));
             }
             let n = resolve_literal_or_equate(&stmt.operands[0], syms, loc)?;
-            encoder::enc_stretch_scl(n).map_err(rangify)
+            encoder::enc_stretch_scl_imm(n).map_err(rangify)
         }
-        "SET_BUS_MODE" => {
-            if stmt.operands.len() != 1 {
-                return Err(AsmError::operand(
-                    loc,
-                    "SET_BUS_MODE takes one positional operand: <bus-mode>",
-                ));
-            }
-            let raw = &stmt.operands[0];
-            let lower = raw.to_ascii_lowercase();
-            let mode_wire = symbols::lookup(BUS_MODES, &lower).ok_or_else(|| {
-                AsmError::operand(
-                    loc,
-                    format!(
-                        "bus mode '{raw}' is not named (allowed: {:?})",
-                        symbols::sorted_names(BUS_MODES)
-                    ),
-                )
+
+        // -----------------------------------------------------------------
+        "STRETCH_SCL_REG" => {
+            let kv = parse_kv_operands(stmt, &["src"])?;
+            let src_tok = kv.get("src").ok_or_else(|| {
+                AsmError::operand(loc, "E-OP-001: STRETCH_SCL_REG requires src=<reg>")
             })?;
-            encoder::enc_set_bus_mode(mode_wire).map_err(rangify)
+            let src = resolve_register(src_tok, loc)?;
+            encoder::enc_stretch_scl_reg(src).map_err(operify)
         }
-        "LOAD_TIMING" => {
-            if stmt.operands.len() != 2 {
-                return Err(AsmError::operand(
-                    loc,
-                    "LOAD_TIMING takes two positional operands: reg, divider_word",
-                ));
-            }
-            let reg_tok = &stmt.operands[0];
-            let word_tok = &stmt.operands[1];
-            let reg = if let Some(v) = symbols::lookup(TIMING_REG_ALIASES, reg_tok) {
-                v as i64
-            } else {
-                resolve_literal_or_equate(reg_tok, syms, loc)?
-            };
-            let word_val = resolve_literal_or_equate(word_tok, syms, loc)?;
-            encoder::enc_load_timing(reg, word_val).map_err(rangify)
-        }
-        "WAIT_ON" => {
-            if stmt.operands.len() != 2 {
-                return Err(AsmError::operand(
-                    loc,
-                    "WAIT_ON takes two positional operands: cond, timeout",
-                ));
-            }
-            let cond = resolve_cond(&stmt.operands[0], loc)?;
-            let timeout = resolve_literal_or_equate(&stmt.operands[1], syms, loc)?;
-            encoder::enc_wait_on(cond, timeout).map_err(rangify)
-        }
+
+        // -----------------------------------------------------------------
         "BRANCH_ON" => {
             if stmt.operands.len() != 2 {
                 return Err(AsmError::operand(
                     loc,
-                    "BRANCH_ON takes two positional operands: cond, target",
+                    "E-OP-001: BRANCH_ON takes two operands: cond, target",
                 ));
             }
             let cond = resolve_cond(&stmt.operands[0], loc)?;
+            // Reserved cond codes 12..15 (§6, E-CTRL-001).
+            if cond >= 12 && !raw_mode {
+                return Err(AsmError::operand(
+                    loc,
+                    format!(
+                        "E-CTRL-001: cond code {cond} is reserved; \
+                         values 12..15 require raw/ pragma"
+                    ),
+                ));
+            }
             let offset = resolve_branch_target(&stmt.operands[1], pc, syms, loc)?;
             encoder::enc_branch_on(cond, offset).map_err(rangify)
         }
-        "JMP" => {
+
+        // -----------------------------------------------------------------
+        "WAIT_ON" => {
+            if stmt.operands.len() != 2 {
+                return Err(AsmError::operand(
+                    loc,
+                    "E-OP-001: WAIT_ON takes two operands: cond, timeout",
+                ));
+            }
+            let cond = resolve_cond(&stmt.operands[0], loc)?;
+            if cond >= 12 && !raw_mode {
+                return Err(AsmError::operand(
+                    loc,
+                    format!(
+                        "E-CTRL-001: cond code {cond} is reserved; \
+                         values 12..15 require raw/ pragma"
+                    ),
+                ));
+            }
+            let timeout = resolve_literal_or_equate(&stmt.operands[1], syms, loc)?;
+            encoder::enc_wait_on(cond, timeout).map_err(rangify)
+        }
+
+        // -----------------------------------------------------------------
+        "SET_BUS_MODE" => {
             if stmt.operands.len() != 1 {
                 return Err(AsmError::operand(
                     loc,
-                    "JMP takes one positional operand: <addr-or-label>",
+                    "E-OP-001: SET_BUS_MODE takes one operand: <bus-mode>",
                 ));
             }
-            let addr = resolve_jmp_target(&stmt.operands[0], syms, loc)?;
-            encoder::enc_jmp(addr).map_err(rangify)
-        }
-        "LOAD_LOOP" => {
-            if stmt.operands.len() != 2 {
-                return Err(AsmError::operand(
-                    loc,
-                    "LOAD_LOOP takes two positional operands: reg, imm8",
-                ));
+            let raw_tok = &stmt.operands[0];
+            let lower = raw_tok.to_ascii_lowercase();
+
+            // Non-raw mode: only named identifiers allowed.
+            if !raw_mode {
+                // Reject numeric literals.
+                if raw_tok
+                    .chars()
+                    .next()
+                    .map(|c| c.is_ascii_digit())
+                    .unwrap_or(false)
+                {
+                    return Err(AsmError::operand(
+                        loc,
+                        format!(
+                            "E-OP-006: bus mode '{raw_tok}' is not named; \
+                             use i2c, i3c-OD, i3c-PP, or hdr-ddr"
+                        ),
+                    ));
+                }
+                if !is_valid_bus_mode_ident(&lower) {
+                    return Err(AsmError::operand(
+                        loc,
+                        format!(
+                            "E-OP-006: bus mode '{raw_tok}' is not named \
+                             (allowed: i2c, i3c-OD, i3c-PP, hdr-ddr)"
+                        ),
+                    ));
+                }
+                let mode_wire = symbols::lookup(BUS_MODES, &lower).ok_or_else(|| {
+                    AsmError::operand(
+                        loc,
+                        format!(
+                            "E-OP-006: bus mode '{raw_tok}' is not named \
+                             (allowed: {:?})",
+                            symbols::sorted_names(BUS_MODES)
+                        ),
+                    )
+                })?;
+                encoder::enc_set_bus_mode(mode_wire).map_err(rangify)
+            } else {
+                // raw/ mode: accept named OR numeric literal.
+                if let Some(mode_wire) = symbols::lookup(BUS_MODES, &lower) {
+                    encoder::enc_set_bus_mode(mode_wire).map_err(rangify)
+                } else {
+                    let n = resolve_literal_or_equate(raw_tok, syms, loc)?;
+                    if !(0..16).contains(&n) {
+                        return Err(AsmError::range(
+                            loc,
+                            format!("SET_BUS_MODE mode must be 0..15, got {n}"),
+                        ));
+                    }
+                    encoder::enc_set_bus_mode(n as u8).map_err(rangify)
+                }
             }
-            let reg = resolve_loop_reg(&stmt.operands[0], loc)?;
-            let imm = resolve_literal_or_equate(&stmt.operands[1], syms, loc)?;
-            encoder::enc_load_loop(reg, imm).map_err(rangify)
         }
-        "DEC_BRANCH" => {
-            if stmt.operands.len() != 2 {
-                return Err(AsmError::operand(
-                    loc,
-                    "DEC_BRANCH takes two positional operands: reg, target",
-                ));
-            }
-            let reg = resolve_loop_reg(&stmt.operands[0], loc)?;
-            let offset = resolve_dec_branch_target(&stmt.operands[1], pc, syms, loc)?;
-            encoder::enc_dec_branch(reg, offset).map_err(rangify)
-        }
+
+        // -----------------------------------------------------------------
         "SET_ROLE" => {
             if stmt.operands.len() != 1 {
                 return Err(AsmError::operand(
                     loc,
-                    "SET_ROLE takes one positional operand: controller|target",
+                    "E-OP-001: SET_ROLE takes one operand: controller|target",
                 ));
             }
-            let role = resolve_role(&stmt.operands[0], loc)?;
-            Ok(encoder::enc_set_role(role))
+            let tok = &stmt.operands[0];
+            let lower = tok.to_ascii_lowercase();
+            let role = symbols::lookup(ROLE_NAMES, &lower).ok_or_else(|| {
+                AsmError::operand(
+                    loc,
+                    format!(
+                        "E-OP-008: SET_ROLE operand must be 'controller' \
+                         or 'target', got '{tok}'"
+                    ),
+                )
+            })?;
+            Ok(encoder::enc_set_role(role != 0))
         }
+
+        // -----------------------------------------------------------------
+        "FLAG_CLEAR" => {
+            if stmt.operands.len() != 1 {
+                return Err(AsmError::operand(
+                    loc,
+                    "E-OP-001: FLAG_CLEAR takes one operand: <5-bit mask>",
+                ));
+            }
+            let mask_val = resolve_literal_or_equate(&stmt.operands[0], syms, loc)?;
+            if !(0..32).contains(&mask_val) {
+                return Err(AsmError::operand(
+                    loc,
+                    format!(
+                        "E-OP-009: FLAG_CLEAR mask must be a 5-bit value \
+                         (0..31), got {mask_val}"
+                    ),
+                ));
+            }
+            encoder::enc_flag_clear(mask_val as u8).map_err(operify)
+        }
+
+        // -----------------------------------------------------------------
+        "MARK" => {
+            let kv = parse_kv_operands(stmt, &["label"])?;
+            let label_tok = kv.get("label").ok_or_else(|| {
+                AsmError::operand(loc, "E-OP-001: MARK requires label=<0..16383>")
+            })?;
+            let label_val = resolve_literal_or_equate(label_tok, syms, loc)?;
+            encoder::enc_mark(label_val).map_err(rangify)
+        }
+
+        // -----------------------------------------------------------------
+        "LOAD_TIMING" => {
+            // Form: LOAD_TIMING reg=N, divider=N
+            // Also accepted: LOAD_TIMING N, N (positional)
+            let kv = try_parse_kv_or_positional(stmt, &["reg", "divider"], 2)?;
+            let reg = resolve_literal_or_equate(
+                kv.get("reg").ok_or_else(|| {
+                    AsmError::operand(loc, "E-OP-001: LOAD_TIMING requires reg=<0..7>")
+                })?,
+                syms,
+                loc,
+            )?;
+            let divider = resolve_literal_or_equate(
+                kv.get("divider").ok_or_else(|| {
+                    AsmError::operand(loc, "E-OP-001: LOAD_TIMING requires divider=<0..16383>")
+                })?,
+                syms,
+                loc,
+            )?;
+            encoder::enc_load_timing(reg, divider).map_err(rangify)
+        }
+
+        // -----------------------------------------------------------------
+        "LOAD_IMM" => {
+            // Form: LOAD_IMM Rn, imm
+            if stmt.operands.len() != 2 {
+                return Err(AsmError::operand(
+                    loc,
+                    "E-OP-001: LOAD_IMM takes two operands: Rn, imm",
+                ));
+            }
+            let dst = resolve_register(&stmt.operands[0], loc)?;
+            let imm = resolve_literal_or_equate(&stmt.operands[1], syms, loc)?;
+            encoder::enc_load_imm(dst, imm).map_err(rangify)
+        }
+
+        // -----------------------------------------------------------------
+        "MOV" => {
+            if stmt.operands.len() != 2 {
+                return Err(AsmError::operand(
+                    loc,
+                    "E-OP-001: MOV takes two operands: Rdst, Rsrc",
+                ));
+            }
+            let dst = resolve_register(&stmt.operands[0], loc)?;
+            let src = resolve_register(&stmt.operands[1], loc)?;
+            encoder::enc_mov(dst, src).map_err(operify)
+        }
+
+        // -----------------------------------------------------------------
+        "ADD_IMM" => {
+            if stmt.operands.len() != 3 {
+                return Err(AsmError::operand(
+                    loc,
+                    "E-OP-001: ADD_IMM takes three operands: Rdst, Rsrc, imm",
+                ));
+            }
+            let dst = resolve_register(&stmt.operands[0], loc)?;
+            let src = resolve_register(&stmt.operands[1], loc)?;
+            let imm = resolve_literal_or_equate(&stmt.operands[2], syms, loc)?;
+            encoder::enc_add_imm(dst, src, imm).map_err(rangify)
+        }
+
+        // -----------------------------------------------------------------
+        "DEC" => {
+            if stmt.operands.len() != 1 {
+                return Err(AsmError::operand(
+                    loc,
+                    "E-OP-001: DEC takes one operand: Rn",
+                ));
+            }
+            let reg = resolve_register(&stmt.operands[0], loc)?;
+            encoder::enc_dec(reg).map_err(operify)
+        }
+
+        // -----------------------------------------------------------------
+        "AND_IMM" => {
+            if stmt.operands.len() != 3 {
+                return Err(AsmError::operand(
+                    loc,
+                    "E-OP-001: AND_IMM takes three operands: Rdst, Rsrc, imm",
+                ));
+            }
+            let dst = resolve_register(&stmt.operands[0], loc)?;
+            let src = resolve_register(&stmt.operands[1], loc)?;
+            let imm = resolve_literal_or_equate(&stmt.operands[2], syms, loc)?;
+            encoder::enc_and_imm(dst, src, imm).map_err(rangify)
+        }
+
+        // -----------------------------------------------------------------
+        "OR_IMM" => {
+            if stmt.operands.len() != 3 {
+                return Err(AsmError::operand(
+                    loc,
+                    "E-OP-001: OR_IMM takes three operands: Rdst, Rsrc, imm",
+                ));
+            }
+            let dst = resolve_register(&stmt.operands[0], loc)?;
+            let src = resolve_register(&stmt.operands[1], loc)?;
+            let imm = resolve_literal_or_equate(&stmt.operands[2], syms, loc)?;
+            encoder::enc_or_imm(dst, src, imm).map_err(rangify)
+        }
+
+        // -----------------------------------------------------------------
+        "XOR_IMM" => {
+            if stmt.operands.len() != 3 {
+                return Err(AsmError::operand(
+                    loc,
+                    "E-OP-001: XOR_IMM takes three operands: Rdst, Rsrc, imm",
+                ));
+            }
+            let dst = resolve_register(&stmt.operands[0], loc)?;
+            let src = resolve_register(&stmt.operands[1], loc)?;
+            let imm = resolve_literal_or_equate(&stmt.operands[2], syms, loc)?;
+            encoder::enc_xor_imm(dst, src, imm).map_err(rangify)
+        }
+
+        // -----------------------------------------------------------------
+        "SHIFT" => {
+            // Form: SHIFT Rdst, Rsrc, direction, shamt
+            if stmt.operands.len() != 4 {
+                return Err(AsmError::operand(
+                    loc,
+                    "E-OP-001: SHIFT takes four operands: Rdst, Rsrc, \
+                     direction, shamt (direction: left|right|aright)",
+                ));
+            }
+            let dst = resolve_register(&stmt.operands[0], loc)?;
+            let src = resolve_register(&stmt.operands[1], loc)?;
+            let dir_tok = stmt.operands[2].to_ascii_lowercase();
+            let dir_val = symbols::lookup(SHIFT_DIRS, &dir_tok).ok_or_else(|| {
+                AsmError::operand(
+                    loc,
+                    format!(
+                        "E-OP-002: unknown shift direction '{}'; \
+                         use left, right, or aright (not aleft)",
+                        stmt.operands[2]
+                    ),
+                )
+            })?;
+            let shamt = resolve_literal_or_equate(&stmt.operands[3], syms, loc)?;
+            let shift_kind = match dir_val {
+                0 => SHIFT_LEFT,
+                1 => SHIFT_RIGHT,
+                2 => SHIFT_ARIGHT,
+                _ => unreachable!(),
+            };
+            encoder::enc_shift(dst, src, shift_kind, shamt).map_err(rangify)
+        }
+
+        // -----------------------------------------------------------------
+        // Sugar forms
+        // -----------------------------------------------------------------
+
+        // JMP <label> sugar → BRANCH_ON ALWAYS, <label>
+        "JMP" => {
+            if stmt.operands.len() != 1 {
+                return Err(AsmError::operand(
+                    loc,
+                    "E-OP-001: JMP takes one operand: <label>",
+                ));
+            }
+            let offset = resolve_branch_target(&stmt.operands[0], pc, syms, loc)?;
+            encoder::enc_branch_on(0 /* ALWAYS */, offset).map_err(rangify)
+        }
+
+        // LOAD_LOOP n sugar → LOAD_IMM R6, n
+        "LOAD_LOOP" => {
+            if stmt.operands.len() != 1 {
+                return Err(AsmError::operand(
+                    loc,
+                    "E-OP-001: LOAD_LOOP takes one operand: n \
+                     (sugar for LOAD_IMM R6, n)",
+                ));
+            }
+            let imm = resolve_literal_or_equate(&stmt.operands[0], syms, loc)?;
+            // Always R6 per §12.3 / §5.18.
+            encoder::enc_load_imm(6, imm).map_err(rangify)
+        }
+
         other => Err(AsmError::lex(
             loc,
-            format!("unhandled mnemonic in encoder: '{other}'"),
+            format!("E-LEX-001: unhandled mnemonic: '{other}'"),
         )),
     }
 }
 
-// ---------------------------------------------------------------------------
-// Top-level entry point used by lib.rs
-// ---------------------------------------------------------------------------
+/// Try to parse key=value pairs from `stmt.operands`, falling back to
+/// positional style where operands are mapped to `keys` in order.
+///
+/// Used by LOAD_TIMING which accepts both `reg=N, divider=N`
+/// (keyword style) and `N, N` (positional).
+fn try_parse_kv_or_positional(
+    stmt: &Statement,
+    keys: &[&str],
+    expected_positional_count: usize,
+) -> Result<HashMap<String, String>> {
+    // If any operand contains '=' it's key=value style.
+    let any_kv = stmt.operands.iter().any(|o| o.contains('='));
+    if any_kv {
+        parse_kv_operands(stmt, keys)
+    } else {
+        // Positional.
+        if stmt.operands.len() != expected_positional_count {
+            return Err(AsmError::operand(
+                &stmt.loc,
+                format!(
+                    "E-OP-001: expected {} positional operands, got {}",
+                    expected_positional_count,
+                    stmt.operands.len()
+                ),
+            ));
+        }
+        let mut map = HashMap::new();
+        for (k, v) in keys.iter().zip(stmt.operands.iter()) {
+            map.insert(k.to_string(), v.clone());
+        }
+        Ok(map)
+    }
+}
 
-pub(crate) fn assemble(source: &str, filename: &str) -> Result<Vec<u16>> {
-    let statements = lex(source, filename)?;
-    let Pass1Output { symbols, pc_stmts } = pass1(statements, filename)?;
-    pass2(&symbols, &pc_stmts)
+// -----------------------------------------------------------------------
+// Top-level entry point
+// -----------------------------------------------------------------------
+
+/// Assemble moleasm source into a vector of 32-bit instruction words.
+///
+/// The returned vector begins with the 2-word preamble (magic + length
+/// word), followed by the encoded instruction stream. The body length
+/// field is computed from the actual program size.
+///
+/// `filename` is used only for diagnostics.
+pub(crate) fn assemble(source: &str, filename: &str) -> Result<Vec<u32>> {
+    let (statements, raw_mode) = lex(source, filename)?;
+    let Pass1Output { symbols, pc_stmts } = pass1(statements)?;
+    let body = pass2(&symbols, &pc_stmts, raw_mode)?;
+
+    // Build preamble.
+    // Word 0: magic 0x4D4C + version 0x0002 → 0x0002_4D4C
+    // Word 1: body length in 32-bit words (body-only, preamble excluded)
+    let mut program = Vec::with_capacity(2 + body.len());
+    program.push(PREAMBLE_MAGIC);
+    program.push(body.len() as u32);
+    program.extend_from_slice(&body);
+    Ok(program)
 }
 
 #[cfg(test)]
@@ -957,40 +1408,54 @@ mod tests {
         }
     }
 
-    #[test]
-    fn empty_source_assembles_to_empty() {
-        assert_eq!(assemble("", "<test>").unwrap(), Vec::<u16>::new());
+    /// Assemble source and return only the body words (skip preamble).
+    fn asm_body(src: &str) -> crate::error::Result<Vec<u32>> {
+        let words = assemble(src, "<t>")?;
+        Ok(words[2..].to_vec())
     }
 
     #[test]
-    fn whitespace_only_source_assembles_to_empty() {
-        let src = "\n\n   \n\t\n;just a comment\n";
-        assert_eq!(assemble(src, "<test>").unwrap(), Vec::<u16>::new());
+    fn empty_source_gives_preamble_only() {
+        let words = assemble("", "<t>").unwrap();
+        assert_eq!(words.len(), 2); // preamble only
+        assert_eq!(words[0], PREAMBLE_MAGIC);
+        assert_eq!(words[1], 0); // body length = 0
+    }
+
+    #[test]
+    fn preamble_magic_and_version() {
+        let words = assemble("HALT\n", "<t>").unwrap();
+        assert_eq!(words[0], 0x0002_4D4C);
+        // body = 1 word
+        assert_eq!(words[1], 1);
     }
 
     #[test]
     fn halt_zero() {
-        assert_eq!(assemble("HALT status=0\n", "<t>").unwrap(), vec![0x0000]);
+        let body = asm_body("HALT status=0\n").unwrap();
+        assert_eq!(body, vec![0x4000_0000]);
     }
 
     #[test]
-    fn lowercase_mnemonic_rejected() {
-        let err = assemble("halt status=0\n", "<t>").unwrap_err();
-        assert_eq!(err_kind(&err), Some(Kind::Lex));
+    fn halt_default_status_zero() {
+        let a = asm_body("HALT\n").unwrap();
+        let b = asm_body("HALT status=0\n").unwrap();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn case_insensitive_mnemonic() {
+        let a = asm_body("HALT status=0\n").unwrap();
+        let b = asm_body("halt status=0\n").unwrap();
+        let c = asm_body("Halt status=0\n").unwrap();
+        assert_eq!(a, b);
+        assert_eq!(a, c);
     }
 
     #[test]
     fn unknown_mnemonic_rejected() {
         let err = assemble("FROBNICATE\n", "<t>").unwrap_err();
         assert_eq!(err_kind(&err), Some(Kind::Lex));
-    }
-
-    #[test]
-    fn reserved_v05_mnemonic_rejected() {
-        for m in ["FLAG_CLEAR", "CAPTURE_RUN"] {
-            let err = assemble(&format!("{m}\n"), "<t>").unwrap_err();
-            assert_eq!(err_kind(&err), Some(Kind::Lex), "mnemonic {m}");
-        }
     }
 
     #[test]
@@ -1021,6 +1486,12 @@ mod tests {
     }
 
     #[test]
+    fn dw_accepts_32bit_values() {
+        let body = asm_body(".dw 0xDEAD_BEEF\n").unwrap();
+        assert_eq!(body, vec![0xDEAD_BEEF]);
+    }
+
+    #[test]
     fn dw_rejects_label_operand() {
         let src = "tgt:\n  .dw tgt\n";
         let err = assemble(src, "<t>").unwrap_err();
@@ -1029,8 +1500,9 @@ mod tests {
 
     #[test]
     fn dw_accepts_equate_operand() {
-        let src = ".equ x, 0x1234\n  .dw x, 0xC000\n";
-        assert_eq!(assemble(src, "<t>").unwrap(), vec![0x1234, 0xC000]);
+        let src = ".equ x, 0x12345678\n  .dw x\n";
+        let body = asm_body(src).unwrap();
+        assert_eq!(body, vec![0x1234_5678]);
     }
 
     #[test]
@@ -1041,14 +1513,21 @@ mod tests {
     }
 
     #[test]
-    fn branch_out_of_range_rejected() {
-        // Force a forward branch past +63 (one beyond the signed-7
-        // BRANCH_ON range) by stuffing 65 HALTs between the branch
-        // and its target. The old signed-8 guard accepted offsets
-        // up to +127, so 65 HALTs is a regression catcher for the
-        // tightened ±64 boundary.
+    fn branch_offset_510_accepted() {
+        // BRANCH_ON at PC 0, target at PC 511 → offset = 510 (< 511 max).
         let mut src = String::from("BRANCH_ON ALWAYS, tgt\n");
-        for _ in 0..65 {
+        for _ in 0..510 {
+            src.push_str("HALT\n");
+        }
+        src.push_str("tgt:\n  HALT\n");
+        assert!(assemble(&src, "<t>").is_ok());
+    }
+
+    #[test]
+    fn branch_offset_512_rejected() {
+        // BRANCH_ON at PC 0, target at PC 513 → offset = 512 (exceeds 511).
+        let mut src = String::from("BRANCH_ON ALWAYS, tgt\n");
+        for _ in 0..512 {
             src.push_str("HALT\n");
         }
         src.push_str("tgt:\n  HALT\n");
@@ -1058,68 +1537,140 @@ mod tests {
 
     #[test]
     fn expect_x_with_mask_one_rejected() {
-        let src = "EMIT_BIT tx=hiz expect=X mask=1\n";
+        let src = "EMIT_BIT_IMM tx=hiz expect=X mask=1\n";
         let err = assemble(src, "<t>").unwrap_err();
         assert_eq!(err_kind(&err), Some(Kind::Operand));
     }
 
     #[test]
-    fn whitespace_tolerance() {
-        // Regression: lexer used to call `body.partition(" ")` which only
-        // accepted a single space character. Tabs / multi-space runs /
-        // mixed-whitespace separators must all work.
-        let src = ".equ\tslow_div,\t59\n\
-                   start:\n\
-                   \tLOAD_TIMING\t\t i2c_freq,  slow_div\n\
-                   \tSET_BUS_MODE   \ti2c\n\
-                   \tHALT\tstatus=0\n";
-        assert_eq!(assemble(src, "<t>").unwrap(), vec![0x403B, 0x3800, 0x0000]);
+    fn jmp_sugar_encodes_as_branch_on_always() {
+        // JMP tgt → BRANCH_ON ALWAYS, tgt. cond=0 (ALWAYS).
+        let src = "JMP tgt\ntgt:\nHALT\n";
+        let body = asm_body(src).unwrap();
+        // cond=ALWAYS=0, offset=0 → 0x4400_0000 | (0<<13) | (0<<3) = 0x4400_0000
+        // Wait: BRANCH_ON is group=01 sub=0001 → 0x4400_0000
+        // offset=0: 0x4400_0000 | 0 = 0x4400_0000
+        assert_eq!(body[0], 0x4400_0000);
     }
 
     #[test]
-    fn roadmap_i2c_write_one_byte_example() {
-        // ROADMAP §"Example: I2C write-one-byte in moleasm" --- 32 words.
-        // Mirrors the Python `_selfcheck_roadmap_example` test.
-        let src = "
-        LOAD_TIMING   i2c_freq, 60
-        SET_BUS_MODE  i2c
-        EMIT_QUARTER  sda=recessive scl=recessive
-        EMIT_QUARTER  sda=dominant  scl=recessive
-        EMIT_QUARTER  sda=dominant  scl=dominant
-        EMIT_BIT      tx=recessive
-        EMIT_BIT      tx=dominant
-        EMIT_BIT      tx=recessive
-        EMIT_BIT      tx=dominant
-        EMIT_BIT      tx=dominant
-        EMIT_BIT      tx=dominant
-        EMIT_BIT      tx=dominant
-        EMIT_BIT      tx=dominant
-        EMIT_BIT      tx=hiz expect=0 mask=1 capture=1
-        BRANCH_ON     MISMATCH, nak
-        EMIT_BIT      tx=recessive
-        EMIT_BIT      tx=dominant
-        EMIT_BIT      tx=recessive
-        EMIT_BIT      tx=dominant
-        EMIT_BIT      tx=recessive
-        EMIT_BIT      tx=dominant
-        EMIT_BIT      tx=recessive
-        EMIT_BIT      tx=recessive
-        EMIT_BIT      tx=hiz expect=0 mask=1 capture=1
-        BRANCH_ON     MISMATCH, nak
-        EMIT_QUARTER  sda=dominant  scl=dominant
-        EMIT_QUARTER  sda=dominant  scl=recessive
-        EMIT_QUARTER  sda=recessive scl=recessive
-        MARK          label=1
-        HALT          status=0
-nak:
-        MARK          label=2
-        HALT          status=1
-";
-        let expected = vec![
-            0x403C, 0x3800, 0x1280, 0x1080, 0x1000, 0x0A00, 0x0800, 0x0A00, 0x0800, 0x0800, 0x0800,
-            0x0800, 0x0800, 0x0C03, 0x288F, 0x0A00, 0x0800, 0x0A00, 0x0800, 0x0A00, 0x0800, 0x0A00,
-            0x0A00, 0x0C03, 0x2885, 0x1000, 0x1080, 0x1280, 0x4808, 0x0000, 0x4810, 0x0080,
-        ];
-        assert_eq!(assemble(src, "roadmap-example").unwrap(), expected);
+    fn load_loop_sugar_encodes_as_load_imm_r6() {
+        let a = asm_body("LOAD_LOOP 10\n").unwrap();
+        let b = asm_body("LOAD_IMM R6, 10\n").unwrap();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn dom_and_dominant_encode_identically() {
+        let a = asm_body("EMIT_BIT_IMM tx=dom\n").unwrap();
+        let b = asm_body("EMIT_BIT_IMM tx=dominant\n").unwrap();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn rec_and_recessive_encode_identically() {
+        let a = asm_body("EMIT_BIT_IMM tx=rec\n").unwrap();
+        let b = asm_body("EMIT_BIT_IMM tx=recessive\n").unwrap();
+        assert_eq!(a, b);
+    }
+
+    #[test]
+    fn set_bus_mode_renumbering() {
+        // v0.2: i2c=0, i3c-OD=1, i3c-PP=2, hdr-ddr=3 (NOT v0's 0,1,6,7)
+        let i2c = asm_body("SET_BUS_MODE i2c\n").unwrap();
+        let i3c_od = asm_body("SET_BUS_MODE i3c-OD\n").unwrap();
+        let i3c_pp = asm_body("SET_BUS_MODE i3c-PP\n").unwrap();
+        let hdr_ddr = asm_body("SET_BUS_MODE hdr-ddr\n").unwrap();
+        // mode at [6:3]: i2c=0, i3c-OD=1<<3=8, i3c-PP=2<<3=0x10, hdr-ddr=3<<3=0x18
+        assert_eq!(i2c[0] & 0x78, 0x00); // mode=0
+        assert_eq!(i3c_od[0] & 0x78, 0x08); // mode=1
+        assert_eq!(i3c_pp[0] & 0x78, 0x10); // mode=2
+        assert_eq!(hdr_ddr[0] & 0x78, 0x18); // mode=3
+    }
+
+    #[test]
+    fn emit_byte_pairing_required_with_mask_1() {
+        // EMIT_BYTE mask=1 without BRANCH_ON MISMATCH or FLAG_CLEAR → E-WIRE-003
+        let src = "EMIT_BYTE expect=0 mask=1\nHALT\n";
+        let err = assemble(src, "<t>").unwrap_err();
+        assert_eq!(err_kind(&err), Some(Kind::Operand));
+    }
+
+    #[test]
+    fn emit_byte_mask_0_no_pairing_required() {
+        // EMIT_BYTE mask=0 is exempt.
+        let src = "EMIT_BYTE\nHALT\n";
+        assert!(assemble(src, "<t>").is_ok());
+    }
+
+    #[test]
+    fn emit_byte_paired_with_branch_on_mismatch() {
+        let src = "EMIT_BYTE expect=0 mask=1\nBRANCH_ON MISMATCH, nak\nnak:\nHALT\n";
+        assert!(assemble(src, "<t>").is_ok());
+    }
+
+    #[test]
+    fn emit_byte_paired_with_flag_clear() {
+        let src = "EMIT_BYTE expect=0 mask=1\nFLAG_CLEAR 0b00001\nHALT\n";
+        assert!(assemble(src, "<t>").is_ok());
+    }
+
+    #[test]
+    fn raw_pragma_suppresses_emit_byte_pairing_check() {
+        let src = "(use-raw-primitives)\nEMIT_BYTE expect=0 mask=1\nHALT\n";
+        assert!(assemble(src, "<t>").is_ok());
+    }
+
+    #[test]
+    fn raw_pragma_after_instruction_rejected() {
+        let src = "HALT\n(use-raw-primitives)\n";
+        let err = assemble(src, "<t>").unwrap_err();
+        assert_eq!(err_kind(&err), Some(Kind::Operand));
+    }
+
+    #[test]
+    fn target_role_pp_scl_recessive_rejected() {
+        let src = "SET_ROLE target\nSET_BUS_MODE i3c-PP\n\
+                   EMIT_QUARTER_IMM sda=dom scl=recessive\nHALT\n";
+        let err = assemble(src, "<t>").unwrap_err();
+        assert_eq!(err_kind(&err), Some(Kind::Operand));
+    }
+
+    #[test]
+    fn whitespace_only_source_assembles_empty() {
+        let src = "\n\n   \n\t\n;just a comment\n";
+        let words = assemble(src, "<t>").unwrap();
+        // Preamble + 0 body = 2 words.
+        assert_eq!(words.len(), 2);
+    }
+
+    #[test]
+    fn program_length_8192_accepted() {
+        let mut src = String::with_capacity(8192 * 6);
+        for _ in 0..8192 {
+            src.push_str("HALT\n");
+        }
+        let words = assemble(&src, "<max-prog>").unwrap();
+        // 2 preamble + 8192 body
+        assert_eq!(words.len(), 2 + 8192);
+        assert_eq!(words[1], 8192); // body length word
+    }
+
+    #[test]
+    fn program_length_8193_rejected() {
+        let mut src = String::with_capacity(8193 * 6);
+        for _ in 0..8193 {
+            src.push_str("HALT\n");
+        }
+        let err = assemble(&src, "<over-prog>").unwrap_err();
+        assert_eq!(err_kind(&err), Some(Kind::Range));
+    }
+
+    #[test]
+    fn crlf_line_endings_work() {
+        let src = "HALT status=0\r\nHALT status=2\r\n";
+        let body = asm_body(src).unwrap();
+        assert_eq!(body[0], 0x4000_0000);
+        assert_eq!(body[1], 0x4000_0010);
     }
 }

@@ -1,11 +1,23 @@
 //! Wire-format helpers: CRC-16/XMODEM, raw bytecode packing, and the
-//! length + words + CRC frame builder consumed by the iCE40 UART
-//! ingest path.
+//! length-prefixed + CRC-signed UART frame builder.
 //!
-//! Mirrors `tests/fixtures/mole-asm.py::{crc16_xmodem, pack_bytecode,
-//! build_frame}` byte-for-byte.
+//! v0.2 bytecode uses 32-bit instruction words (little-endian). The
+//! preamble (2 words) is already embedded in the `words` slice
+//! passed to [`build_frame`]; the frame format is otherwise unchanged
+//! from v0.
 
 use crate::error::AsmError;
+
+// FIXME(B5): replace with mole_abi::PREAMBLE_WORDS once B5 adds it.
+const PREAMBLE_WORDS: usize = 2;
+
+/// Maximum total program length in 32-bit words (preamble + body).
+/// Sourced from §10 / §16 spec constant MAX_PROGRAM_WORDS = 8192
+/// (body only); total including preamble is 8192 + 2 = 8194.
+/// The frame builder enforces this.
+///
+/// FIXME(B5): derive from mole_abi::MAX_PROGRAM_WORDS + PREAMBLE_WORDS.
+const MAX_TOTAL_WORDS: usize = 8194; // 8192 body + 2 preamble
 
 /// CRC-16/XMODEM (poly `0x1021`, init `0x0000`, no reflection, no
 /// XOR-out).
@@ -26,38 +38,55 @@ pub fn crc16_xmodem(bytes: &[u8]) -> u16 {
     crc
 }
 
-/// Pack 16-bit instruction words little-endian. This is the raw
-/// `.molecode` payload: no frame, no CRC --- just the bytes that would
-/// land in SPRAM at runtime.
-pub fn pack_bytecode(words: &[u16]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(words.len() * 2);
+/// Pack 32-bit instruction words little-endian into bytes.
+///
+/// This is the raw `.molecode` payload: no frame, no CRC, no
+/// preamble stripping --- just the bytes that would land in SPRAM
+/// at runtime.
+pub fn pack_bytecode(words: &[u32]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(words.len() * 4);
     for &w in words {
         out.push((w & 0xFF) as u8);
-        out.push((w >> 8) as u8);
+        out.push(((w >> 8) & 0xFF) as u8);
+        out.push(((w >> 16) & 0xFF) as u8);
+        out.push((w >> 24) as u8);
     }
     out
 }
 
-/// Build a complete UART frame: `len_lo`, `len_hi`, words (each LE),
-/// `crc_lo`, `crc_hi`. CRC covers everything except itself.
+/// Build a complete UART frame from a program word vector.
 ///
-/// Per `WIRE_FORMAT.md` the engine accepts 1..=2048 words per frame
-/// (matching the 11-bit JMP / branch addr field after the opcode
-/// widening); anything outside that range returns
-/// [`AsmError::FrameTooLarge`].
-pub fn build_frame(words: &[u16]) -> Result<Vec<u8>, AsmError> {
-    if !(1..=mole_abi::MAX_PROGRAM_WORDS).contains(&words.len()) {
+/// The `words` slice must include the 2-word preamble (as produced
+/// by [`crate::assemble`]). The frame layout is:
+///
+/// ```text
+/// [len_lo, len_hi]           u16 LE: total word count (preamble+body)
+/// [w0_b0, w0_b1, w0_b2, w0_b3, ...]  32-bit words, each LE
+/// [crc_lo, crc_hi]           CRC-16/XMODEM over all preceding bytes
+/// ```
+///
+/// Rejects programs with `words.len() < PREAMBLE_WORDS + 1` (no body)
+/// or `words.len() > MAX_TOTAL_WORDS` (exceeds SPRAM budget).
+///
+/// # Errors
+///
+/// Returns [`AsmError::FrameTooLarge`] when the length is outside the
+/// valid range.
+pub fn build_frame(words: &[u32]) -> Result<Vec<u8>, AsmError> {
+    if words.len() < PREAMBLE_WORDS + 1 || words.len() > MAX_TOTAL_WORDS {
         return Err(AsmError::FrameTooLarge {
             word_count: words.len(),
         });
     }
     let n = words.len() as u16;
-    let mut payload = Vec::with_capacity(2 + words.len() * 2 + 2);
+    let mut payload = Vec::with_capacity(2 + words.len() * 4 + 2);
     payload.push((n & 0xFF) as u8);
     payload.push((n >> 8) as u8);
     for &w in words {
         payload.push((w & 0xFF) as u8);
-        payload.push((w >> 8) as u8);
+        payload.push(((w >> 8) & 0xFF) as u8);
+        payload.push(((w >> 16) & 0xFF) as u8);
+        payload.push((w >> 24) as u8);
     }
     let crc = crc16_xmodem(&payload);
     payload.push((crc & 0xFF) as u8);
@@ -71,22 +100,18 @@ mod tests {
 
     #[test]
     fn crc_catalog_check() {
-        // Standard CRC-16/XMODEM check value.
         assert_eq!(crc16_xmodem(b"123456789"), 0x31C3);
     }
 
     #[test]
     fn crc_empty_is_zero() {
-        // CRC-16/XMODEM over the empty string is the init value (0).
         assert_eq!(crc16_xmodem(b""), 0x0000);
     }
 
     #[test]
     fn pack_bytecode_is_little_endian() {
-        assert_eq!(
-            pack_bytecode(&[0x1234, 0xABCD]),
-            vec![0x34, 0x12, 0xCD, 0xAB]
-        );
+        // 0x12345678 → bytes [78, 56, 34, 12]
+        assert_eq!(pack_bytecode(&[0x1234_5678]), vec![0x78, 0x56, 0x34, 0x12]);
     }
 
     #[test]
@@ -95,11 +120,13 @@ mod tests {
     }
 
     #[test]
-    fn build_frame_wire_format_example() {
-        // WIRE_FORMAT.md §6 worked example: two words [0x9000, 0x6000]
-        // -> "02 00 00 90 00 60 DF 9F".
-        let frame = build_frame(&[0x9000, 0x6000]).unwrap();
-        assert_eq!(frame, vec![0x02, 0x00, 0x00, 0x90, 0x00, 0x60, 0xDF, 0x9F]);
+    fn build_frame_rejects_preamble_only() {
+        // Exactly PREAMBLE_WORDS words, no body → FrameTooLarge.
+        let preamble_only = vec![0u32; PREAMBLE_WORDS];
+        assert!(matches!(
+            build_frame(&preamble_only),
+            Err(AsmError::FrameTooLarge { .. })
+        ));
     }
 
     #[test]
@@ -111,20 +138,38 @@ mod tests {
     }
 
     #[test]
-    fn build_frame_rejects_oversize() {
-        let big = vec![0u16; 2049];
-        assert!(matches!(
-            build_frame(&big),
-            Err(AsmError::FrameTooLarge { word_count: 2049 })
-        ));
+    fn build_frame_accepts_minimum() {
+        // Preamble + 1 body word = 3 words total.
+        let words = vec![0u32; PREAMBLE_WORDS + 1];
+        let frame = build_frame(&words).unwrap();
+        // len(2) + 3*4 bytes + crc(2) = 16 bytes.
+        assert_eq!(frame.len(), 2 + 3 * 4 + 2);
     }
 
     #[test]
     fn build_frame_accepts_max() {
-        let max = vec![0u16; 2048];
-        // Just verify it does not error and yields the expected length:
-        // 2 (len) + 2048 * 2 (words) + 2 (crc) = 4100 bytes.
+        // MAX_TOTAL_WORDS = 8194 words.
+        let max = vec![0u32; MAX_TOTAL_WORDS];
         let frame = build_frame(&max).unwrap();
-        assert_eq!(frame.len(), 2 + 2048 * 2 + 2);
+        assert_eq!(frame.len(), 2 + MAX_TOTAL_WORDS * 4 + 2);
+    }
+
+    #[test]
+    fn build_frame_rejects_over_max() {
+        let big = vec![0u32; MAX_TOTAL_WORDS + 1];
+        assert!(matches!(
+            build_frame(&big),
+            Err(AsmError::FrameTooLarge { .. })
+        ));
+    }
+
+    #[test]
+    fn length_field_is_total_word_count() {
+        // The length field (first 2 bytes, LE u16) must equal the total
+        // word count (preamble + body).
+        let words: Vec<u32> = vec![0xDEAD_BEEF, 0x0000_0003, 0x1234_5678]; // 3 words
+        let frame = build_frame(&words).unwrap();
+        let len_field = u16::from_le_bytes([frame[0], frame[1]]);
+        assert_eq!(len_field, 3);
     }
 }

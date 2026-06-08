@@ -1,14 +1,18 @@
-//! Structured assembler diagnostics.
+//! Structured assembler diagnostics for mole-asm v0.2.
 //!
-//! Errors carry a [`SourceLocation`] (filename + 1-based line, plus an
-//! optional column once the lexer learns to emit one) and a [`Kind`]
-//! that callers can pattern-match without grepping the display text.
+//! Each error carries a [`SourceLocation`] (filename + 1-based line)
+//! and a [`Kind`] that callers can pattern-match without grepping
+//! the human-readable message. Error codes from §13 are embedded in
+//! the message text as `E-<CATEGORY>-<NNN>:` prefixes so the CLI can
+//! render them; the `code()` method returns the code string alone.
 
 use std::fmt;
 use thiserror::Error;
 
-/// One-based source position. The lexer always sets [`line`]; [`column`]
-/// is reserved for a future per-token column tracker.
+/// One-based source position.
+///
+/// The lexer always sets [`line`]; [`column`] is reserved for a
+/// future per-token column tracker.
 ///
 /// [`line`]: SourceLocation::line
 /// [`column`]: SourceLocation::column
@@ -19,8 +23,7 @@ pub struct SourceLocation {
     pub filename: String,
     /// 1-based source line number.
     pub line: usize,
-    /// 1-based column number, when known. Currently always `None`;
-    /// reserved for a future per-token column tracker.
+    /// 1-based column number, when known. Currently always `None`.
     pub column: Option<usize>,
 }
 
@@ -43,22 +46,25 @@ impl fmt::Display for SourceLocation {
     }
 }
 
-/// Broad category of a syntax-level error. Callers (notably tests) can
+/// Broad category of a source-level error. Callers (notably tests) can
 /// match on this without depending on the human-readable `message`.
+///
+/// Each variant maps to one or more §13 error codes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
-    /// Unknown / reserved / mis-cased mnemonic, malformed label or
-    /// directive, unknown directive name.
+    /// E-LEX-* — unknown / reserved mnemonic, malformed label,
+    /// unknown directive, LOOP-group mnemonic.
     Lex,
-    /// Symbol-table conflict: duplicate label, duplicate `.equ`,
-    /// undefined symbol, label-vs-equate confusion.
+    /// E-SYM-* — duplicate label, duplicate `.equ`, undefined
+    /// symbol, label-vs-equate confusion.
     Symbol,
-    /// Numeric range overflow: literal too large, branch offset out of
-    /// signed-7-bit range, program exceeds 2048 instruction slots, etc.
+    /// E-RNG-* — numeric range overflow, branch offset out of range,
+    /// program exceeds MAX_PROGRAM_WORDS.
     Range,
-    /// Operand-shape problem: missing required key, unexpected positional
-    /// argument, duplicate `key=` operand, contradictory flag
-    /// combination (`expect=X` + `mask=1`).
+    /// E-OP-* / E-REG-* / E-CTRL-* / E-WIRE-* / E-RAW-* /
+    /// E-FRM-* — missing required operand, unexpected positional
+    /// token, duplicate key, contradictory flag combination, bad
+    /// register, EMIT_BYTE pairing violation, raw-pragma violation.
     Operand,
 }
 
@@ -66,31 +72,32 @@ pub enum Kind {
 /// resulting bytecode for UART transport.
 #[derive(Debug, Clone, Error)]
 pub enum AsmError {
-    /// A source-level error tied to a specific line. The `kind` makes
-    /// the error class machine-readable; `message` carries the
-    /// human-readable detail, kept stable enough for snapshot tests.
+    /// A source-level error tied to a specific line. `kind` is
+    /// machine-readable; `message` is human-readable and includes the
+    /// §13 error code as a `E-*-*: ` prefix.
     #[error("{location}: {message}")]
     Syntax {
-        /// Broad error category (lex / symbol / range / operand).
+        /// Broad error category.
         kind: Kind,
-        /// Where in the source the error fires.
+        /// Source position.
         location: SourceLocation,
-        /// Human-readable detail, stable across releases for tests.
+        /// Human-readable detail including the §13 code prefix.
         message: String,
     },
 
-    /// Tried to build a UART frame with zero or more-than-2048 words.
-    /// Not tied to a source line because [`crate::frame::build_frame`]
-    /// is also a public helper.
-    #[error("frame must contain 1..=2048 words, got {word_count}")]
+    /// Frame contains zero words, or more than MAX_PROGRAM_WORDS words
+    /// (including the 2-word preamble).
+    // FIXME(B5): update limit to use mole_abi::MAX_PROGRAM_WORDS + 2
+    // once B5 adds PREAMBLE_WORDS.
+    #[error("frame must contain 1..=8194 total words (8192 body + 2 preamble), got {word_count}")]
     FrameTooLarge {
-        /// Number of words the caller tried to frame. Outside the
-        /// `1..=2048` range.
+        /// Total word count (preamble + body) that was rejected.
         word_count: usize,
     },
 }
 
 impl AsmError {
+    /// Construct a Lex-category error (E-LEX-*).
     pub(crate) fn lex(loc: &SourceLocation, msg: impl Into<String>) -> Self {
         Self::Syntax {
             kind: Kind::Lex,
@@ -99,6 +106,7 @@ impl AsmError {
         }
     }
 
+    /// Construct a Symbol-category error (E-SYM-*).
     pub(crate) fn symbol(loc: &SourceLocation, msg: impl Into<String>) -> Self {
         Self::Syntax {
             kind: Kind::Symbol,
@@ -107,6 +115,7 @@ impl AsmError {
         }
     }
 
+    /// Construct a Range-category error (E-RNG-*).
     pub(crate) fn range(loc: &SourceLocation, msg: impl Into<String>) -> Self {
         Self::Syntax {
             kind: Kind::Range,
@@ -115,6 +124,8 @@ impl AsmError {
         }
     }
 
+    /// Construct an Operand-category error (E-OP-* / E-REG-* /
+    /// E-CTRL-* / E-WIRE-* / E-RAW-* / E-FRM-*).
     pub(crate) fn operand(loc: &SourceLocation, msg: impl Into<String>) -> Self {
         Self::Syntax {
             kind: Kind::Operand,
