@@ -417,9 +417,9 @@ footer (see "Breaking changes" above).
   the existing per-block sim target after a change you made is
   fine; spinning the full nextpnr place-and-route uninvited is
   not.
-- **Don't create planning `.md` files inside the repo.** Use the
-  per-session workspace (`~/.copilot/session-state/<id>/`) for
-  ephemeral plans. The in-tree design docs are `ROADMAP.md` (the
+- **Don't create planning `.md` files inside the repo.** Keep
+  ephemeral plans in your agent's session state, not on disk in
+  the repo. The in-tree design docs are `ROADMAP.md` (the
   product roadmap and architectural source of truth) and anything
   under `docs/` (durable reference material that ships with the
   repo). Notably `docs/MOLE-0.2-SPEC.md` is the normative ISA and
