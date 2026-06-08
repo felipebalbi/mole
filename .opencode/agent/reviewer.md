@@ -1,6 +1,7 @@
 ---
 description: Use when a change, design, or piece of code needs an independent, adversarial correctness review: checking invariants, hidden assumptions, semantic mistakes, concurrency or reliability hazards, or architectural drift. Reads and critiques; does not edit. Trigger for "review", "audit", "sanity check", "is this correct", "what could go wrong", "second opinion", "before I merge".
 mode: subagent
+model: github-copilot/claude-opus-4.7-xhigh
 permission:
   edit: deny
   bash: ask

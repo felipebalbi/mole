@@ -1,6 +1,7 @@
 ---
 description: Use when a system, change, or design needs failure-mode analysis, recovery-path design, or operational-resilience review: what happens on power loss, watchdog reset, partial state, packet loss or reorder, dropped frames, transport disconnect, storage corruption, or any "what if it crashes mid-X" question. Reads and recommends; does not edit production code. Trigger for "reliability", "failure mode", "recovery", "what if power loss", "watchdog", "crash safety", "partial failure", "observability", "degraded mode", "retry", "idempotency", "timeout", "race condition in the field".
 mode: subagent
+model: github-copilot/claude-opus-4.7-xhigh
 permission:
   edit: deny
   bash: ask

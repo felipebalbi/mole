@@ -1,6 +1,7 @@
 ---
 description: Use when the task needs system design, API or module-boundary decisions, state-machine or invariant design, failure-domain analysis, or long-term architectural strategy. Produces specifications, not implementations. Trigger for "design", "architecture", "spec", "module boundary", "API shape", "state machine", "invariant", "should we", "how should this look".
 mode: subagent
+model: github-copilot/claude-opus-4.7-xhigh
 permission:
   edit: deny
   bash: ask

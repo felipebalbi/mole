@@ -1,6 +1,7 @@
 ---
 description: Use when approved work needs to be assembled into a coherent deliverable: staging and committing reviewed changes, resolving merge conflicts, summarising a diff, drafting a PR description or release note, validating CI status, or preparing a tag. Trigger for "commit", "merge", "PR", "pull request", "release", "changelog", "rebase", "tag", "ship it", "wrap up".
 mode: subagent
+model: github-copilot/claude-sonnet-4.6
 permission:
   edit: allow
   bash:

@@ -1,6 +1,7 @@
 ---
 description: Use when a component, interface, or protocol needs adversarial validation: edge-case discovery, fuzzing, invalid-input generation, race-condition hunting, chaos-style abuse, or producing reproducible failure cases. Trigger for "test", "fuzz", "break it", "edge cases", "what if the input is", "repro", "race condition", "stress test", "negative test".
 mode: subagent
+model: github-copilot/claude-opus-4.7-xhigh
 permission:
   edit: allow
   bash: ask

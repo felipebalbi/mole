@@ -1,6 +1,7 @@
 ---
 description: Use when something needs to be explained, documented, taught, or onboarded: README updates, mdBook chapters, rustdoc, API explanations, architecture walkthroughs, contributor guides, training material, or Typst slides. Translates existing systems and code into human-readable material; does not invent architecture. Trigger for "document", "explain", "tutorial", "onboarding", "write README", "rustdoc", "mdBook", "guide", "walkthrough", "training", "slides", "presentation", "make this approachable", "teach".
 mode: subagent
+model: github-copilot/claude-sonnet-4.6
 permission:
   edit: allow
   bash: ask

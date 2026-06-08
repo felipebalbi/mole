@@ -1,6 +1,7 @@
 ---
 description: Use when work needs to be decomposed, sequenced, delegated across specialist agents, or have its dependencies tracked: turning a fuzzy multi-part request into a plan, routing sub-tasks to the right specialists (architect / coder / reviewer / tester / reliability / docs / integrator), monitoring progress without micromanaging, or preventing duplicate or conflicting work between parallel streams. Does not perform specialist work directly. Trigger for "plan this", "coordinate", "decompose", "who should do this", "sequence", "dependencies", "orchestrate", "route", "manage", "project plan", "next steps".
 mode: subagent
+model: github-copilot/claude-sonnet-4.6
 permission:
   edit: deny
   bash: ask
