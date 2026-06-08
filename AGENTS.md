@@ -30,8 +30,9 @@ model, and the compile-time error-injection contract.
 ### One-paragraph architecture
 
 A small **bit-cycle engine** in the FPGA ("Layer 0") executes a
-**15-opcode ISA** (16-bit fixed-width instructions, 17 reserved
-opcode slots) over quarter-bit-resolution SDA/SCL patterns. The
+**25-opcode ISA** (32-bit fixed-width instructions, opcode
+`{group[31:30], sub[29:26]}`; 9 WIRE + 8 CTRL + 8 DATA + LOOP
+group reserved) over quarter-bit-resolution SDA/SCL patterns. The
 engine is **literally bus-agnostic**: per-bit / per-quarter drive
 fields are 2-bit `tx_symbol = {dominant, recessive, hiz,
 reserved}`, and the `BUS_MODE` register owns the
@@ -43,11 +44,11 @@ in `raw/` and require explicit opt-in. The engine plays
 controller *or* target, selected at runtime by `SET_ROLE`
 (power-on default from `MoleConfig.role`); target-role bytes
 use `SAMPLE_BIT_ON_SCL` / `DRIVE_BIT_ON_SCL` to slave to the
-external controller's SCL. Bounded loops use a two-register loop
-counter (`LCR0`/`LCR1`) primed by `LOAD_LOOP` and counted down by
-`DEC_BRANCH`. Error injection is decided at compile time (PRNG
-in the host) so `ratio = 0` is *exactly* zero, not "approximately
-zero".
+external controller's SCL. Bounded loops use a general-purpose
+register (conventionally `R6`, primed by the `LOAD_LOOP` sugar)
+decremented by `DEC` and tested by `BRANCH_ON NONZERO`. Error
+injection is decided at compile time (PRNG in the host) so
+`ratio = 0` is *exactly* zero, not "approximately zero".
 
 ---
 
@@ -125,17 +126,28 @@ don't co-exist cleanly in one workspace. Do not merge them.
    ```
    Never add `Signed-off-by:` from an agent --- only humans certify
    the DCO.
-9. **Instruction width is fixed 16 bits.** Opcode is always
-   `[15:11]` (5 bits, 32 slots, 15 in use + 17 reserved). Don't
-   widen instructions, don't relocate the opcode field, don't
-   add a multi-word opcode form.
+9. **Instruction width is fixed 32 bits.** Opcode is the 6-bit
+   field `{group[31:30], sub[29:26]}` (4 groups × 16 sub-slots
+   = 64 slots; 25 live + 39 reserved in v0.2: 9 WIRE, 8 CTRL,
+   8 DATA, and the LOOP group fully reserved). Don't widen
+   instructions, don't relocate the opcode field, don't add a
+   multi-word opcode form. See `docs/MOLE-0.2-SPEC.md` §3, §4
+   for the full layout.
 10. **The flag triple is at `[2:0]`.** On every opcode that
-    carries `expect`/`mask`/`capture` (`EMIT_BIT`,
-    `EMIT_QUARTER`, `SAMPLE_BIT_ON_SCL`, `DRIVE_BIT_ON_SCL`)
-    the bits are at fixed positions: `[2]=expect`, `[1]=mask`,
-    `[0]=capture`. Symbol fields stay at the high end;
-    reserved bits fill the middle. Aligning the triple is what
-    makes the hardware decoder cheap --- don't unalign it.
+    carries `expect`/`mask`/`capture` --- in v0.2 that is the
+    seven WIRE bearers `EMIT_BIT_IMM`, `EMIT_BIT_REG`,
+    `EMIT_QUARTER_IMM`, `EMIT_QUARTER_REG`, `EMIT_BYTE`,
+    `SAMPLE_BIT_ON_SCL`, `DRIVE_BIT_ON_SCL` --- the bits are at
+    fixed positions: `[2]=expect`, `[1]=mask`, `[0]=capture`.
+    Symbol fields sit in the low-mid bits above the triple (e.g.
+    `tx_symbol` at `[4:3]` for `EMIT_BIT_IMM`, `sda` at `[4:3]`
+    and `scl` at `[6:5]` for `EMIT_QUARTER_IMM`); reserved bits
+    fill the gap up to the opcode field. The stretch pair
+    (`STRETCH_SCL_IMM`/`STRETCH_SCL_REG`) does **not** bear
+    flags --- the bottom three bits are reserved-zero. Aligning
+    the triple across all bearers is what makes the hardware
+    flag-update path cheap --- don't unalign it. See spec
+    §5.1–§5.7 for each per-opcode bit layout.
 11. **`tx_symbol` is the only per-bit drive vocabulary.**
     `00=dominant`, `01=recessive`, `10=hiz`, `11=reserved`.
     The reserved encoding is held for a v0.5 `raw_override`
@@ -157,27 +169,41 @@ don't co-exist cleanly in one workspace. Do not merge them.
     `scl_symbol = hiz` (release) are always legal in target
     role. Legal target `BUS_MODE`s are `i2c` and `i3c-OD`.
 14. **`BRANCH_ON` and `WAIT_ON` share encoding and
-    cond-code namespace.** Shape is `[10:7]cond_code
-    [6:0]operand`; only operand semantics differ
+    cond-code namespace.** v0.2 shape is `[16:13] cond_code`
+    (4 bits) and `[12:3] operand` (10 bits; `[2:0]`
+    reserved-zero); only operand semantics differ
     (signed-PC-offset vs unsigned-quarter-timeout). The
-    cond-code namespace is shared: codes 0..9 are in use, 10..15
-    reserved for v0.5. Don't fork the two opcodes. Don't
-    reorder in-use codes. Adding a code in a reserved slot is
-    **not** a wire-format break; repurposing one in use **is**.
+    cond-code namespace is shared. See
+    `docs/MOLE-0.2-SPEC.md` §6 for the live cond-code table
+    (live codes plus reserved slots for v0.5). Don't fork the
+    two opcodes. Don't reorder in-use codes. Adding a code in
+    a reserved slot is **not** a wire-format break; repurposing
+    one in use **is**.
 15. **Sticky engine flags are write-once until overwritten.**
     `MISMATCH_FLAG`, `TIMEOUT_FLAG`, `START_FLAG`, `STOP_FLAG`
     are set by the engine and cleared only by the next opcode
     that would write them (or by a future v0.5 `FLAG_CLEAR`).
     Don't add ad-hoc clear paths.
-16. **moleasm syntax is locked.** Flag-bearing opcodes take
-    `tx=dominant|recessive|hiz` (short forms `dom`/`rec`
-    accepted); `EMIT_QUARTER` takes `sda=...` and `scl=...`
-    with the same vocabulary. Defaults `expect=X` (don't-care),
-    `mask=0`, `capture=0` are omitted when unset. Branch
-    targets are labels, not raw offsets.
+16. **moleasm syntax is locked for v0.2.** Flag-bearing
+    opcodes take `tx=dominant|recessive|hiz` (short forms
+    `dom`/`rec` accepted); `EMIT_QUARTER_IMM` takes `sda=...`
+    and `scl=...` with the same vocabulary. Defaults
+    `expect=X` (don't-care), `mask=0`, `capture=0` are omitted
+    when unset. Branch targets are labels, not raw offsets.
+    Mnemonics, register names (`R0`–`R7`), and bus-mode names
+    are case-insensitive; canonical diagnostic form is
+    UPPERCASE for mnemonics and lowercase-with-hyphens for bus
+    modes. v0.2 splits `EMIT_BIT`, `EMIT_QUARTER`, and
+    `STRETCH_SCL` into explicit `_IMM` / `_REG` variants; the
+    unsuffixed names are not accepted. v0.2 introduces two sugar
+    forms: `JMP <label>` for `BRANCH_ON ALWAYS, <label>`, and
+    `LOAD_LOOP n` for `LOAD_IMM R6, n`. See
+    `docs/MOLE-0.2-SPEC.md` §12 for the full grammar.
 17. **Pre-Phase-0, wire format breaks are free.** Until the
     first tagged release of the bytecode encoder, the ISA's
-    binary encoding is not a stable contract. Post-Phase-0,
+    binary encoding is not a stable contract. The in-development
+    format is **v0.2** (magic `0x0002_4D4C`, format version
+    `0x0002`); see `docs/MOLE-0.2-SPEC.md` §10. Post-Phase-0,
     bytecode is a contract between the host compiler and every
     deployed Mole --- see §8.
 
@@ -484,6 +510,18 @@ footer (see "Breaking changes" above).
   (§3.14). Same for `BRANCH_MISMATCH` / `BRANCH_ON_MM` /
   `BRANCH_ON_CAPTURED_MASK` --- unified into `BRANCH_ON cond,
   offset`.
+- Don't reintroduce `DEC_BRANCH`. v0.2 retires the fused form:
+  `DEC Rx` and `BRANCH_ON NONZERO, <label>` are now separate
+  opcodes by design. The loop counter `R6` is just another GP
+  register; there are no `LCR0`/`LCR1` dedicated counters.
+- `LOAD_LOOP n` is **assembler sugar** for `LOAD_IMM R6, n`
+  (spec §12.3). It is a legal mnemonic in source. It does
+  **not** correspond to a hardware opcode; do not add one.
+- v0.2 widens the ISA from 16-bit to 32-bit instructions and
+  renames the `EMIT_BIT` / `EMIT_QUARTER` / `STRETCH_SCL`
+  opcodes into explicit `_IMM` / `_REG` pairs. Don't re-add the
+  unsuffixed forms as live opcodes; they have no encoding in
+  v0.2.
 - Don't bake protocol awareness into the engine. Anything the
   engine "knows" beyond `BUS_MODE` (active mode bits + divider
   selection) and the sticky flag set is a layering violation.
