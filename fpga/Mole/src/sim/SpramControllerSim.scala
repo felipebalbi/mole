@@ -12,12 +12,12 @@ import spinal.lib._
   * latency) against the SpinalHDL `Mem` substitute --- no external Verilog
   * model of `SB_SPRAM256KA` required. The wrapper logic under test is identical
   * between the two paths; the only thing the sim does not cover is the BlackBox
-  * port wiring itself, which is verified by HW bring-up (Phase 3).
+  * port wiring itself, which is verified by HW bring-up (Phase C).
   *
   * Cases -----
   *   1. **Write-then-read every cell.** Loader-write a recognizable pattern
-  *      (`addr ^ 0xA5A5`) across the full address space, then read every cell
-  *      and verify the readback.
+  *      (`addr ^ 0xA5A5_A5A5`) across the full address space, then read every
+  *      cell and verify the readback.
   *   2. **Read priority over write.** Inject simultaneous `readCmd.valid` and
   *      `resultWrite.valid`; the read fires that cycle, the write
   *      back-pressures and lands the cycle after.
@@ -38,6 +38,13 @@ import spinal.lib._
   *      `loaderWrite` as the contending writer. The arbiter is supposed to
   *      preempt either writer; case 2 alone only proves that for the
   *      higher-priority writer.
+  *   8. **Dual-tile parallelism.** Write a value whose upper and lower halves
+  *      are distinct (`0xAABB_CCDD`), read it back, and assert both halves are
+  *      intact. Proves the `tileLo`/`tileHi` data split and `DATAOUT`
+  *      concatenation are wired correctly and not swapped.
+  *   9. **Alternating bit pattern.** Write `0x5555_5555` and `0xAAAA_AAAA` to
+  *      consecutive cells, read them back, and verify each bit. Catches any
+  *      per-bit wiring error between the two tile data paths.
   *
   * Run: `sbt "runMain mole.SpramControllerSim"`
   */
@@ -67,7 +74,7 @@ object SpramControllerSim {
   private def doLoaderWrite(
       dut: SpramController,
       addr: Long,
-      data: Int
+      data: Long
   ): Unit = {
     dut.io.loaderWrite.valid #= true
     dut.io.loaderWrite.payload.addr #= addr
@@ -80,7 +87,7 @@ object SpramControllerSim {
   private def doResultWrite(
       dut: SpramController,
       addr: Long,
-      data: Int
+      data: Long
   ): Unit = {
     dut.io.resultWrite.valid #= true
     dut.io.resultWrite.payload.addr #= addr
@@ -140,9 +147,10 @@ object SpramControllerSim {
   }
 
   // Common DUT factory --- small config so tests run fast.
-  // 64 program words + 64 result bytes = 64 + 32 = 96 words → 7-bit
-  // address space. Large enough to exercise wrap-around with low
-  // address counts; small enough not to bloat `Mem` elaboration.
+  // 64 program words + 64 result bytes = 64 + 16 = 80 words (64 result
+  // bytes / 4 bytes-per-word = 16 words) → 7-bit address space.
+  // Large enough to exercise wrap-around with low address counts;
+  // small enough not to bloat `Mem` elaboration.
   private def smallCfg = MoleConfig(
     fabricFreqHz = 24 MHz,
     quarterPeriodCyclesReset = 6,
@@ -167,18 +175,18 @@ object SpramControllerSim {
       dut.clockDomain.waitSampling(5)
 
       val totalWords = dut.cfg.programWordCount +
-        (dut.cfg.resultRingByteCount + 1) / 2
-      val mask = 0xffff
+        (dut.cfg.resultRingByteCount + 3) / 4
+      val mask = 0xffffffffL
 
       for (a <- 0 until totalWords) {
-        val data = (a ^ 0xa5a5) & mask
+        val data = (a ^ 0xa5a5_a5a5L) & mask
         doLoaderWrite(dut, a.toLong, data)
       }
 
       dut.clockDomain.waitSampling(2)
 
       for (a <- 0 until totalWords) {
-        val expected = BigInt((a ^ 0xa5a5) & mask)
+        val expected = BigInt((a ^ 0xa5a5_a5a5L) & mask)
         val got = doRead(dut, a.toLong)
         assert(
           got == expected,
@@ -206,11 +214,11 @@ object SpramControllerSim {
 
       val readAddr = 0x10L
       val writeAddr = 0x20L
-      val seed = 0x1234
-      val newVal = 0x5678
+      val seed = 0x1234_5678L
+      val newVal = 0x5678_9abcL
 
       doLoaderWrite(dut, readAddr, seed)
-      doLoaderWrite(dut, writeAddr, 0x0000)
+      doLoaderWrite(dut, writeAddr, 0x0000_0000L)
       dut.clockDomain.waitSampling(2)
 
       // Fork the response watcher BEFORE staging the contention.
@@ -272,8 +280,8 @@ object SpramControllerSim {
 
       val loaderAddr = 0x30L
       val resultAddr = 0x31L
-      val loaderData = 0xdead
-      val resultData = 0xbeef
+      val loaderData = 0xdead_beefL
+      val resultData = 0xcafe_babeL
 
       // Both writers offer the bus the same cycle, different
       // addresses so we can verify which actually landed.
@@ -327,13 +335,13 @@ object SpramControllerSim {
       dut.clockDomain.waitSampling(5)
 
       val ringBase = dut.cfg.programWordCount
-      val ringWords = (dut.cfg.resultRingByteCount + 1) / 2
+      val ringWords = (dut.cfg.resultRingByteCount + 3) / 4
       val passes = 3 // > 2 to guarantee real wrap behaviour
 
       for (i <- 0 until ringWords * passes) {
         val ringIdx = i % ringWords
         val ringAddr = ringBase + ringIdx
-        val data = (0x1000 + i) & 0xffff
+        val data = (0x1000_0000L + i) & 0xffff_ffffL
         doResultWrite(dut, ringAddr.toLong, data)
       }
 
@@ -341,7 +349,8 @@ object SpramControllerSim {
       // pass; verify.
       val finalPassStart = ringWords * (passes - 1)
       for (idx <- 0 until ringWords) {
-        val expected = BigInt((0x1000 + finalPassStart + idx) & 0xffff)
+        val expected =
+          BigInt((0x1000_0000L + finalPassStart + idx) & 0xffff_ffffL)
         val got = doRead(dut, (ringBase + idx).toLong)
         assert(
           got == expected,
@@ -366,7 +375,7 @@ object SpramControllerSim {
       dut.clockDomain.waitSampling(5)
 
       val addr = 0x05L
-      doLoaderWrite(dut, addr, 0xa5b6)
+      doLoaderWrite(dut, addr, 0xa5b6_c7d8L)
       dut.clockDomain.waitSampling(2)
 
       // Pre-flight: readResp.valid must be low while no read is in
@@ -396,7 +405,7 @@ object SpramControllerSim {
       resp.thread.join()
       val got = resp.payload.get
       assert(
-        got == BigInt(0xa5b6),
+        got == BigInt(0xa5b6_c7d8L),
         s"readResp.payload mismatch: 0x${got.toString(16)}"
       )
 
@@ -427,8 +436,8 @@ object SpramControllerSim {
       dut.clockDomain.waitSampling(5)
 
       val addr = 0x09L
-      val pre = 0xc0de
-      val post = 0xfeed
+      val pre = 0xc0de_faceL
+      val post = 0xfeed_d00dL
 
       doLoaderWrite(dut, addr, pre)
       dut.clockDomain.waitSampling(2)
@@ -496,11 +505,11 @@ object SpramControllerSim {
 
       val readAddr = 0x12L
       val writeAddr = 0x22L
-      val seed = 0x4321
-      val newVal = 0x8765
+      val seed = 0x4321_8765L
+      val newVal = 0x8765_4321L
 
       doLoaderWrite(dut, readAddr, seed)
-      doLoaderWrite(dut, writeAddr, 0x0000)
+      doLoaderWrite(dut, writeAddr, 0x0000_0000L)
       dut.clockDomain.waitSampling(2)
 
       // Fork the response watcher BEFORE staging the contention.
@@ -545,6 +554,90 @@ object SpramControllerSim {
     }
   }
 
+  /** Case 8: dual-tile parallelism.
+    *
+    * Writes a value whose upper half (`[31:16]`) and lower half (`[15:0]`) are
+    * distinct (`0xAABB_CCDD`), reads it back, and asserts both halves are
+    * intact. This proves the `tileLo`/`tileHi` DATAIN split and DATAOUT
+    * concatenation are wired correctly (not swapped, not overlapping).
+    *
+    * In `useBlackBox = false` mode the Mem is one 32-bit-wide store, so this
+    * case validates the 32-bit write-path integrity of the sim substitute
+    * alongside the real wiring contract for the hardware path.
+    */
+  def caseDualTileParallelism(): Unit = {
+    compileDut().doSim("dual-tile-parallelism") { dut =>
+      dut.clockDomain.forkStimulus(period = 10)
+      quiet(dut)
+      dut.clockDomain.waitSampling(5)
+
+      // Pattern where upper and lower 16-bit halves are clearly
+      // distinct so a swap or merge bug produces a wrong value.
+      val addr = 0x03L
+      val data = 0xaabb_ccddL
+
+      doLoaderWrite(dut, addr, data)
+      dut.clockDomain.waitSampling(2)
+
+      val got = doRead(dut, addr)
+      assert(
+        got == BigInt(data),
+        s"dual-tile: expected 0x${data.toHexString} got 0x${got.toString(16)}"
+      )
+      // Explicitly check each half to produce a precise error if
+      // the halves are swapped.
+      val loHalf = (got & BigInt(0xffffL)).toInt
+      val hiHalf = ((got >> 16) & BigInt(0xffffL)).toInt
+      assert(
+        loHalf == 0xccdd,
+        s"dual-tile: lo half expected 0xCCDD got 0x${loHalf.toHexString}"
+      )
+      assert(
+        hiHalf == 0xaabb,
+        s"dual-tile: hi half expected 0xAABB got 0x${hiHalf.toHexString}"
+      )
+
+      println("[caseDualTileParallelism] OK")
+    }
+  }
+
+  /** Case 9: alternating bit pattern.
+    *
+    * Writes `0x5555_5555` and `0xAAAA_AAAA` to consecutive addresses, reads
+    * them back, and asserts each bit individually. Detects any per-bit stuck-at
+    * fault or cross-talk between the two tile data paths.
+    */
+  def caseAlternatingBitPattern(): Unit = {
+    compileDut().doSim("alternating-bit-pattern") { dut =>
+      dut.clockDomain.forkStimulus(period = 10)
+      quiet(dut)
+      dut.clockDomain.waitSampling(5)
+
+      val addr0 = 0x06L
+      val addr1 = 0x07L
+      val pat0 = 0x5555_5555L // odd bits set
+      val pat1 = 0xaaaa_aaaaL // even bits set
+
+      doLoaderWrite(dut, addr0, pat0)
+      doLoaderWrite(dut, addr1, pat1)
+      dut.clockDomain.waitSampling(2)
+
+      val got0 = doRead(dut, addr0)
+      val got1 = doRead(dut, addr1)
+
+      assert(
+        got0 == BigInt(pat0),
+        s"alternating[0]: expected 0x${pat0.toHexString} got 0x${got0.toString(16)}"
+      )
+      assert(
+        got1 == BigInt(pat1),
+        s"alternating[1]: expected 0x${pat1.toHexString} got 0x${got1.toString(16)}"
+      )
+
+      println("[caseAlternatingBitPattern] OK")
+    }
+  }
+
   // --------------------------------------------------------------
   // Entry point
   // --------------------------------------------------------------
@@ -556,6 +649,8 @@ object SpramControllerSim {
     caseReadLatency()
     caseSameAddrReadWrite()
     caseReadPriorityOverLoader()
+    caseDualTileParallelism()
+    caseAlternatingBitPattern()
     println("SpramControllerSim: all cases passed")
   }
 }

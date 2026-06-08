@@ -2,7 +2,7 @@ package mole
 
 import spinal.core._
 
-/** Compile-time configuration record for the Mole v0 bit-cycle engine.
+/** Compile-time configuration record for the Mole v0.2 bit-cycle engine.
   *
   * Held as a `case class` so every sub-block (engine, SPRAM controller, UART,
   * pad wrapper, ...) receives one immutable value and derives its widths and
@@ -37,21 +37,24 @@ import spinal.core._
   *   fast-plus and I³C OD-low ranges.
   *
   * @param programWordCount
-  *   Depth of the SPRAM-backed program memory, in 16-bit words. Each ISA
-  *   instruction is exactly one word (ROADMAP §"Encoding width" — 16-bit
-  *   fixed). The 2048-instruction cap follows the 11-bit absolute `JMP`
-  *   operand: above 2048, `JMP` cannot reach all of memory and the encoder must
-  *   reject the program. Long-range conditional branches expand to
-  *   `BRANCH_ON cond, near` + `JMP far` in the SDK to keep within ±64 of
-  *   `BRANCH_ON`'s signed offset while still spanning the full 2048-instruction
-  *   range.
+  *   Depth of the SPRAM-backed program memory, in 32-bit words. Each ISA v0.2
+  *   instruction is exactly one 32-bit word (spec §3 — 32-bit fixed). The
+  *   absolute cap is `MAX_PROGRAM_WORDS = 8192` (spec §10, mirrored by
+  *   `mole-abi::MAX_PROGRAM_WORDS`); above 8192 the SPRAM tile-pair budget is
+  *   exhausted. The default of 4096 words (= 16 KB) is half the tile-pair
+  *   budget, leaving 12 KB for the result ring and future expansion. The
+  *   `BRANCH_ON` signed 10-bit offset (±512) and `JMP` / `BranchOn ALWAYS` as
+  *   long-range trampoline are the only jump-range constraints; programs up to
+  *   8192 words are reachable by indirect-jump sequences.
   *
   * @param resultRingByteCount
   *   Depth of the result ring, in bytes. The engine streams sampled bits,
   *   mismatch flags, `MARK` records, and the `HALT` status into this ring; the
-  *   UART TX drains it back to the host. A short ring is fine for v0 — a
-  *   worst-case I³C SDR write is ~2 500 bits ~ 320 bytes of sampled-bit
-  *   traffic.
+  *   UART TX drains it back to the host. The default of 8192 bytes = 2048 v0.2
+  *   32-bit words (unchanged from v0's 4096 v0 16-bit words — same byte count,
+  *   half the word count because the grain doubled). A short ring is fine for
+  *   typical I³C SDR traffic; longer rings are possible up to the 16 KB
+  *   tile-pair headroom above the program body.
   *
   * @param captureMaxBits
   *   Per-program cap on capturable bits. Defines the back-pressure boundary in
@@ -103,7 +106,7 @@ case class MoleConfig(
     fabricFreqHz: HertzNumber =
       24 MHz, // .MHz method from spinal.core._; postfix form is documented sugar
     quarterPeriodCyclesReset: Int = 6,
-    programWordCount: Int = 2048,
+    programWordCount: Int = 4096,
     resultRingByteCount: Int = 8192,
     captureMaxBits: Int = 65536,
     uartBaud: Int = 1_000_000,
@@ -121,14 +124,13 @@ case class MoleConfig(
     s"programWordCount=$programWordCount must be >= 1"
   )
 
-  // 11-bit absolute JMP operand (ROADMAP §"Encoding width") caps the
-  // program at 2048 instructions = 2048 × 16-bit words = 4 KiB. No
-  // `isPow2` requirement here — JMP indexes directly and doesn't need
-  // a power-of-two mask. A future v1 jumbo-address opcode could lift
-  // the cap if a workload ever needs it.
+  // v0.2 caps programWordCount at MAX_PROGRAM_WORDS = 8192 (spec §10,
+  // mirrored in mole-abi::MAX_PROGRAM_WORDS). At 32-bit words this is
+  // 32 KB, which fits in one SB_SPRAM256KA tile-pair (16K × 32-bit =
+  // 64 KB). There is no isPow2 requirement; addresses are linear.
   require(
-    programWordCount <= 2048,
-    s"programWordCount=$programWordCount exceeds 2048 (11-bit JMP addr cap)"
+    programWordCount <= 8192,
+    s"programWordCount=$programWordCount exceeds MAX_PROGRAM_WORDS=8192 (spec §10)"
   )
 
   require(

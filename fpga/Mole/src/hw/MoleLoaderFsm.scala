@@ -117,8 +117,14 @@ case class MoleLoaderFsm(
       */
     val acceptRx = in Bool ()
 
-    /** Outgoing program-write commands to `SpramController.loaderWrite`. */
-    val programWrite = master Stream SpramWriteCmd(addrWidth)
+    /** Outgoing program-write commands to `SpramController.loaderWrite`.
+      *
+      * Data is 16-bit: the loader assembles one instruction word from two UART
+      * bytes (`wordHiReg ## wordLoReg`). The top-level adapter (`MoleTop`,
+      * Phase C.6) zero-extends this 16-bit word to 32 bits before connecting to
+      * `SpramController.loaderWrite`.
+      */
+    val programWrite = master Stream SpramWriteCmd(addrWidth, dataWidth = 16)
 
     /** Single-cycle pulse: a frame just finished with CRC match. */
     val loaded = out Bool ()
