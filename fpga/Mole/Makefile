@@ -217,7 +217,7 @@ sim-engine-stretch-role: ## Stretch-aware EMIT_BIT role-gating (Controller vs Ta
 # generated module is MoleTop. The generated file lives at gen/MoleTop.v
 # and is gitignored.
 
-gen: | $(GEN_DIR) ## Generate gen/MoleTop.v from MoleTopVerilog (Step 15)
+generate: | $(GEN_DIR) ## Generate gen/MoleTop.v from MoleTopVerilog (Step 15)
 	$(SBT) -batch "runMain $(PACKAGE).$(TOP)Verilog"
 
 waves: ## Open the most recent simulation VCD in gtkwave
