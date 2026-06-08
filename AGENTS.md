@@ -419,8 +419,15 @@ footer (see "Breaking changes" above).
   not.
 - **Don't create planning `.md` files inside the repo.** Use the
   per-session workspace (`~/.copilot/session-state/<id>/`) for
-  ephemeral plans. The only design doc that lives in-tree is
-  `ROADMAP.md`.
+  ephemeral plans. The in-tree design docs are `ROADMAP.md` (the
+  product roadmap and architectural source of truth) and anything
+  under `docs/` (durable reference material that ships with the
+  repo). Notably `docs/MOLE-0.2-SPEC.md` is the normative ISA and
+  wire-format specification for v0.2 onward; treat it the same as
+  `ROADMAP.md` --- contradicting changes must update the spec in
+  the same PR or stop and ask. New `docs/` entries should be
+  reference / specification / tutorial material with long-term
+  value, not ephemeral planning notes.
 - **Sub-trees may add their own `AGENTS.md`** that overrides this
   one for local specifics (e.g., `fpga/<project>/AGENTS.md` will
   document its pinout, target frequency, and any open-drain
