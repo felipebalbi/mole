@@ -6,18 +6,14 @@
 //! passed to [`build_frame`]; the frame format is otherwise unchanged
 //! from v0.
 
+use mole_abi::{MAX_PROGRAM_WORDS, PREAMBLE_WORDS};
+
 use crate::error::AsmError;
 
-// FIXME(B5): replace with mole_abi::PREAMBLE_WORDS once B5 adds it.
-const PREAMBLE_WORDS: usize = 2;
-
 /// Maximum total program length in 32-bit words (preamble + body).
-/// Sourced from §10 / §16 spec constant MAX_PROGRAM_WORDS = 8192
-/// (body only); total including preamble is 8192 + 2 = 8194.
-/// The frame builder enforces this.
-///
-/// FIXME(B5): derive from mole_abi::MAX_PROGRAM_WORDS + PREAMBLE_WORDS.
-const MAX_TOTAL_WORDS: usize = 8194; // 8192 body + 2 preamble
+/// Derived from `mole_abi::MAX_PROGRAM_WORDS + mole_abi::PREAMBLE_WORDS`
+/// per §10. The frame builder enforces this limit.
+const MAX_TOTAL_WORDS: usize = MAX_PROGRAM_WORDS + PREAMBLE_WORDS;
 
 /// CRC-16/XMODEM (poly `0x1021`, init `0x0000`, no reflection, no
 /// XOR-out).

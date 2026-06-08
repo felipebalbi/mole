@@ -19,17 +19,17 @@ use crate::error::{AsmError, Result, SourceLocation};
 use crate::symbols::{self, BUS_MODES, COND_CODES, MNEMONICS, ROLE_NAMES, SHIFT_DIRS, TX_SYMBOLS};
 
 // -----------------------------------------------------------------------
-// Wire-format preamble constants
-// FIXME(B5): replace with mole_abi::MAGIC / FORMAT_VERSION /
-//            MAX_PROGRAM_WORDS + PREAMBLE_WORDS once B5 updates mole-abi.
+// Wire-format preamble constants (mole_abi)
 // -----------------------------------------------------------------------
 
 /// Preamble magic + version word: bytes 4C 4D 02 00 (little-endian).
-/// The magic u16 is 0x4D4C; version u16 is 0x0002.
-const PREAMBLE_MAGIC: u32 = 0x0002_4D4C;
+/// Mirror of `mole_abi::MAGIC`. The magic u16 is 0x4D4C;
+/// version u16 is 0x0002. See §10.
+const PREAMBLE_MAGIC: u32 = mole_abi::MAGIC;
 
-/// Maximum body length in 32-bit words (§10/§16).
-const MAX_PROGRAM_WORDS: usize = 8192;
+/// Maximum body length in 32-bit words. Mirror of
+/// `mole_abi::MAX_PROGRAM_WORDS`. See §10.
+const MAX_PROGRAM_WORDS: usize = mole_abi::MAX_PROGRAM_WORDS;
 
 // -----------------------------------------------------------------------
 // Statement

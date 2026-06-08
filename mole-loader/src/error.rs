@@ -1,5 +1,12 @@
 //! Structured loader / decoder errors.
 //!
+// FIXME(B6): mole-abi v0.2 rewrite changed MAX_PROGRAM_WORDS from 2048 to
+//            8192. The doc comment on FrameError::LengthOutOfRange below
+//            still says "currently 2048"; update to 8192 and revise the
+//            RingError::HaltReservedBitsSet / HaltStatusReserved variants
+//            for the new 32-bit HALT word layout (§11). B6 rewrites the
+//            loader for v0.2 frame and ring-record formats.
+//!
 //! `mole_loader` returns `Result<T, LoaderError>` from every fallible
 //! function. The variants partition the failure space the loader can
 //! actually see:

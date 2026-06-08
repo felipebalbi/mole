@@ -26,8 +26,10 @@ CLI::
 Running with no args regenerates fixture bytecode files in this
 directory and runs the full self-check suite; exits 0 on success.
 
-Encoding note: FIXME(B5): replace hard-coded magic/version/max-words
-constants with mole_abi crate values once B5 freezes the ABI.
+Encoding note: wire-format preamble constants are defined in
+mole-abi/src/lib.rs (mole_abi::MAGIC, mole_abi::MAX_PROGRAM_WORDS).
+The Python literals below are mirrors of those Rust constants; keep
+them in sync when mole-abi changes.
 """
 
 from __future__ import annotations
@@ -39,15 +41,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-
 # ---------------------------------------------------------------------------
-# Wire-format preamble constants  (§10, §16)
-# FIXME(B5): replace with mole_abi::MAGIC / FORMAT_VERSION /
-#            MAX_PROGRAM_WORDS once B5 updates mole-abi.
+# Wire-format preamble constants  (§10)
+# Wire-format preamble constants. Source of truth: mole-abi/src/lib.rs.
+# Keep in sync.
 # ---------------------------------------------------------------------------
 
+# Mirror of mole_abi::MAGIC
 PREAMBLE_MAGIC: int = 0x0002_4D4C   # bytes on wire: 4C 4D 02 00
-MAX_PROGRAM_WORDS: int = 8192        # §10 / §16
+# Mirror of mole_abi::MAX_PROGRAM_WORDS
+MAX_PROGRAM_WORDS: int = 8192        # §10
 
 
 # ---------------------------------------------------------------------------

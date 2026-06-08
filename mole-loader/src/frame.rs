@@ -1,5 +1,11 @@
 //! Host-side `.mole.bin` frame verification.
 //!
+// FIXME(B6): mole-abi v0.2 rewrite changed MAX_PROGRAM_WORDS from 2048 to
+//            8192 and the frame format from 16-bit to 32-bit words with a
+//            2-word preamble (MAGIC + length). The doc comments and the
+//            verify_frame logic below still describe the v0 16-bit layout.
+//            B6 rewrites this module for the v0.2 32-bit frame format.
+//!
 //! The encoder side --- [`mole_asm::frame::build_frame`] --- is
 //! authoritative; this module is the inverse, used by the loader
 //! to sanity-check an artifact *before* it is shipped over UART.

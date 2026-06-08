@@ -1,6 +1,14 @@
 //! Serial-port transport: ship a `.mole.bin` frame to a Mole engine
 //! and drain the resulting ring back.
 //!
+// FIXME(B6): mole-abi v0.2 rewrite changed DEFAULT_BAUD from 1_000_000
+//            to 2_000_000. The doc comment in this file and the CLI help
+//            text (mole-loader-cli/src/main.rs) still say "1 Mbaud".
+//            No compile break, but the semantic change must be reflected
+//            in docs and any test that asserts the specific baud value.
+//            B6 rewrites the loader for v0.2 frame and ring-record
+//            formats; update DEFAULT_BAUD prose in the same pass.
+//!
 //! # Wire contract recap
 //!
 //! - UART, default 1 Mbaud, 8N1, **mandatory hardware RTS/CTS flow

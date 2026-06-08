@@ -53,6 +53,12 @@
 //! HALT word, so callers can warn the user when the value is
 //! non-zero.
 
+// FIXME(B6): mole-abi v0.2 rewrite changed halt::TAG_MASK, halt::TAG_HALT,
+//            halt::RESERVED_BITS_MASK, halt::STATUS_MASK, and all
+//            record_tag:: values from u16 to u32. The halt_word variable
+//            here is u16 and cannot be combined with u32 constants;
+//            this file no longer compiles. B6 rewrites the loader for
+//            the v0.2 32-bit HALT word and ring-record formats.
 use crate::error::RingError;
 use mole_abi::{halt, record_tag, record_width_words, revision};
 

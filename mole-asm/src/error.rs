@@ -85,10 +85,9 @@ pub enum AsmError {
         message: String,
     },
 
-    /// Frame contains zero words, or more than MAX_PROGRAM_WORDS words
-    /// (including the 2-word preamble).
-    // FIXME(B5): update limit to use mole_abi::MAX_PROGRAM_WORDS + 2
-    // once B5 adds PREAMBLE_WORDS.
+    /// Frame contains zero words, or more than
+    /// `mole_abi::MAX_PROGRAM_WORDS + mole_abi::PREAMBLE_WORDS` words
+    /// (i.e. 8194 total: 8192 body + 2 preamble).
     #[error(
         "E-FRM-001: frame must contain 1..=8194 total words \
          (8192 body + 2 preamble), got {word_count}"

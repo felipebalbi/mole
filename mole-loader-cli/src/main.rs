@@ -1,5 +1,11 @@
 //! CLI front-end for `mole-loader`.
 //!
+// FIXME(B6): mole-abi v0.2 rewrite changed DEFAULT_BAUD from 1_000_000
+//            to 2_000_000. The help text below and the doc comments in
+//            mole-loader/src/transport.rs still say "1 Mbaud". Update
+//            prose and --baud default-value text when B6 rewrites the
+//            loader for v0.2 frame and ring-record formats.
+//!
 //! Round-trip a `.mole.bin` artifact against a real Mole engine:
 //! verify the frame locally, ship it over UART, drain the result
 //! ring, decode it, print it.
