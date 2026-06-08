@@ -95,7 +95,7 @@ sim: sim-config sim-opendrain sim-baud-gen sim-rx-sync \
      sim-engine-jmp-boundary sim-top-cts-violation \
      sim-engine-emit-bit-data-hold \
      sim-engine-stretch sim-engine-stretch-role \
-     sim-regfile ## Run all simulations
+     sim-regfile sim-engine-pipeline ## Run all simulations
 
 # Per-block sim / gen targets land here once their hint blocks in
 # TODO.md flip from 🔲 to ✅. The naming contract is fixed:
@@ -218,6 +218,9 @@ sim-engine-stretch-role: ## Stretch-aware EMIT_BIT role-gating (Controller vs Ta
 sim-regfile: ## 8x32-bit register file: storage, W-to-R bypass, load-use stall (Phase C.5)
 	$(SBT) -batch "runMain $(PACKAGE).RegFileSim"
 
+sim-engine-pipeline: ## 5-stage pipeline scaffold: HALT, trap, fetch sequencing (Phase C.6)
+	$(SBT) -batch "runMain $(PACKAGE).EnginePipelineSim"
+
 # gen target -- the canonical Verilog entrypoint is MoleTopVerilog;
 # generated module is MoleTop. The generated file lives at gen/MoleTop.v
 # and is gitignored.
@@ -258,5 +261,5 @@ help: ## Show this help (every target with a ## description)
         sim-engine-jmp-boundary sim-top-cts-violation \
         sim-engine-emit-bit-data-hold \
         sim-engine-stretch sim-engine-stretch-role \
-        sim-regfile \
+        sim-regfile sim-engine-pipeline \
         gen waves flash clean distclean help
