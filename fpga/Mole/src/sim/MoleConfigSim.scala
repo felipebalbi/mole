@@ -6,12 +6,13 @@ import spinal.core._
   *
   * Pure-Scala main, not a SpinalSim DUT. The data record has no hardware state
   * to exercise; what we want to *verify* at the `sim-config` Makefile target is
-  * that the default config can actually represent the bus frequencies Mole's v0
+  * that the default config can actually represent the bus frequencies Mole's v0.2
   * controller-role use cases require — I²C standard / fast / fast-plus, I³C
   * OD-low and OD-mid. The I³C PP-high target (12.5 MHz SCL = 50 MHz quarter
-  * rate) is *flagged* with a `println` rather than asserted out — it requires
-  * either fabric > 50 MHz or a fractional divider, both out of Phase-0 scope
-  * (ROADMAP §"Phased plan" gates I³C PP on a later phase).
+  * rate) is *flagged* with a `println` rather than asserted out — it is NOT
+  * supported on Mole Verde's 48 MHz fabric (requires fabric > 50 MHz or a
+  * fractional divider); full-rate I3C SDR is Mole Rojo (ECP5) territory per
+  * ROADMAP §"Hardware tiers".
   *
   * `runMain` is the entry point because the sibling project uses the same
   * convention; `sbt -batch runMain mole.MoleConfigSim` is wired into
@@ -27,6 +28,7 @@ object MoleConfigSim extends App {
 
   println(s"--- MoleConfig defaults audit ---")
   println(s"fabricFreqHz             = ${cfg.fabricFreqHz.toBigDecimal} Hz")
+  println(s"uartFreqHz               = ${cfg.uartFreqHz} Hz")
   println(s"quarterPeriodCyclesReset = ${cfg.quarterPeriodCyclesReset}")
   println(s"programWordCount         = ${cfg.programWordCount}")
   println(s"resultRingByteCount      = ${cfg.resultRingByteCount}")
@@ -42,12 +44,10 @@ object MoleConfigSim extends App {
     * `MoleConfig.quarterPeriodCyclesReset`'s plausible range (>= 1, integer)
     * AND lands within ±5 % of the requested bit rate. The error band catches
     * the case where truncation pushes the achieved frequency well above the
-    * target — for example I3C OD 4 MHz at 24 MHz fabric truncates the 1.5-
-    * cycle divider to 1 and overshoots to 6 MHz (+50 %). The Phase-0 buses we
-    * actually need on Mole Verde (I2C SM/FM/FM+, I3C OD up to 2 MHz) all fall
-    * inside the band; the asserter is what catches a future fabric change (or a
-    * new bus target) that silently warps a bus speed. Returns the divider for
-    * the `println` log line.
+    * target. The Phase-0 buses we actually need on Mole Verde (I2C SM/FM/FM+,
+    * I3C OD up to 4 MHz) all fall inside the band at 48 MHz; the asserter
+    * catches a future fabric change (or a new bus target) that silently warps
+    * a bus speed. Returns the divider for the `println` log line.
     */
   def auditBus(
       label: String,
@@ -76,55 +76,67 @@ object MoleConfigSim extends App {
 
   // Required: every Phase-0 I²C / I³C-OD frequency Mole Verde claims to
   // support must produce an integer divider with ≤ 5 % bit-rate error.
-  auditBus("I2C standard 100 kHz", 100 kHz)
-  auditBus("I2C fast 400 kHz", 400 kHz)
-  auditBus("I2C fast-plus 1 MHz", 1 MHz)
-  auditBus("I3C OD 2 MHz", 2 MHz)
+  // At 48 MHz all five standard rates are clean integers — an improvement
+  // over v0 24 MHz where I3C OD 4 MHz overshot to 6 MHz (+50 %).
+  //
+  // Derived dividers at 48 MHz (fabricFreqHz / (bitHz × 4)):
+  //   I2C 100 kHz:  48_000_000 / (100_000 × 4) = 120
+  //   I2C 400 kHz:  48_000_000 / (400_000 × 4) = 30
+  //   I2C 1 MHz:    48_000_000 / (1_000_000 × 4) = 12
+  //   I3C OD 2 MHz: 48_000_000 / (2_000_000 × 4) = 6
+  //   I3C OD 4 MHz: 48_000_000 / (4_000_000 × 4) = 3
+  val div100k = auditBus("I2C standard 100 kHz", 100 kHz)
+  assert(div100k == 120, s"I2C 100 kHz divider should be 120 at 48 MHz; got $div100k")
 
-  // Flagged: I3C OD 4 MHz lands at quarter rate 16 MHz, requiring
-  // `quarterPeriodCyclesFor(16 MHz) = floor(24 / 16) = 1`. That's the
-  // engine's minimum divider and overshoots the target by +50 %
-  // (achieved bit rate = 24 / 1 / 4 = 6 MHz, not 4 MHz). Mole Verde
-  // tops out at I3C OD 2 MHz with the default 24 MHz fabric; full-rate
-  // I3C SDR moves to Mole Rojo (ECP5, 100 MHz fabric). Print a warning
-  // line so the constraint is visible but do not assert out — the
-  // engine itself accepts divider=1 cleanly via LOAD_TIMING.
-  val odHighBit = 4 MHz
-  val odHighQ = quarterRate(odHighBit)
-  val odHighDiv = cfg.quarterPeriodCyclesFor(odHighQ)
-  val odHighAchievedBit =
-    (cfg.fabricFreqHz.toBigDecimal / odHighDiv) / 4
-  val odHighErrPct =
-    ((odHighAchievedBit - odHighBit.toBigDecimal)
-      / odHighBit.toBigDecimal * 100).toDouble
-  if (math.abs(odHighErrPct) > 5.0) {
-    println(
-      f"WARN: I3C OD 4 MHz lands at div=$odHighDiv → achieved ${odHighAchievedBit}%.0f Hz, " +
-        f"err=${odHighErrPct}%+.1f%% > 5%% — not supported on Mole Verde's 24 MHz fabric. " +
-        "Use I3C OD ≤ 2 MHz on Verde; full-rate I3C SDR is Mole Rojo (ECP5) territory."
-    )
-  } else {
-    auditBus("I3C OD 4 MHz", odHighBit)
-  }
+  val div400k = auditBus("I2C fast 400 kHz", 400 kHz)
+  assert(div400k == 30, s"I2C 400 kHz divider should be 30 at 48 MHz; got $div400k")
 
-  // Flagged: I³C PP-high (12.5 MHz SCL) requires fabric > 50 MHz or
-  // a fractional divider. Phase 0 ships without it. Emit a warning
-  // line but do not assert out — the design is allowed to miss
-  // this target until Phase 1+.
+  val div1m = auditBus("I2C fast-plus 1 MHz", 1 MHz)
+  assert(div1m == 12, s"I2C 1 MHz divider should be 12 at 48 MHz; got $div1m")
+
+  val div2m = auditBus("I3C OD 2 MHz", 2 MHz)
+  assert(div2m == 6, s"I3C OD 2 MHz divider should be 6 at 48 MHz; got $div2m")
+
+  // I3C OD 4 MHz: at 48 MHz the divider is exactly 3 (integer, clean).
+  // This was problematic at v0 24 MHz where the divider truncated to 1
+  // and overshot to 6 MHz (+50 %). 48 MHz resolves that issue cleanly.
+  val div4m = auditBus("I3C OD 4 MHz", 4 MHz)
+  assert(div4m == 3, s"I3C OD 4 MHz divider should be 3 at 48 MHz; got $div4m")
+
+  // Flagged: I³C SDR PP-high (12.5 MHz SCL = 50 MHz quarter rate) requires
+  // fabric > 50 MHz or a fractional divider. NOT supported on Mole Verde at
+  // 48 MHz. Full-rate I3C SDR moves to Mole Rojo (ECP5, 100 MHz fabric).
+  // Emit a warning line but do not assert out.
   val ppHighBit = 12500000 Hz
   val ppHighQ = quarterRate(ppHighBit)
   val ppHighDiv = cfg.quarterPeriodCyclesFor(ppHighQ)
   if (ppHighDiv < 1) {
     println(
-      s"WARN: I3C PP 12.5 MHz needs quarter rate ${ppHighQ.toBigDecimal} Hz > fabric ${cfg.fabricFreqHz.toBigDecimal} Hz — fabric > 50 MHz or fractional divider required (deferred to Phase 1+)"
+      s"WARN: I3C PP 12.5 MHz needs quarter rate ${ppHighQ.toBigDecimal} Hz > fabric ${cfg.fabricFreqHz.toBigDecimal} Hz — " +
+        "NOT supported on Mole Verde 48 MHz fabric; full-rate I3C SDR is Mole Rojo (ECP5) territory"
     )
   } else {
-    auditBus("I3C PP 12.5 MHz", ppHighBit)
+    // ppHighDiv >= 1 but still likely fractional (0.96 truncated to 0 normally
+    // at 48 MHz, so this branch should not be hit unless fabricFreqHz changes).
+    val ppHighAchievedBit =
+      (cfg.fabricFreqHz.toBigDecimal / ppHighDiv) / 4
+    val ppHighErrPct =
+      ((ppHighAchievedBit - ppHighBit.toBigDecimal)
+        / ppHighBit.toBigDecimal * 100).toDouble
+    if (math.abs(ppHighErrPct) > 5.0) {
+      println(
+        f"WARN: I3C SDR 12.5 MHz lands at div=$ppHighDiv → achieved ${ppHighAchievedBit}%.0f Hz, " +
+          f"err=${ppHighErrPct}%+.1f%% > 5%% — NOT supported on Mole Verde's 48 MHz fabric. " +
+          "Full-rate I3C SDR is Mole Rojo (ECP5) territory."
+      )
+    } else {
+      auditBus("I3C PP 12.5 MHz", ppHighBit)
+    }
   }
 
   // Sanity: the reset divider must be one we could actually get from
-  // an integer divider of fabric. (At 24 MHz / div=6 = 4 MHz quarter
-  // = 1 MHz bit. Matches MoleConfig's documented default.)
+  // an integer divider of fabric. (At 48 MHz / div=6 = 8 MHz quarter
+  // = 2 MHz bit. Matches MoleConfig's documented default.)
   assert(
     cfg.quarterPeriodCyclesReset >= 1,
     s"quarterPeriodCyclesReset=${cfg.quarterPeriodCyclesReset} < 1"
@@ -140,21 +152,22 @@ object MoleConfigSim extends App {
   // at baudRate × oversample (16× is the imported sibling default,
   // textbook for UART RX). The 24-bit DDS accumulator overflows once
   // `baudRate * oversample >= clkFreqHz`; UartConfig already guards
-  // that. Restate it here so a future MoleConfig default bump can't
-  // silently violate the constraint — we'll see this assertion fire
-  // before any UART is even instantiated.
+  // that. Restate it here against uartFreqHz (the uartClk domain, 24
+  // MHz) so a future MoleConfig default bump can't silently violate
+  // the constraint — we'll see this assertion fire before any UART is
+  // even instantiated.
   val uartOversample = 16
   val uartOsHz = cfg.uartBaud.toLong * uartOversample
-  val fabricHz = cfg.fabricFreqHz.toBigDecimal.toLong
+  val uartClkHz = cfg.uartFreqHz.toLong
   assert(
-    uartOsHz < fabricHz,
+    uartOsHz < uartClkHz,
     s"UART DDS guard: uartBaud (${cfg.uartBaud}) × oversample ($uartOversample) " +
-      s"= $uartOsHz Hz must be < fabricFreqHz ($fabricHz Hz)"
+      s"= $uartOsHz Hz must be < uartFreqHz ($uartClkHz Hz)"
   )
   val phaseInc =
-    BaudGenerator.phaseIncFor(fabricHz.toInt, uartOsHz.toInt)
+    BaudGenerator.phaseIncFor(uartClkHz.toInt, uartOsHz.toInt)
   val realisedOsHz =
-    (BigInt(phaseInc) * fabricHz) >> 24
+    (BigInt(phaseInc) * uartClkHz) >> 24
   val realisedBaud = realisedOsHz / uartOversample
   println(
     f"UART: baud=${cfg.uartBaud}%d, oversample=$uartOversample%d, " +

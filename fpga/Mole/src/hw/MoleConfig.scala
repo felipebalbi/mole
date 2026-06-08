@@ -11,29 +11,55 @@ import spinal.core._
   *
   * One `MoleConfig` instance is constructed by `MoleTop` (Phase 2) and threaded
   * through every sub-block. Sub-blocks **never** re-derive timing or sizing
-  * from raw `fabricFreqHz`; they consume the already- derived helpers
+  * from raw `fabricFreqHz`; they consume the already-derived helpers
   * (`quarterPeriodCyclesFor(...)` etc.). This mirrors the `I2cConfig`
   * discipline in the sibling `icebreaker-spinalhdl-examples/I2c` project —
   * single source of truth for all derived counters.
   *
   * @param fabricFreqHz
-  *   Post-PLL fabric clock. v0 default is 24 MHz on the iCE40 UP5K (Mole
-  *   Verde). The original 48 MHz target was abandoned after first synth on the
-  *   UP5K SG48I came in at Fmax ~28.4 MHz even after two rounds of
-  *   register-retiming the loader FSM critical path; closing 48 MHz would be a
-  *   multi-PR refactor with no guarantee on the part. Mole Verde's positioning
-  *   (pocket / per-dev, I2C all modes + I3C OD up to ~6 MHz SCL) makes 24 MHz
-  *   comfortable; full-rate I3C SDR (12.5 MHz SCL) and HDR-DDR are Mole Rojo
-  *   territory by design — see ROADMAP §"Hardware tiers" and §"Clocks". ROADMAP
-  *   §"Quarter-bit timing" notes the fabric clock IS the quarter-bit clock —
-  *   every state in the bit FSM advances on a quarter-bit boundary, never
-  *   sub-quarter. Type is `HertzNumber` (not `Int`) so the type system catches
-  *   Hz vs MHz mismatches at elaboration.
+  *   Post-PLL fabric clock, i.e. the `engineClk` domain. v0.2 target is
+  *   **48 MHz** on the iCE40 UP5K (Mole Verde); the v0 design ran at 24 MHz.
+  *   The v0 24 MHz target was chosen after first synth on the UP5K SG48I came
+  *   in at Fmax ~28.4 MHz even after two rounds of register-retiming the
+  *   loader FSM critical path; closing 48 MHz would have been a multi-PR
+  *   refactor with no guarantee on the part. Phase C's bet is that the 5-stage
+  *   pipeline (lands in C.6) closes 48 MHz where the v0 monolithic FSM did
+  *   not. Mole Verde's positioning (pocket / per-dev, I2C all modes + I3C OD
+  *   up to ~12 MHz SCL) benefits from the headroom. Note that this is the
+  *   `engineClk` frequency; the `uartClk` domain runs at `uartFreqHz`
+  *   (24 MHz, half of `engineClk`) regardless. Full-rate I3C SDR (12.5 MHz
+  *   SCL) and HDR-DDR are Mole Rojo (ECP5) territory by design — see ROADMAP
+  *   §"Hardware tiers" and §"Clocks". ROADMAP §"Quarter-bit timing" notes the
+  *   fabric clock IS the quarter-bit clock — every state in the bit FSM
+  *   advances on a quarter-bit boundary, never sub-quarter. Type is
+  *   `HertzNumber` (not `Int`) so the type system catches Hz vs MHz mismatches
+  *   at elaboration.
+  *
+  *   Integer-divider audit at 48 MHz (fabricFreqHz / (bitHz × 4)):
+  *   - I2C 100 kHz:   48_000_000 / (100_000 × 4) = 120   (integer, clean)
+  *   - I2C 400 kHz:   48_000_000 / (400_000 × 4) = 30    (integer, clean)
+  *   - I2C 1 MHz:     48_000_000 / (1_000_000 × 4) = 12  (integer, clean)
+  *   - I3C OD 2 MHz:  48_000_000 / (2_000_000 × 4) = 6   (integer, clean)
+  *   - I3C OD 4 MHz:  48_000_000 / (4_000_000 × 4) = 3   (integer, clean)
+  *   - I3C SDR 12.5 MHz: 48_000_000 / (12_500_000 × 4) = 0.96 → NOT integer.
+  *     12.5 MHz SDR is NOT supported on Mole Verde at 48 MHz; that is Mole
+  *     Rojo (ECP5) territory per ROADMAP §"Hardware tiers".
+  *
+  *   All five standard I2C and I3C-OD rates are integer dividers at 48 MHz,
+  *   which is actually cleaner than the v0 24 MHz fabric (where I3C OD 4 MHz
+  *   truncated to divider=1 and overshot to 6 MHz at +50 %).
+  *
+  * @param uartFreqHz
+  *   UART clock domain frequency in Hz. Fixed at 24 MHz regardless of
+  *   `engineClk`: driven by the ÷2 toggle FF in `MolePllUp5k` off the 48 MHz
+  *   engineClk (see `MolePllUp5k.clkOutUart`). A `require` guards the 2:1
+  *   ratio so future `fabricFreqHz` changes must either keep the ratio or
+  *   update this field explicitly.
   *
   * @param quarterPeriodCyclesReset
   *   Power-on default for the quarter-bit divider, in fabric cycles.
   *   Overridable at runtime via `LOAD_TIMING` (Step 11). Default 6 → quarter
-  *   rate = 4 MHz at 24 MHz fabric → bit rate = 1 MHz, well inside I²C
+  *   rate = 8 MHz at 48 MHz fabric → bit rate = 2 MHz, well inside I²C
   *   fast-plus and I³C OD-low ranges.
   *
   * @param programWordCount
@@ -67,33 +93,35 @@ import spinal.core._
   *   iCEBreaker's USB-UART bridge is an FT2232H, which comfortably supports up
   *   to 12 Mbaud. The Mole Verde production default is **1 Mbaud** — the
   *   highest rate that still keeps the textbook 16× RX oversample at 24 MHz
-  *   fabric. At 1 Mbaud × 16× oversample the 24-bit DDS phase increment is
-  *   `round(1_000_000 * 16 * 2^24 / 24_000_000) = 11_184_811` (`0xAAA_AAB`),
-  *   fitting cleanly in the 24-bit accumulator with ppm-level baud accuracy.
-  *   Pushing higher (e.g. 1.5 Mbaud) at 16× would step right onto the DDS
-  *   overflow threshold (`1.5e6 × 16 = 24e6 = fabric`, no margin), and 2 Mbaud
-  *   at 16× would overflow it outright — both are rejected by the
-  *   `baudRate * oversample < clkFreqHz` guard in [[UartConfig]]. 1 Mbaud
-  *   easily streams ring-buffer drain traffic without throttling the engine
-  *   (worst-case 8 KiB program load at 1 Mbaud × 10 bits/byte = ~80 ms). Mole
-  *   Rojo (ECP5, faster fabric) will revisit the production baud default; the
-  *   engine itself imposes no upper bound here.
+  *   uartClk fabric. At 1 Mbaud × 16× oversample the 24-bit DDS phase
+  *   increment is `round(1_000_000 * 16 * 2^24 / 24_000_000) = 11_184_811`
+  *   (`0xAAA_AAB`), fitting cleanly in the 24-bit accumulator with ppm-level
+  *   baud accuracy. Pushing higher (e.g. 1.5 Mbaud) at 16× would step right
+  *   onto the DDS overflow threshold (`1.5e6 × 16 = 24e6 = uartClk`, no
+  *   margin), and 2 Mbaud at 16× would overflow it outright — both are
+  *   rejected by the `baudRate * oversample < clkFreqHz` guard in
+  *   [[UartConfig]]. 1 Mbaud easily streams ring-buffer drain traffic without
+  *   throttling the engine (worst-case 8 KiB program load at 1 Mbaud × 10
+  *   bits/byte = ~80 ms). The 2 Mbaud move (spec §2 "Default at 48 MHz
+  *   engineClk") is deferred to Phase C.10; see ROADMAP §"UART baud default".
   *
   * @param stretchTimeoutCycles
   *   Stretch-wait timeout in fabric cycles, applied at the Q1->Q2 boundary of
   *   every controller-role `EMIT_BIT` when the slave is observed to be
-  *   stretching SCL low. Default 2^20 ~= 44 ms at 24 MHz fabric, comfortably
-  *   above SMBus tTIMEOUT (35 ms) and any plausible I2C/I3C wakeup; small
-  *   enough that a genuinely wedged slave produces a deterministic HALT rather
-  *   than an infinite spin. See `ROADMAP.md` §"Stretch-aware Q2 entry" for the
-  *   engine-side contract. Set to 1 in a custom MoleConfig to make the engine
-  *   HALT immediately on any observed stretch (useful for compliance tests that
-  *   need to surface stretch as a violation rather than tolerate it).
+  *   stretching SCL low. Default 2^20 = 1_048_576 cycles ÷ 48 MHz ≈ 21.8 ms
+  *   at 48 MHz fabric (v0 was ÷ 24 MHz ≈ 43.7 ms — same constant, half the
+  *   wall-clock time). Still comfortably above SMBus tTIMEOUT (35 ms) and any
+  *   plausible I2C/I3C wakeup; small enough that a genuinely wedged slave
+  *   produces a deterministic HALT rather than an infinite spin. See
+  *   `ROADMAP.md` §"Stretch-aware Q2 entry" for the engine-side contract.
+  *   Set to 1 in a custom MoleConfig to make the engine HALT immediately on
+  *   any observed stretch (useful for compliance tests that need to surface
+  *   stretch as a violation rather than tolerate it).
   *
   * @param role
   *   Boot-default engine role. Defaults to [[EngineRole.Controller]] ---
   *   today's shipping behaviour and the only role exercised by Steps 1..18. Set
-  *   to [[EngineRole.Target]] to power up with the external-SCL- slaved FSM
+  *   to [[EngineRole.Target]] to power up with the external-SCL-slaved FSM
   *   active; see [[EngineRole]] for the per-role wire-level contracts.
   *
   * Post-Step-21 the bit-cycle engine carries a runtime `roleReg` initialised
@@ -104,7 +132,8 @@ import spinal.core._
   */
 case class MoleConfig(
     fabricFreqHz: HertzNumber =
-      24 MHz, // .MHz method from spinal.core._; postfix form is documented sugar
+      48 MHz, // .MHz method from spinal.core._; postfix form is documented sugar
+    uartFreqHz: Int = 24_000_000, // uartClk = engineClk / 2 via ÷2 toggle FF
     quarterPeriodCyclesReset: Int = 6,
     programWordCount: Int = 4096,
     resultRingByteCount: Int = 8192,
@@ -113,6 +142,23 @@ case class MoleConfig(
     stretchTimeoutCycles: Int = 1 << 20,
     role: EngineRole = EngineRole.Controller
 ) {
+
+  // uartFreqHz must divide evenly into fabricFreqHz and the ratio
+  // must be exactly 2 (the ÷2 toggle FF in MolePllUp5k). Future
+  // engineClk changes must accommodate the 24 MHz uartClk contract
+  // documented in fpga/Mole/AGENTS.md §"Quarter-bit is the timing
+  // unit on the wire".
+  require(
+    fabricFreqHz.toBigDecimal.toInt % uartFreqHz == 0,
+    s"fabricFreqHz (${fabricFreqHz.toBigDecimal} Hz) must be a multiple " +
+      s"of uartFreqHz ($uartFreqHz Hz)"
+  )
+  require(
+    fabricFreqHz.toBigDecimal.toInt / uartFreqHz == 2,
+    s"uartFreqHz ($uartFreqHz Hz) must be exactly half of fabricFreqHz " +
+      s"(${fabricFreqHz.toBigDecimal} Hz); got ratio " +
+      s"${fabricFreqHz.toBigDecimal.toInt / uartFreqHz}"
+  )
 
   require(
     quarterPeriodCyclesReset >= 1,

@@ -152,7 +152,7 @@ object SpramControllerSim {
   // Large enough to exercise wrap-around with low address counts;
   // small enough not to bloat `Mem` elaboration.
   private def smallCfg = MoleConfig(
-    fabricFreqHz = 24 MHz,
+    fabricFreqHz = 48 MHz,
     quarterPeriodCyclesReset = 6,
     programWordCount = 64,
     resultRingByteCount = 64,
