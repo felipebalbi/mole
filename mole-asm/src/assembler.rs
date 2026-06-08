@@ -198,8 +198,12 @@ fn parse_int(tok: &str, loc: &SourceLocation) -> Result<i64> {
     } else {
         clean_body.parse::<i64>()
     };
-    let val = parsed
-        .map_err(|_| AsmError::range(loc, format!("not a valid integer literal: '{tok}'")))?;
+    let val = parsed.map_err(|_| {
+        AsmError::range(
+            loc,
+            format!("E-RNG-001: not a valid integer literal: '{tok}'"),
+        )
+    })?;
     Ok(if negative { -val } else { val })
 }
 

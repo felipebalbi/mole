@@ -1315,6 +1315,37 @@ fn bad_capture_value_emits_e_op_002() {
     );
 }
 
+// --- B7: E-RNG-001 prefix on malformed (non-empty) numeric literal -------
+
+#[test]
+fn malformed_integer_literal_emits_e_rng_001() {
+    // parse_int("0xZZ") (and any other malformed but non-empty token)
+    // must carry the E-RNG-001 prefix to match the §13 catalogue and the
+    // Python golden oracle, which emits:
+    //   E-RNG-001: not a valid integer literal: '<tok>'
+    // Prior to this fix the malformed-literal branch in parse_int dropped
+    // the prefix, producing a bare "not a valid integer literal: '...'"
+    // string with no E-code -- a cross-encoder divergence.
+    for src in [
+        ".dw 0xZZ\n",
+        ".dw 0b22\n",
+        ".dw 12abc\n",
+        "HALT status=12abc\n",
+        "HALT status==0\n", // split_once('=') leaves "=0" as the value
+    ] {
+        let err = assemble(src, "<inline>").expect_err("must fail");
+        let s = format!("{err}");
+        assert!(
+            s.contains("E-RNG-001"),
+            "expected E-RNG-001 for src {src:?}, got: {s}"
+        );
+        assert!(
+            s.contains("not a valid integer literal"),
+            "expected canonical message for src {src:?}, got: {s}"
+        );
+    }
+}
+
 // --- M2: parse_int_raw handles negative hex/bin literals -----------------
 
 #[test]
