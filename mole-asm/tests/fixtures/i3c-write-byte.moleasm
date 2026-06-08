@@ -29,6 +29,20 @@
 ; slot) we branch to a wedge handler that HALTs with status=1.
 ;
 ; -------------------------------------------------------------------------
+; v0.2 spelling
+; -------------------------------------------------------------------------
+;
+; EMIT_BIT/EMIT_QUARTER are now suffixed _IMM (the v0 mnemonics
+; were fused; v0.2 splits IMM-form and REG-form). LOAD_TIMING
+; uses positional reg/divider; per §5.17 the v0.2 timing register
+; map is:
+;
+;   reg=0  i2c tQB_OD       (OD quarter-bit divider for i2c)
+;   reg=2  i3c-OD tQB_OD    (OD quarter-bit divider for i3c-OD)
+;   reg=4  i3c-PP tQB_PP    (PP quarter-bit divider for i3c-PP)
+;   reg=6  hdr-ddr tQB_PP   (PP quarter-bit divider for hdr-ddr)
+;
+; -------------------------------------------------------------------------
 ; Address override
 ; -------------------------------------------------------------------------
 ;
@@ -68,10 +82,10 @@
 ;   0xFF    8         1
 ;
 ; If you change the data byte below, recompute the T-bit and
-; update the `EMIT_BIT tx=...` line at the end of the PP block.
+; update the `EMIT_BIT_IMM tx=...` line at the end of the PP block.
 ;
 ; -------------------------------------------------------------------------
-; Bus mode mapping (per ROADMAP §"Bus mode register")
+; Bus mode mapping (per §9 BUS_MODE register)
 ; -------------------------------------------------------------------------
 ;
 ; In i3c-OD, `tx=dominant` pulls SDA low (NMOS on), `tx=recessive`
@@ -103,68 +117,68 @@
 .equ od_div, 5              ; 1 MHz SCL during OD phase
 .equ pp_div, 1              ; 3 MHz SCL during PP phase
 
-        LOAD_TIMING   i3c_od_freq, od_div
-        LOAD_TIMING   i3c_pp_freq, pp_div
-        SET_BUS_MODE  i3c-OD
-        SET_ROLE      controller
+        LOAD_TIMING       reg=2, divider=od_div
+        LOAD_TIMING       reg=4, divider=pp_div
+        SET_BUS_MODE      i3c-OD
+        SET_ROLE          controller
 
         ;; -- START: SDA fall while SCL high (4 idle + 2 SDA-fall + 2 SCL-down) --
-        EMIT_QUARTER  sda=recessive scl=recessive
-        EMIT_QUARTER  sda=recessive scl=recessive
-        EMIT_QUARTER  sda=recessive scl=recessive
-        EMIT_QUARTER  sda=recessive scl=recessive
-        EMIT_QUARTER  sda=dominant  scl=recessive
-        EMIT_QUARTER  sda=dominant  scl=recessive
-        EMIT_QUARTER  sda=dominant  scl=dominant
-        EMIT_QUARTER  sda=dominant  scl=dominant
+        EMIT_QUARTER_IMM  sda=recessive scl=recessive
+        EMIT_QUARTER_IMM  sda=recessive scl=recessive
+        EMIT_QUARTER_IMM  sda=recessive scl=recessive
+        EMIT_QUARTER_IMM  sda=recessive scl=recessive
+        EMIT_QUARTER_IMM  sda=dominant  scl=recessive
+        EMIT_QUARTER_IMM  sda=dominant  scl=recessive
+        EMIT_QUARTER_IMM  sda=dominant  scl=dominant
+        EMIT_QUARTER_IMM  sda=dominant  scl=dominant
 
         ;; -- addr+W = 0x94 = 1001 0100 (target 0x4A, R/W=0) --
-        EMIT_BIT      tx=recessive       ; bit 7 = 1
-        EMIT_BIT      tx=dominant        ; bit 6 = 0
-        EMIT_BIT      tx=dominant        ; bit 5 = 0
-        EMIT_BIT      tx=recessive       ; bit 4 = 1
-        EMIT_BIT      tx=dominant        ; bit 3 = 0
-        EMIT_BIT      tx=recessive       ; bit 2 = 1
-        EMIT_BIT      tx=dominant        ; bit 1 = 0
-        EMIT_BIT      tx=dominant        ; bit 0 = R/W = 0 (write)
+        EMIT_BIT_IMM      tx=recessive       ; bit 7 = 1
+        EMIT_BIT_IMM      tx=dominant        ; bit 6 = 0
+        EMIT_BIT_IMM      tx=dominant        ; bit 5 = 0
+        EMIT_BIT_IMM      tx=recessive       ; bit 4 = 1
+        EMIT_BIT_IMM      tx=dominant        ; bit 3 = 0
+        EMIT_BIT_IMM      tx=recessive       ; bit 2 = 1
+        EMIT_BIT_IMM      tx=dominant        ; bit 1 = 0
+        EMIT_BIT_IMM      tx=dominant        ; bit 0 = R/W = 0 (write)
 
         ;; -- ACK slot: controller releases SDA, target pulls low --
         ;; OD mode -> tx=hiz releases SDA -> external pull-up + target NMOS
         ;; decide the level. expect=0 mask=1 flags MISMATCH_FLAG if the
         ;; line stays high (= target did not ACK).
-        EMIT_BIT      tx=hiz expect=0 mask=1 capture=1
-        BRANCH_ON     NOT_MISMATCH, 1
-        JMP           wedge_addr_w
+        EMIT_BIT_IMM      tx=hiz expect=0 mask=1 capture=1
+        BRANCH_ON         NOT_MISMATCH, 1
+        JMP               wedge_addr_w
 
         ;; -- switch to push-pull for SDR data + T-bit --
-        SET_BUS_MODE  i3c-PP
+        SET_BUS_MODE      i3c-PP
 
         ;; -- data byte 0xA5 = 1010 0101 (controller-driven PP) --
-        EMIT_BIT      tx=recessive       ; bit 7 = 1
-        EMIT_BIT      tx=dominant        ; bit 6 = 0
-        EMIT_BIT      tx=recessive       ; bit 5 = 1
-        EMIT_BIT      tx=dominant        ; bit 4 = 0
-        EMIT_BIT      tx=dominant        ; bit 3 = 0
-        EMIT_BIT      tx=recessive       ; bit 2 = 1
-        EMIT_BIT      tx=dominant        ; bit 1 = 0
-        EMIT_BIT      tx=recessive       ; bit 0 = 1
+        EMIT_BIT_IMM      tx=recessive       ; bit 7 = 1
+        EMIT_BIT_IMM      tx=dominant        ; bit 6 = 0
+        EMIT_BIT_IMM      tx=recessive       ; bit 5 = 1
+        EMIT_BIT_IMM      tx=dominant        ; bit 4 = 0
+        EMIT_BIT_IMM      tx=dominant        ; bit 3 = 0
+        EMIT_BIT_IMM      tx=recessive       ; bit 2 = 1
+        EMIT_BIT_IMM      tx=dominant        ; bit 1 = 0
+        EMIT_BIT_IMM      tx=recessive       ; bit 0 = 1
 
         ;; -- T-bit: odd parity of 0xA5 (popcount=4 even) -> T=1 (recessive) --
-        EMIT_BIT      tx=recessive
+        EMIT_BIT_IMM      tx=recessive
 
         ;; -- switch back to OD for STOP --
-        SET_BUS_MODE  i3c-OD
+        SET_BUS_MODE      i3c-OD
 
         ;; -- STOP: SDA rise while SCL high --
-        EMIT_QUARTER  sda=dominant  scl=dominant
-        EMIT_QUARTER  sda=dominant  scl=dominant
-        EMIT_QUARTER  sda=dominant  scl=recessive
-        EMIT_QUARTER  sda=dominant  scl=recessive
-        EMIT_QUARTER  sda=recessive scl=recessive
-        EMIT_QUARTER  sda=recessive scl=recessive
+        EMIT_QUARTER_IMM  sda=dominant  scl=dominant
+        EMIT_QUARTER_IMM  sda=dominant  scl=dominant
+        EMIT_QUARTER_IMM  sda=dominant  scl=recessive
+        EMIT_QUARTER_IMM  sda=dominant  scl=recessive
+        EMIT_QUARTER_IMM  sda=recessive scl=recessive
+        EMIT_QUARTER_IMM  sda=recessive scl=recessive
 
-        MARK          label=0
-        HALT          status=0
+        MARK              label=0
+        HALT              status=0
 
 ; -------------------------------------------------------------------------
 ; Wedge handler: reached when the slave NAKs the address byte.
@@ -183,5 +197,5 @@
 ; -------------------------------------------------------------------------
 
 wedge_addr_w:
-        MARK          label=1
-        HALT          status=1
+        MARK              label=1
+        HALT              status=1

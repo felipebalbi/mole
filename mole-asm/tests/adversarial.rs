@@ -17,7 +17,7 @@
 //! 13. Hostile input: UTF-8 BOM, CRLF, long comment, many commas, NUL.
 //! 14. Determinism.
 
-use mole_asm::{AsmError, Kind, assemble};
+use mole_asm::{AsmError, Kind, Result, assemble};
 
 fn syntax_kind(err: &AsmError) -> Option<Kind> {
     match err {
@@ -345,6 +345,130 @@ fn raw_pragma_suppresses_wire_002() {
                EMIT_QUARTER_IMM sda=dom scl=recessive\n\
                HALT\n";
     assert!(assemble(src, "<t>").is_ok());
+}
+
+// ---------------------------------------------------------------------------
+// 4b. Comprehensive E-WIRE-002 sweep (companion to fixtures/duty-cycle-warp).
+//
+// The duty-cycle-warp.moleasm fixture deliberately omits the 6 illegal
+// (sda, scl=recessive) rows under target role × PP-class BUS_MODE. The
+// tests below assert that those 6 rows are rejected at assembly time
+// with E-WIRE-002, and that the controller-role version of the same 6
+// rows assembles cleanly --- proving it's the role gate doing the work,
+// not a bus-mode-only gate.
+//
+// Per spec §3.13 + §5.3 + AGENTS §3.13 the illegal subset is:
+//
+//     (target, i3c-PP,  scl=recessive) × sda ∈ {dominant, recessive, hiz}
+//     (target, hdr-ddr, scl=recessive) × sda ∈ {dominant, recessive, hiz}
+//
+// = 6 illegal rows. The legal-companion controller-role version (same
+// 6 rows but with controller instead of target) must assemble cleanly.
+// ---------------------------------------------------------------------------
+
+/// Build the smallest moleasm program that hits one (role, bus_mode,
+/// sda, scl) row of EMIT_QUARTER_IMM. Used by the matrix tests
+/// below; keeps each per-row test body to a single call.
+fn assemble_one_emit_quarter(role: &str, bus_mode: &str, sda: &str, scl: &str) -> Result<Vec<u32>> {
+    let src = format!(
+        "SET_ROLE {role}\n\
+         SET_BUS_MODE {bus_mode}\n\
+         EMIT_QUARTER_IMM sda={sda} scl={scl}\n\
+         HALT\n"
+    );
+    assemble(&src, "<duty-cycle-warp-sweep>")
+}
+
+/// Assert E-WIRE-002 fires on a single (target, PP-mode, sda,
+/// scl=recessive) row. Helper keeps the per-row body to one line.
+fn assert_wire_002(bus_mode: &str, sda: &str) {
+    let err = assemble_one_emit_quarter("target", bus_mode, sda, "recessive").expect_err(&format!(
+        "expected E-WIRE-002 for (target, {bus_mode}, sda={sda}, scl=recessive)"
+    ));
+    assert_eq!(syntax_kind(&err), Some(Kind::Operand));
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("E-WIRE-002"),
+        "diagnostic for (target, {bus_mode}, sda={sda}, scl=recessive) \
+         must cite E-WIRE-002, got: {msg}"
+    );
+}
+
+// Six per-row tests so a single bad row surfaces as one named failure
+// rather than a vague "the sweep failed somewhere" --- mirrors the
+// per-fixture test pattern in golden.rs.
+
+#[test]
+fn wire_002_target_i3c_pp_sda_dominant_scl_recessive_rejected() {
+    assert_wire_002("i3c-PP", "dominant");
+}
+
+#[test]
+fn wire_002_target_i3c_pp_sda_recessive_scl_recessive_rejected() {
+    assert_wire_002("i3c-PP", "recessive");
+}
+
+#[test]
+fn wire_002_target_i3c_pp_sda_hiz_scl_recessive_rejected() {
+    assert_wire_002("i3c-PP", "hiz");
+}
+
+#[test]
+fn wire_002_target_hdr_ddr_sda_dominant_scl_recessive_rejected() {
+    assert_wire_002("hdr-ddr", "dominant");
+}
+
+#[test]
+fn wire_002_target_hdr_ddr_sda_recessive_scl_recessive_rejected() {
+    assert_wire_002("hdr-ddr", "recessive");
+}
+
+#[test]
+fn wire_002_target_hdr_ddr_sda_hiz_scl_recessive_rejected() {
+    assert_wire_002("hdr-ddr", "hiz");
+}
+
+// Companion legality matrix: same 6 rows but with controller role
+// must assemble cleanly. Proves §3.13 fires on `role == target`
+// specifically, not on the (bus_mode, scl) pair alone.
+
+#[test]
+fn wire_002_controller_pp_sweep_all_legal() {
+    for bus_mode in ["i3c-PP", "hdr-ddr"] {
+        for sda in ["dominant", "recessive", "hiz"] {
+            assemble_one_emit_quarter("controller", bus_mode, sda, "recessive").unwrap_or_else(
+                |e| {
+                    panic!(
+                        "controller role under {bus_mode} with sda={sda}, \
+                         scl=recessive must be legal, got: {e}"
+                    )
+                },
+            );
+        }
+    }
+}
+
+// Also lock the legal-target rows that ARE in the duty-cycle-warp
+// fixture: target × PP-class × scl ∈ {dominant, hiz} (the 6 rows
+// per PP mode that survive the §3.13 filter). If a future change
+// over-tightens the gate to also reject these, the fixture's golden
+// would mask it (it would just fail to assemble), so this assertion
+// catches the over-rejection independently.
+
+#[test]
+fn wire_002_target_pp_scl_dominant_and_hiz_all_legal() {
+    for bus_mode in ["i3c-PP", "hdr-ddr"] {
+        for sda in ["dominant", "recessive", "hiz"] {
+            for scl in ["dominant", "hiz"] {
+                assemble_one_emit_quarter("target", bus_mode, sda, scl).unwrap_or_else(|e| {
+                    panic!(
+                        "target role under {bus_mode} with sda={sda}, scl={scl} \
+                         must be legal (only scl=recessive triggers E-WIRE-002), got: {e}"
+                    )
+                });
+            }
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------

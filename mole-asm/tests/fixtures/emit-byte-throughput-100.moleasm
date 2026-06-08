@@ -1,0 +1,172 @@
+; emit-byte-throughput-100 --- raw 100-EMIT_BYTE bytecode-size probe.
+;
+; Per §5.5 each EMIT_BYTE is a single 32-bit instruction whose E stage
+; iterates 9 SCL pulses (8 data bits from R7[7:0] MSB-first, then one
+; ACK-slot pulse). The point of this probe is NOT runtime throughput
+; (that's a hardware-sim question); it's to lock the BYTECODE size
+; arithmetic for a 100-byte burst so any framing-overhead drift gets
+; caught immediately.
+;
+; This is a controller-side fire-and-forget burst: every EMIT_BYTE
+; uses mask=0 (default), exempting it from the §5.5 ACK-pairing rule
+; (E-WIRE-003). Per §5.5: "EMIT_BYTE with mask=0 (fire-and-forget
+; transmit, typical of probe traffic where ACK is intentionally
+; ignored) is exempt from this requirement; no follow-up is required."
+;
+; Useful as a tripwire because the bytecode size is a closed-form
+; function of the program shape and the §10 framing constants:
+;
+; -------------------------------------------------------------------------
+; Expected byte counts (computed from §5.5 + §10)
+; -------------------------------------------------------------------------
+;
+; Body words:
+;     LOAD_TIMING    1   (§5.17)
+;     SET_BUS_MODE   1   (§5.13)
+;     EMIT_BYTE   x100   (§5.5; each is one 32-bit instruction)
+;     HALT           1   (§5.10)
+;     ------------------
+;     total        103
+;
+; .molecode (raw SPRAM image: preamble + body, packed LE, no UART
+; envelope; §10 "Program body" + §10 "Preamble (2 words = 8 bytes)"):
+;
+;     bytes = 2 preamble words × 4 + 103 body words × 4
+;           =                   8 + 412
+;           =                 420
+;
+; .mole.bin (UART frame; build_frame() in mole-asm/src/frame.rs:
+; 2-byte LE length prefix + total_words × 4 bytes + 2-byte
+; CRC-16/XMODEM trailer; total_words = preamble + body = 2 + 103 = 105):
+;
+;     bytes = 2 length + 105 total_words × 4 + 2 CRC
+;           = 2        + 420                 + 2
+;           = 424
+;
+; If a future change to §10 framing (e.g. adding a 4-byte session ID
+; or a different CRC width) shifts either of these values by even one
+; byte, the per-fixture byte-equality assertion in
+; mole-asm/tests/golden.rs fires immediately. The two arithmetic
+; equations above are the things to update in lock-step with the
+; spec change.
+;
+; -------------------------------------------------------------------------
+; Why 100 (not 99 or 128)?
+; -------------------------------------------------------------------------
+;
+; Round number, easy to eyeball in a hex dump, and small enough to
+; stay well inside MAX_PROGRAM_WORDS = 8192. Not a magic number;
+; "many sequential EMIT_BYTE words at the canonical mask=0 default,
+; with no ACK-pairing follow-ups" is the actual property being
+; locked.
+
+        LOAD_TIMING       reg=0, divider=59
+        SET_BUS_MODE      i2c
+
+        ; 100x EMIT_BYTE (mask=0 default → fire-and-forget, exempt
+        ; from §5.5 ACK-pairing rule). R7[7:0] is whatever it was
+        ; at engine reset (per §8 register file the post-reset value
+        ; is implementation-defined; this probe never sets R7 so the
+        ; wire bits emitted are sim-only and not asserted here).
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+        EMIT_BYTE
+
+        HALT              status=0

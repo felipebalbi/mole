@@ -1,12 +1,12 @@
 ; loop-counter-demo.moleasm
 ;
-; Two-LCR worked example covering both bounded-loop idioms.
+; Two-register worked example covering both bounded-loop idioms.
 ;
-;   Part 1: send 8 dominant bits via an outer LOAD_LOOP / DEC_BRANCH
-;           pair on lcr0. Models a write-one-byte that pulls SDA low
-;           for each bit's data-valid window.
+;   Part 1: send 8 dominant bits via a LOAD_LOOP / DEC / BRANCH_ON
+;           triple on R6. Models a write-one-byte that pulls SDA
+;           low for each bit's data-valid window.
 ;
-;   Part 2: nested loop --- outer lcr1 = 3 (rows), inner lcr0 = 4
+;   Part 2: nested loop --- outer R5 = 3 (rows), inner R6 = 4
 ;           (columns), MARK each (row, col) so the result ring has a
 ;           clear timeline. 12 marker records, then HALT.
 ;
@@ -15,43 +15,40 @@
 ; For a real I2C write-one-byte using the same loop structure, see
 ; the moleasm book chapter on bounded loops.
 ;
-; Hand-encoded golden words (audited against the encoder):
+; -------------------------------------------------------------------------
+; v0.2 spelling
+; -------------------------------------------------------------------------
 ;
-;   pc  word    insn
-;   --  ----    ----
-;    0  0x4024  LOAD_TIMING i2c_freq, 36       ; ~166 kHz @ 24 MHz Verde
-;    1  0x3800  SET_BUS_MODE i2c
-;    2  0x4808  MARK 1                         ; "byte begins"
-;    3  0x6008  LOAD_LOOP lcr0, 8              ; count down 8 data bits
-;    4  0x0800  EMIT_BIT  tx=dominant          ; SDA low for one bit
-;    5  0x68FE  DEC_BRANCH lcr0, bit_loop      ; offset -2 -> pc=4
-;    6  0x4810  MARK 2                         ; "byte ends"
-;    7  0x6403  LOAD_LOOP lcr1, 3              ; outer rows = 3
-;    8  0x4818  MARK 3                         ; "row begin"
-;    9  0x6004  LOAD_LOOP lcr0, 4              ; inner cols = 4
-;   10  0x4820  MARK 4                         ; "(row, col)"
-;   11  0x68FE  DEC_BRANCH lcr0, col_loop      ; pc=10, 4 iters of col
-;   12  0x4828  MARK 5                         ; "row end"
-;   13  0x6CFA  DEC_BRANCH lcr1, row_loop      ; offset -6 -> pc=8, 3 rows
-;   14  0x0000  HALT 0
+; v0.2 split the v0 fused `DEC_BRANCH lcrN, label` into the
+; hazard-free pair `DEC Rx` + `BRANCH_ON {REG_ZERO|NOT_REG_ZERO},
+; label` (§5.19 / §14). The `LOAD_LOOP n` sugar still exists but
+; only targets R6 (§5.18). For nested loops the outer counter has
+; no sugar --- use raw `LOAD_IMM R5, n` instead, by convention.
+;
+; EMIT_BIT/EMIT_QUARTER are now suffixed _IMM in v0.2; LOAD_TIMING
+; takes positional reg/divider (reg=0 = i2c quarter-bit divider per
+; §5.17).
 
-                LOAD_TIMING   i2c_freq, 36
+                LOAD_TIMING   reg=0, divider=36   ; ~166 kHz @ 24 MHz Verde
                 SET_BUS_MODE  i2c
 
-                ; -- Part 1: send 8 dominant bits via single LCR --
+                ; -- Part 1: send 8 dominant bits via R6 --
                 MARK          label=1
-                LOAD_LOOP     lcr0, 8
-bit_loop:       EMIT_BIT      tx=dominant
-                DEC_BRANCH    lcr0, bit_loop
+                LOAD_LOOP     8
+bit_loop:       EMIT_BIT_IMM  tx=dominant
+                DEC           R6
+                BRANCH_ON     NOT_REG_ZERO, bit_loop
                 MARK          label=2
 
-                ; -- Part 2: nested loop, lcr1 outer / lcr0 inner --
-                LOAD_LOOP     lcr1, 3
+                ; -- Part 2: nested loop, R5 outer / R6 inner --
+                LOAD_IMM      R5, 3
 row_loop:       MARK          label=3
-                LOAD_LOOP     lcr0, 4
+                LOAD_LOOP     4
 col_loop:       MARK          label=4
-                DEC_BRANCH    lcr0, col_loop
+                DEC           R6
+                BRANCH_ON     NOT_REG_ZERO, col_loop
                 MARK          label=5
-                DEC_BRANCH    lcr1, row_loop
+                DEC           R5
+                BRANCH_ON     NOT_REG_ZERO, row_loop
 
                 HALT          status=0

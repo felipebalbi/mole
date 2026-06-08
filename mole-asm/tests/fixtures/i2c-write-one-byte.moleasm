@@ -6,55 +6,59 @@
 ; is wrong or the doc is stale.
 ;
 ; The ROADMAP example uses `label=ok` / `label=nak` on MARK lines as
-; symbolic names; the v0 MARK opcode takes an 8-bit numeric label and
-; the assembler does not auto-allocate IDs, so we use explicit 1 and
-; 2 with comments. The encoded MARK words (0x9010, 0x9020) are the
-; verifiable artifact.
+; symbolic names; the v0.2 MARK opcode takes a 14-bit numeric label
+; and the assembler does not auto-allocate IDs, so we use explicit 1
+; and 2 with comments. The encoded MARK words are the verifiable
+; artifact.
+;
+; v0.2 spelling: EMIT_BIT/EMIT_QUARTER are now suffixed _IMM (vs the
+; v0 split that fused IMM/REG into one mnemonic); LOAD_TIMING uses
+; positional reg/divider (reg=0 = i2c quarter-bit divider per §5.17).
 
-        LOAD_TIMING   i2c_freq, 60          ; ~100 kHz @ 24 MHz Verde fabric
-        SET_BUS_MODE  i2c                   ; SCL+SDA both OD-release on high half
+        LOAD_TIMING       reg=0, divider=60     ; ~100 kHz @ 24 MHz Verde fabric
+        SET_BUS_MODE      i2c                   ; SCL+SDA both OD-release on high half
 
         ; -- Start condition: SDA falling while SCL high --
-        EMIT_QUARTER  sda=recessive scl=recessive   ; Q0: idle bus
-        EMIT_QUARTER  sda=dominant  scl=recessive   ; Q1: SDA pulled low
-        EMIT_QUARTER  sda=dominant  scl=dominant    ; Q2: SCL goes low
+        EMIT_QUARTER_IMM  sda=recessive scl=recessive   ; Q0: idle bus
+        EMIT_QUARTER_IMM  sda=dominant  scl=recessive   ; Q1: SDA pulled low
+        EMIT_QUARTER_IMM  sda=dominant  scl=dominant    ; Q2: SCL goes low
 
         ; -- Address byte 0xA0 = 1010_0000 (MSB first) + R/W=0 --
-        EMIT_BIT      tx=recessive          ; bit 7 = 1
-        EMIT_BIT      tx=dominant           ; bit 6 = 0
-        EMIT_BIT      tx=recessive          ; bit 5 = 1
-        EMIT_BIT      tx=dominant           ; bit 4 = 0
-        EMIT_BIT      tx=dominant           ; bit 3 = 0
-        EMIT_BIT      tx=dominant           ; bit 2 = 0
-        EMIT_BIT      tx=dominant           ; bit 1 = 0
-        EMIT_BIT      tx=dominant           ; bit 0 = R/W = 0 (write)
+        EMIT_BIT_IMM      tx=recessive          ; bit 7 = 1
+        EMIT_BIT_IMM      tx=dominant           ; bit 6 = 0
+        EMIT_BIT_IMM      tx=recessive          ; bit 5 = 1
+        EMIT_BIT_IMM      tx=dominant           ; bit 4 = 0
+        EMIT_BIT_IMM      tx=dominant           ; bit 3 = 0
+        EMIT_BIT_IMM      tx=dominant           ; bit 2 = 0
+        EMIT_BIT_IMM      tx=dominant           ; bit 1 = 0
+        EMIT_BIT_IMM      tx=dominant           ; bit 0 = R/W = 0 (write)
 
         ; -- ACK slot: release SDA, expect target to pull low --
-        EMIT_BIT      tx=hiz expect=0 mask=1 capture=1
-        BRANCH_ON     MISMATCH, nak         ; PC-relative, ±64 insn
+        EMIT_BIT_IMM      tx=hiz expect=0 mask=1 capture=1
+        BRANCH_ON         MISMATCH, nak         ; PC-relative, signed 10-bit
 
         ; -- Data byte 0xAB = 1010_1011 --
-        EMIT_BIT      tx=recessive          ; bit 7 = 1
-        EMIT_BIT      tx=dominant           ; bit 6 = 0
-        EMIT_BIT      tx=recessive          ; bit 5 = 1
-        EMIT_BIT      tx=dominant           ; bit 4 = 0
-        EMIT_BIT      tx=recessive          ; bit 3 = 1
-        EMIT_BIT      tx=dominant           ; bit 2 = 0
-        EMIT_BIT      tx=recessive          ; bit 1 = 1
-        EMIT_BIT      tx=recessive          ; bit 0 = 1
+        EMIT_BIT_IMM      tx=recessive          ; bit 7 = 1
+        EMIT_BIT_IMM      tx=dominant           ; bit 6 = 0
+        EMIT_BIT_IMM      tx=recessive          ; bit 5 = 1
+        EMIT_BIT_IMM      tx=dominant           ; bit 4 = 0
+        EMIT_BIT_IMM      tx=recessive          ; bit 3 = 1
+        EMIT_BIT_IMM      tx=dominant           ; bit 2 = 0
+        EMIT_BIT_IMM      tx=recessive          ; bit 1 = 1
+        EMIT_BIT_IMM      tx=recessive          ; bit 0 = 1
 
         ; -- ACK slot --
-        EMIT_BIT      tx=hiz expect=0 mask=1 capture=1
-        BRANCH_ON     MISMATCH, nak
+        EMIT_BIT_IMM      tx=hiz expect=0 mask=1 capture=1
+        BRANCH_ON         MISMATCH, nak
 
         ; -- Stop condition: SDA rising while SCL high --
-        EMIT_QUARTER  sda=dominant  scl=dominant    ; Q0: both low
-        EMIT_QUARTER  sda=dominant  scl=recessive   ; Q1: SCL goes high
-        EMIT_QUARTER  sda=recessive scl=recessive   ; Q2: SDA goes high
+        EMIT_QUARTER_IMM  sda=dominant  scl=dominant    ; Q0: both low
+        EMIT_QUARTER_IMM  sda=dominant  scl=recessive   ; Q1: SCL goes high
+        EMIT_QUARTER_IMM  sda=recessive scl=recessive   ; Q2: SDA goes high
 
-        MARK          label=1               ; ok
-        HALT          status=0
+        MARK              label=1               ; ok
+        HALT              status=0
 
 nak:
-        MARK          label=2               ; nak
-        HALT          status=1
+        MARK              label=2               ; nak
+        HALT              status=1

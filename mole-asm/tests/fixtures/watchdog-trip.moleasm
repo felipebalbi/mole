@@ -1,0 +1,125 @@
+; watchdog-trip --- WAIT_ON timeout path + TIMEOUT_FLAG sticky probe.
+;
+; -------------------------------------------------------------------------
+; What this probe locks
+; -------------------------------------------------------------------------
+;
+; Exercises the §5.12 WAIT_ON timeout path and the §7 TIMEOUT_FLAG
+; sticky behaviour, plus the §6 cond-code 8 (`TIMEOUT`) BRANCH_ON
+; dispatch.
+;
+; Three scenarios in order:
+;
+;   1. WAIT_ON SDA_LOW, 4
+;      In controller role under i2c with no external bus, SDA is held
+;      high by the pull-up. SDA_LOW (cond 5) will never become true,
+;      so the 4-quarter timeout expires and TIMEOUT_FLAG is set.
+;      BRANCH_ON TIMEOUT to a wedge that HALTs status=8.
+;
+;   2. WAIT_ON START_SEEN, 4
+;      Same idea: no external controller ever drives a START, so the
+;      4-quarter timeout expires. Demonstrates a different cond
+;      (cond 3) hitting the same timeout path.
+;
+;   3. WAIT_ON ALWAYS, 4
+;      Sanity case: ALWAYS (cond 0) is true immediately, so the
+;      timeout cannot fire. TIMEOUT_FLAG must remain clear (per §7
+;      sticky-flag semantics, BRANCH_ON TIMEOUT is taken iff the
+;      flag was most-recently set by a WAIT_ON that timed out).
+;      BRANCH_ON TIMEOUT after this WAIT_ON must NOT branch ---
+;      so we put a wedge after the BRANCH_ON to catch the bug
+;      where ALWAYS spuriously sets TIMEOUT_FLAG.
+;
+; -------------------------------------------------------------------------
+; HALT status convention
+; -------------------------------------------------------------------------
+;
+; Per §11 the 5-bit status field is fully user-defined in the
+; 0x00..0x1C range. There is no spec-mandated "TIMEOUT" status value;
+; this probe uses status=8 as a self-imposed convention so the host
+; result-ring decoder can identify the wedge by inspection. If a
+; future spec revision allocates a reserved status for engine-side
+; timeout traps, the §11 STATUS_RESERVED_LOW / STATUS_RESERVED_HIGH
+; constants gain meaning and this fixture's status convention may
+; want to migrate; until then status=8 is just "this probe's
+; timeout-wedge marker".
+;
+;   status=0  clean exit (all 3 WAIT_ON scenarios behaved as expected)
+;   status=8  WAIT_ON timed out and BRANCH_ON TIMEOUT fired (scenario
+;             1 or 2 - distinguished by MARK label)
+;   status=9  scenario 3 spuriously set TIMEOUT_FLAG (a bug)
+;
+; -------------------------------------------------------------------------
+; v0.2 spelling
+; -------------------------------------------------------------------------
+;
+; WAIT_ON takes (cond, timeout); timeout is unsigned 10-bit
+; quarter-bit-clock count (§5.12, 0..1023; 0 = infinite wait).
+; Reserved cond codes 12..15 → E-CTRL-001.
+
+        LOAD_TIMING       reg=0, divider=59
+        SET_BUS_MODE      i2c
+        SET_ROLE          controller
+
+        ; ===================================================================
+        ; Scenario 1: WAIT_ON SDA_LOW with finite timeout
+        ; ===================================================================
+
+        MARK              label=0x51
+        WAIT_ON           SDA_LOW, 4
+        BRANCH_ON         TIMEOUT, wedge_sda_low
+
+        ; If we reach here, SDA went low before timeout (unexpected in
+        ; this probe's runtime environment).
+        MARK              label=0xE1
+        HALT              status=1
+
+wedge_sda_low:
+        MARK              label=0xF1
+        ; Don't HALT yet; continue into scenario 2 so a single
+        ; mole-loader run exercises all three scenarios.
+
+        ; ===================================================================
+        ; Scenario 2: WAIT_ON START_SEEN with finite timeout
+        ; ===================================================================
+
+        MARK              label=0x52
+        WAIT_ON           START_SEEN, 4
+        BRANCH_ON         TIMEOUT, wedge_start
+
+        MARK              label=0xE2
+        HALT              status=2
+
+wedge_start:
+        MARK              label=0xF2
+
+        ; ===================================================================
+        ; Scenario 3: WAIT_ON ALWAYS, 4 --- must NOT timeout
+        ; ===================================================================
+
+        MARK              label=0x53
+        WAIT_ON           ALWAYS, 4
+        BRANCH_ON         TIMEOUT, spurious_timeout
+
+        ; Expected path: ALWAYS is true immediately, TIMEOUT_FLAG was
+        ; cleared by the WAIT_ON, BRANCH_ON TIMEOUT falls through.
+        MARK              label=0xCC
+        HALT              status=0
+
+spurious_timeout:
+        ; If this is reached, the engine set TIMEOUT_FLAG on a WAIT_ON
+        ; that should have completed immediately --- a real bug.
+        MARK              label=0xBB
+        HALT              status=9
+
+        ; ===================================================================
+        ; Scenarios 1 & 2 wedge exit
+        ; ===================================================================
+        ;
+        ; This HALT is reached only if scenario 3 short-circuits into
+        ; the spurious-timeout path AND we want to surface scenarios
+        ; 1+2 having timed out correctly. Provided here as the last
+        ; instruction so the program has a well-defined fallthrough
+        ; HALT regardless of which wedges fired.
+
+        HALT              status=8

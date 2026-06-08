@@ -1,0 +1,206 @@
+; duty-cycle-warp --- legal (sda, scl) symbol sweep for every
+; (bus_mode, role) combination the v0.2 assembler accepts.
+;
+; -------------------------------------------------------------------------
+; What this probe locks
+; -------------------------------------------------------------------------
+;
+; For each of the 4 bus modes (i2c, i3c-OD, i3c-PP, hdr-ddr) the
+; engine drives two roles (controller, target). For each (mode, role)
+; we exercise every legal (sda, scl) symbol pair from the §3
+; tx_symbol vocabulary { dominant, recessive, hiz } --- 3 × 3 = 9
+; combinations.
+;
+; The byte-for-byte golden under mole-asm/tests/golden.rs catches any
+; encoder change that perturbs the EMIT_QUARTER_IMM encoding or the
+; SET_BUS_MODE / SET_ROLE / LOAD_TIMING encoding across this matrix.
+; The 6 ILLEGAL rows (target + PP-class + scl=recessive) are NOT in
+; this fixture --- they live in mole-asm/tests/adversarial.rs (see
+; the `duty_cycle_warp_*_target_pp_scl_recessive_rejected` tests)
+; where E-WIRE-002 is asserted to fire on exactly that subset.
+;
+; -------------------------------------------------------------------------
+; Omitted rows (cite §3.13 / E-WIRE-002)
+; -------------------------------------------------------------------------
+;
+; Per spec §3.13 + §5.3 + AGENTS §3.13, target role NEVER PP-drives
+; SCL. The assembler enforces this by rejecting EMIT_QUARTER_IMM
+; with scl=recessive when active BUS_MODE is a PP class (i3c-PP or
+; hdr-ddr) and active role is target. The 6 omitted rows are:
+;
+;     bus_mode    role     sda          scl          why omitted
+;     ---------   -------  -----------  -----------  -----------------
+;     i3c-PP      target   dominant     recessive    E-WIRE-002
+;     i3c-PP      target   recessive    recessive    E-WIRE-002
+;     i3c-PP      target   hiz          recessive    E-WIRE-002
+;     hdr-ddr     target   dominant     recessive    E-WIRE-002
+;     hdr-ddr     target   recessive    recessive    E-WIRE-002
+;     hdr-ddr     target   hiz          recessive    E-WIRE-002
+;
+; The companion adversarial.rs tests verify:
+;   (a) each of those 6 rows is rejected with E-WIRE-002 by the
+;       assembler (defense-in-depth: the engine ignores them too);
+;   (b) the controller-role version of the same row assembles
+;       cleanly --- proving it's the role gate doing the work, not
+;       a bus-mode-only gate.
+;
+; The 4th tx_symbol encoding (0b11 = reserved) is also omitted
+; everywhere: that's E-WIRE-001 territory and orthogonal to this
+; probe's scope. See mole-asm/tests/adversarial.rs for E-WIRE-001
+; coverage of `sda=raw_3` / `scl=raw_3` requiring the
+; (use-raw-primitives) pragma.
+;
+; -------------------------------------------------------------------------
+; Symbol vocabulary recap (§3 tx_symbol)
+; -------------------------------------------------------------------------
+;
+;     dominant   = 0b00   bus held low (NMOS on, or active 0)
+;     recessive  = 0b01   bus high (released → pull-up, or active 1)
+;     hiz        = 0b10   driver off (no contention)
+;     (0b11)     = reserved; raw/ pragma only (§3.11)
+;
+; -------------------------------------------------------------------------
+; Layout
+; -------------------------------------------------------------------------
+;
+; Each (bus_mode, role) block is bracketed by a MARK whose label
+; encodes (mode_idx << 4 | role_idx):
+;
+;     mode_idx: i2c=0, i3c-OD=1, i3c-PP=2, hdr-ddr=3
+;     role_idx: controller=0, target=1
+;
+; So MARK 0x00 = (i2c, controller); 0x21 = (i3c-PP, target); etc.
+; This lets a result-ring decode trivially identify which block was
+; running when something diverges.
+;
+; -------------------------------------------------------------------------
+; Timing-register notes (§5.17)
+; -------------------------------------------------------------------------
+;
+; LOAD_TIMING reg= picks the divider register for the active BUS_MODE
+; CLASS, not for each individual mode. The OD divider (reg=0) covers
+; i2c; reg=2 covers i3c-OD; reg=4 covers i3c-PP; reg=6 covers
+; hdr-ddr. Divider values are arbitrary here (not asserted on the
+; wire); they just need to be in-range so LOAD_TIMING accepts.
+
+        ; ===================================================================
+        ; bus_mode = i2c (mode_idx = 0)
+        ; ===================================================================
+
+        LOAD_TIMING       reg=0, divider=59
+        SET_BUS_MODE      i2c
+
+        SET_ROLE          controller
+        MARK              label=0x00
+        EMIT_QUARTER_IMM  sda=dominant  scl=dominant
+        EMIT_QUARTER_IMM  sda=dominant  scl=recessive
+        EMIT_QUARTER_IMM  sda=dominant  scl=hiz
+        EMIT_QUARTER_IMM  sda=recessive scl=dominant
+        EMIT_QUARTER_IMM  sda=recessive scl=recessive
+        EMIT_QUARTER_IMM  sda=recessive scl=hiz
+        EMIT_QUARTER_IMM  sda=hiz       scl=dominant
+        EMIT_QUARTER_IMM  sda=hiz       scl=recessive
+        EMIT_QUARTER_IMM  sda=hiz       scl=hiz
+
+        SET_ROLE          target
+        MARK              label=0x01
+        EMIT_QUARTER_IMM  sda=dominant  scl=dominant
+        EMIT_QUARTER_IMM  sda=dominant  scl=recessive
+        EMIT_QUARTER_IMM  sda=dominant  scl=hiz
+        EMIT_QUARTER_IMM  sda=recessive scl=dominant
+        EMIT_QUARTER_IMM  sda=recessive scl=recessive
+        EMIT_QUARTER_IMM  sda=recessive scl=hiz
+        EMIT_QUARTER_IMM  sda=hiz       scl=dominant
+        EMIT_QUARTER_IMM  sda=hiz       scl=recessive
+        EMIT_QUARTER_IMM  sda=hiz       scl=hiz
+
+        ; ===================================================================
+        ; bus_mode = i3c-OD (mode_idx = 1)
+        ; ===================================================================
+
+        LOAD_TIMING       reg=2, divider=5
+        SET_BUS_MODE      i3c-OD
+
+        SET_ROLE          controller
+        MARK              label=0x10
+        EMIT_QUARTER_IMM  sda=dominant  scl=dominant
+        EMIT_QUARTER_IMM  sda=dominant  scl=recessive
+        EMIT_QUARTER_IMM  sda=dominant  scl=hiz
+        EMIT_QUARTER_IMM  sda=recessive scl=dominant
+        EMIT_QUARTER_IMM  sda=recessive scl=recessive
+        EMIT_QUARTER_IMM  sda=recessive scl=hiz
+        EMIT_QUARTER_IMM  sda=hiz       scl=dominant
+        EMIT_QUARTER_IMM  sda=hiz       scl=recessive
+        EMIT_QUARTER_IMM  sda=hiz       scl=hiz
+
+        SET_ROLE          target
+        MARK              label=0x11
+        EMIT_QUARTER_IMM  sda=dominant  scl=dominant
+        EMIT_QUARTER_IMM  sda=dominant  scl=recessive
+        EMIT_QUARTER_IMM  sda=dominant  scl=hiz
+        EMIT_QUARTER_IMM  sda=recessive scl=dominant
+        EMIT_QUARTER_IMM  sda=recessive scl=recessive
+        EMIT_QUARTER_IMM  sda=recessive scl=hiz
+        EMIT_QUARTER_IMM  sda=hiz       scl=dominant
+        EMIT_QUARTER_IMM  sda=hiz       scl=recessive
+        EMIT_QUARTER_IMM  sda=hiz       scl=hiz
+
+        ; ===================================================================
+        ; bus_mode = i3c-PP (mode_idx = 2)
+        ; ===================================================================
+
+        LOAD_TIMING       reg=4, divider=1
+        SET_BUS_MODE      i3c-PP
+
+        SET_ROLE          controller
+        MARK              label=0x20
+        EMIT_QUARTER_IMM  sda=dominant  scl=dominant
+        EMIT_QUARTER_IMM  sda=dominant  scl=recessive
+        EMIT_QUARTER_IMM  sda=dominant  scl=hiz
+        EMIT_QUARTER_IMM  sda=recessive scl=dominant
+        EMIT_QUARTER_IMM  sda=recessive scl=recessive
+        EMIT_QUARTER_IMM  sda=recessive scl=hiz
+        EMIT_QUARTER_IMM  sda=hiz       scl=dominant
+        EMIT_QUARTER_IMM  sda=hiz       scl=recessive
+        EMIT_QUARTER_IMM  sda=hiz       scl=hiz
+
+        SET_ROLE          target
+        MARK              label=0x21
+        ; scl=recessive rows omitted per §3.13 / E-WIRE-002
+        EMIT_QUARTER_IMM  sda=dominant  scl=dominant
+        EMIT_QUARTER_IMM  sda=dominant  scl=hiz
+        EMIT_QUARTER_IMM  sda=recessive scl=dominant
+        EMIT_QUARTER_IMM  sda=recessive scl=hiz
+        EMIT_QUARTER_IMM  sda=hiz       scl=dominant
+        EMIT_QUARTER_IMM  sda=hiz       scl=hiz
+
+        ; ===================================================================
+        ; bus_mode = hdr-ddr (mode_idx = 3)
+        ; ===================================================================
+
+        LOAD_TIMING       reg=6, divider=1
+        SET_BUS_MODE      hdr-ddr
+
+        SET_ROLE          controller
+        MARK              label=0x30
+        EMIT_QUARTER_IMM  sda=dominant  scl=dominant
+        EMIT_QUARTER_IMM  sda=dominant  scl=recessive
+        EMIT_QUARTER_IMM  sda=dominant  scl=hiz
+        EMIT_QUARTER_IMM  sda=recessive scl=dominant
+        EMIT_QUARTER_IMM  sda=recessive scl=recessive
+        EMIT_QUARTER_IMM  sda=recessive scl=hiz
+        EMIT_QUARTER_IMM  sda=hiz       scl=dominant
+        EMIT_QUARTER_IMM  sda=hiz       scl=recessive
+        EMIT_QUARTER_IMM  sda=hiz       scl=hiz
+
+        SET_ROLE          target
+        MARK              label=0x31
+        ; scl=recessive rows omitted per §3.13 / E-WIRE-002
+        EMIT_QUARTER_IMM  sda=dominant  scl=dominant
+        EMIT_QUARTER_IMM  sda=dominant  scl=hiz
+        EMIT_QUARTER_IMM  sda=recessive scl=dominant
+        EMIT_QUARTER_IMM  sda=recessive scl=hiz
+        EMIT_QUARTER_IMM  sda=hiz       scl=dominant
+        EMIT_QUARTER_IMM  sda=hiz       scl=hiz
+
+        HALT              status=0

@@ -1,0 +1,78 @@
+; pipeline-hazard-emit-dec --- §14 hazard-table regression probe.
+;
+; The §14 hazard table claims the v0.2 pipeline guarantees that a
+; back-to-back `DEC Rx; BRANCH_ON {REG_ZERO|NOT_REG_ZERO}` pair is
+; forwarding-immune (the BRANCH_ON in D consumes the REG_ZERO_FLAG
+; freshly written by DEC in E, without stalling). LINT-001 only
+; fires when a **DATA** opcode (LOAD_IMM, MOV, ADD_IMM, AND_IMM,
+; OR_IMM, XOR_IMM, SHIFT) sits between the DEC and the BRANCH_ON.
+;
+; This probe is the negative-space test for LINT-001:
+;
+;   * Section A: textbook tight loop. DEC R6 immediately followed
+;     by BRANCH_ON NOT_REG_ZERO. The reference path that MUST stay
+;     warning-free across every encoder revision.
+;
+;   * Section B: WIRE opcodes (EMIT_BIT_IMM) wedged between DEC and
+;     BRANCH_ON. These do NOT write REG_ZERO_FLAG (only DATA opcodes
+;     do per §5.18–§5.25); the assembler MUST NOT raise LINT-001 here.
+;
+;   * Section C: WAIT_ON between DEC and BRANCH_ON. CTRL opcodes
+;     do not touch REG_ZERO_FLAG; this MUST also be silent.
+;
+;   * Section D: MARK between DEC and BRANCH_ON. Result-ring write
+;     only; no flag effect; MUST be silent.
+;
+; If a future change reclassifies any of these into the "ALU op"
+; bucket and starts emitting LINT-001, this fixture's golden byte
+; stream will not change (the lint goes to stderr, not the
+; bytecode) --- catching that regression is the job of the
+; companion test `lint_001_silent_on_wire_ctrl_mark_intermediaries`
+; in adversarial.rs, which asserts stderr is empty.
+;
+; -------------------------------------------------------------------------
+; v0.2 spelling
+; -------------------------------------------------------------------------
+;
+; EMIT_BIT/EMIT_QUARTER → _IMM suffix; LOAD_TIMING uses positional
+; reg/divider (reg=0 = i2c quarter-bit divider per §5.17); LOAD_LOOP
+; n is sugar for LOAD_IMM R6, n (§5.18); DEC + BRANCH_ON pair replaces
+; the retired v0 fused DEC_BRANCH (§14, §15.2 transition notes).
+;
+; Wire is i2c just to give EMIT_BIT_IMM a meaningful bus mode; the
+; transaction is not a real I2C frame --- no START, no ACKs, just a
+; sequence of bit drives. This is a probe of the lint behaviour and
+; pipeline forwarding, not of any I2C semantics.
+
+        LOAD_TIMING       reg=0, divider=59
+        SET_BUS_MODE      i2c
+
+        ; -- Section A: textbook tight loop (must not warn) --
+        LOAD_LOOP         3
+sec_a:  EMIT_BIT_IMM      tx=dominant
+        DEC               R6
+        BRANCH_ON         NOT_REG_ZERO, sec_a
+        MARK              label=0xA
+
+        ; -- Section B: WIRE intermediary (must not warn) --
+        LOAD_LOOP         3
+sec_b:  DEC               R6
+        EMIT_BIT_IMM      tx=recessive             ; WIRE; no flag effect
+        BRANCH_ON         NOT_REG_ZERO, sec_b
+        MARK              label=0xB
+
+        ; -- Section C: CTRL intermediary (must not warn) --
+        LOAD_LOOP         3
+sec_c:  DEC               R6
+        WAIT_ON           SDA_HIGH, 4              ; CTRL; no flag effect on REG_ZERO
+        BRANCH_ON         NOT_REG_ZERO, sec_c
+        MARK              label=0xC
+
+        ; -- Section D: MARK intermediary (must not warn) --
+        LOAD_LOOP         3
+sec_d:  DEC               R6
+        MARK              label=0xDD               ; result-ring only
+        BRANCH_ON         NOT_REG_ZERO, sec_d
+        MARK              label=0xD
+
+        HALT              status=0

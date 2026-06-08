@@ -1,122 +1,126 @@
 ; tmp108 --- read 16-bit temperature register (pointer reg 0x00).
 ;
 ;   START
-;   write 0xA0 (TMP108 7-bit 0x48 << 1, R/W=0); slave ACK
+;   write 0x90 (TMP108 7-bit 0x48 << 1, R/W=0); slave ACK
 ;   write 0x00 (pointer reg, MSB temp); slave ACK
 ;   Repeated START
-;   write 0xA1 (R/W=1); slave ACK
+;   write 0x91 (R/W=1); slave ACK
 ;   read MSB byte (8 capture bits); controller ACK
 ;   read LSB byte (8 capture bits); controller NACK
 ;   STOP
 ;   HALT 0
 ;
 ; Captures land in the engine's result ring; host decodes via the
-; standard tag-bit walker after the 8192-byte drain.
+; standard tag-bit walker after the ring drain.
 ;
 ; NOTE: this program currently uses addr 0x90 (= 0x48 << 1 with R/W=0)
 ; to match the byte-for-byte golden inherited from the hand-encoded
 ; mole_blobs.py output. TMP108 datasheet shows the part at 0x48; on
 ; the iCEbreaker bring-up rig the slave at that address ACKs both
 ; 0x90 (write) and 0x91 (read) byte patterns.
+;
+; v0.2 spelling: EMIT_BIT/EMIT_QUARTER → _IMM suffix; LOAD_TIMING
+; uses positional reg/divider (reg=0 = i2c quarter-bit divider per
+; §5.17).
 
 .equ slow_div, 59           ; 100 kHz target at 24 MHz fabric
 
-        LOAD_TIMING   i2c_freq, slow_div
-        SET_BUS_MODE  i2c
+        LOAD_TIMING       reg=0, divider=slow_div
+        SET_BUS_MODE      i2c
 
         ; -- START: 4 idle + 2 SDA-falls + 2 SCL-down --
-        EMIT_QUARTER  sda=recessive scl=recessive
-        EMIT_QUARTER  sda=recessive scl=recessive
-        EMIT_QUARTER  sda=recessive scl=recessive
-        EMIT_QUARTER  sda=recessive scl=recessive
-        EMIT_QUARTER  sda=dominant  scl=recessive
-        EMIT_QUARTER  sda=dominant  scl=recessive
-        EMIT_QUARTER  sda=dominant  scl=dominant
-        EMIT_QUARTER  sda=dominant  scl=dominant
+        EMIT_QUARTER_IMM  sda=recessive scl=recessive
+        EMIT_QUARTER_IMM  sda=recessive scl=recessive
+        EMIT_QUARTER_IMM  sda=recessive scl=recessive
+        EMIT_QUARTER_IMM  sda=recessive scl=recessive
+        EMIT_QUARTER_IMM  sda=dominant  scl=recessive
+        EMIT_QUARTER_IMM  sda=dominant  scl=recessive
+        EMIT_QUARTER_IMM  sda=dominant  scl=dominant
+        EMIT_QUARTER_IMM  sda=dominant  scl=dominant
 
         ; -- addr_write = 0x90 = 1001_0000 --
-        EMIT_BIT      tx=recessive
-        EMIT_BIT      tx=dominant
-        EMIT_BIT      tx=dominant
-        EMIT_BIT      tx=recessive
-        EMIT_BIT      tx=dominant
-        EMIT_BIT      tx=dominant
-        EMIT_BIT      tx=dominant
-        EMIT_BIT      tx=dominant
+        EMIT_BIT_IMM      tx=recessive
+        EMIT_BIT_IMM      tx=dominant
+        EMIT_BIT_IMM      tx=dominant
+        EMIT_BIT_IMM      tx=recessive
+        EMIT_BIT_IMM      tx=dominant
+        EMIT_BIT_IMM      tx=dominant
+        EMIT_BIT_IMM      tx=dominant
+        EMIT_BIT_IMM      tx=dominant
 
         ; -- slave ACK --
-        EMIT_BIT      tx=recessive expect=0 mask=1 capture=1
+        EMIT_BIT_IMM      tx=recessive expect=0 mask=1 capture=1
 
         ; -- ptr_temp = 0x00 = all zero --
-        EMIT_BIT      tx=dominant
-        EMIT_BIT      tx=dominant
-        EMIT_BIT      tx=dominant
-        EMIT_BIT      tx=dominant
-        EMIT_BIT      tx=dominant
-        EMIT_BIT      tx=dominant
-        EMIT_BIT      tx=dominant
-        EMIT_BIT      tx=dominant
+        EMIT_BIT_IMM      tx=dominant
+        EMIT_BIT_IMM      tx=dominant
+        EMIT_BIT_IMM      tx=dominant
+        EMIT_BIT_IMM      tx=dominant
+        EMIT_BIT_IMM      tx=dominant
+        EMIT_BIT_IMM      tx=dominant
+        EMIT_BIT_IMM      tx=dominant
+        EMIT_BIT_IMM      tx=dominant
 
         ; -- slave ACK --
-        EMIT_BIT      tx=recessive expect=0 mask=1 capture=1
+        EMIT_BIT_IMM      tx=recessive expect=0 mask=1 capture=1
 
         ; -- Repeated START --
-        EMIT_QUARTER  sda=dominant  scl=dominant
-        EMIT_QUARTER  sda=dominant  scl=dominant
-        EMIT_QUARTER  sda=recessive scl=dominant
-        EMIT_QUARTER  sda=recessive scl=dominant
-        EMIT_QUARTER  sda=recessive scl=recessive
-        EMIT_QUARTER  sda=recessive scl=recessive
-        EMIT_QUARTER  sda=dominant  scl=recessive
-        EMIT_QUARTER  sda=dominant  scl=recessive
-        EMIT_QUARTER  sda=dominant  scl=dominant
-        EMIT_QUARTER  sda=dominant  scl=dominant
+        EMIT_QUARTER_IMM  sda=dominant  scl=dominant
+        EMIT_QUARTER_IMM  sda=dominant  scl=dominant
+        EMIT_QUARTER_IMM  sda=recessive scl=dominant
+        EMIT_QUARTER_IMM  sda=recessive scl=dominant
+        EMIT_QUARTER_IMM  sda=recessive scl=recessive
+        EMIT_QUARTER_IMM  sda=recessive scl=recessive
+        EMIT_QUARTER_IMM  sda=dominant  scl=recessive
+        EMIT_QUARTER_IMM  sda=dominant  scl=recessive
+        EMIT_QUARTER_IMM  sda=dominant  scl=dominant
+        EMIT_QUARTER_IMM  sda=dominant  scl=dominant
 
         ; -- addr_read = 0x91 = 1001_0001 --
-        EMIT_BIT      tx=recessive
-        EMIT_BIT      tx=dominant
-        EMIT_BIT      tx=dominant
-        EMIT_BIT      tx=recessive
-        EMIT_BIT      tx=dominant
-        EMIT_BIT      tx=dominant
-        EMIT_BIT      tx=dominant
-        EMIT_BIT      tx=recessive
+        EMIT_BIT_IMM      tx=recessive
+        EMIT_BIT_IMM      tx=dominant
+        EMIT_BIT_IMM      tx=dominant
+        EMIT_BIT_IMM      tx=recessive
+        EMIT_BIT_IMM      tx=dominant
+        EMIT_BIT_IMM      tx=dominant
+        EMIT_BIT_IMM      tx=dominant
+        EMIT_BIT_IMM      tx=recessive
 
         ; -- slave ACK --
-        EMIT_BIT      tx=recessive expect=0 mask=1 capture=1
+        EMIT_BIT_IMM      tx=recessive expect=0 mask=1 capture=1
 
         ; -- read MSB (8 capture bits) --
-        EMIT_BIT      tx=recessive capture=1
-        EMIT_BIT      tx=recessive capture=1
-        EMIT_BIT      tx=recessive capture=1
-        EMIT_BIT      tx=recessive capture=1
-        EMIT_BIT      tx=recessive capture=1
-        EMIT_BIT      tx=recessive capture=1
-        EMIT_BIT      tx=recessive capture=1
-        EMIT_BIT      tx=recessive capture=1
+        EMIT_BIT_IMM      tx=recessive capture=1
+        EMIT_BIT_IMM      tx=recessive capture=1
+        EMIT_BIT_IMM      tx=recessive capture=1
+        EMIT_BIT_IMM      tx=recessive capture=1
+        EMIT_BIT_IMM      tx=recessive capture=1
+        EMIT_BIT_IMM      tx=recessive capture=1
+        EMIT_BIT_IMM      tx=recessive capture=1
+        EMIT_BIT_IMM      tx=recessive capture=1
 
         ; -- controller ACK (drive SDA low) --
-        EMIT_BIT      tx=dominant
+        EMIT_BIT_IMM      tx=dominant
 
         ; -- read LSB (8 capture bits) --
-        EMIT_BIT      tx=recessive capture=1
-        EMIT_BIT      tx=recessive capture=1
-        EMIT_BIT      tx=recessive capture=1
-        EMIT_BIT      tx=recessive capture=1
-        EMIT_BIT      tx=recessive capture=1
-        EMIT_BIT      tx=recessive capture=1
-        EMIT_BIT      tx=recessive capture=1
-        EMIT_BIT      tx=recessive capture=1
+        EMIT_BIT_IMM      tx=recessive capture=1
+        EMIT_BIT_IMM      tx=recessive capture=1
+        EMIT_BIT_IMM      tx=recessive capture=1
+        EMIT_BIT_IMM      tx=recessive capture=1
+        EMIT_BIT_IMM      tx=recessive capture=1
+        EMIT_BIT_IMM      tx=recessive capture=1
+        EMIT_BIT_IMM      tx=recessive capture=1
+        EMIT_BIT_IMM      tx=recessive capture=1
 
         ; -- controller NACK (release SDA) --
-        EMIT_BIT      tx=recessive
+        EMIT_BIT_IMM      tx=recessive
 
         ; -- STOP: SDA rises while SCL high --
-        EMIT_QUARTER  sda=dominant  scl=dominant
-        EMIT_QUARTER  sda=dominant  scl=dominant
-        EMIT_QUARTER  sda=dominant  scl=recessive
-        EMIT_QUARTER  sda=dominant  scl=recessive
-        EMIT_QUARTER  sda=recessive scl=recessive
-        EMIT_QUARTER  sda=recessive scl=recessive
+        EMIT_QUARTER_IMM  sda=dominant  scl=dominant
+        EMIT_QUARTER_IMM  sda=dominant  scl=dominant
+        EMIT_QUARTER_IMM  sda=dominant  scl=recessive
+        EMIT_QUARTER_IMM  sda=dominant  scl=recessive
+        EMIT_QUARTER_IMM  sda=recessive scl=recessive
+        EMIT_QUARTER_IMM  sda=recessive scl=recessive
 
-        HALT          status=0
+        HALT              status=0

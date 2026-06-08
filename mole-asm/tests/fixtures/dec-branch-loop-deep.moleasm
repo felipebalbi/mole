@@ -1,0 +1,82 @@
+; dec-branch-loop-deep --- deep nested-loop probe for §5.21 / §6 /
+; §5.19 (DEC / BRANCH_ON / LOAD_LOOP) and the BRANCH_ON signed
+; 10-bit offset reach (§5.11).
+;
+; -------------------------------------------------------------------------
+; What this probe locks
+; -------------------------------------------------------------------------
+;
+; Outer loop counter: R5, primed to 255 (raw LOAD_IMM since the
+; LOAD_LOOP sugar only targets R6 per §5.18).
+; Inner loop counter: R6, primed to 255 via LOAD_LOOP sugar.
+;
+; Each outer iteration:
+;   - Reload R6 to 255 (via LOAD_LOOP).
+;   - Inner body: 8 EMIT_BIT_IMM (one byte's worth of dominant pulses)
+;     + DEC R6 + BRANCH_ON NOT_REG_ZERO.
+;   - After the inner loop exits (R6 == 0), DEC R5 + BRANCH_ON
+;     NOT_REG_ZERO back to the outer-body top.
+;
+; Total wire activity: 255 outer × 255 inner × 8 bits = 520,200
+; SDA pulses. The bytecode itself is tiny because both loops live
+; entirely in registers --- this is the point of v0.2's two-register
+; loop convention.
+;
+; -------------------------------------------------------------------------
+; BRANCH_ON reach verification
+; -------------------------------------------------------------------------
+;
+; Per §5.11 BRANCH_ON encodes a signed 10-bit PC-offset at [12:3],
+; i.e. branches can reach -512..+511 instructions from `branch_pc + 1`.
+; Loop bodies in this program are intentionally compact:
+;
+;   Inner body span (from `inner_top` to the inner BRANCH_ON):
+;     8 EMIT_BIT_IMM + DEC + BRANCH_ON = 10 instructions
+;     → back-edge offset = -10 (well within ±511)
+;
+;   Outer body span (from `outer_top` to the outer BRANCH_ON):
+;     1 LOAD_LOOP + 10 inner-body insns + DEC + BRANCH_ON = 13
+;     → back-edge offset = -13 (well within ±511)
+;
+; If a future codegen pass inflates the inner body past 512
+; instructions, the assembler MUST raise E-RNG-001 (BRANCH_ON
+; offset out of signed 10-bit range). This fixture is the
+; positive case: comfortably small back-edges that MUST encode
+; without complaint.
+;
+; -------------------------------------------------------------------------
+; v0.2 spelling
+; -------------------------------------------------------------------------
+;
+; DEC + BRANCH_ON {REG_ZERO|NOT_REG_ZERO} replaces the v0 fused
+; DEC_BRANCH. Back-to-back is hazard-free per §14 (no LINT-001).
+; The two-counter convention is R6 inner (LOAD_LOOP sugar target) /
+; R5 outer (raw LOAD_IMM). Higher-numbered Rx (R0..R4) remain
+; unused here and are general-purpose per §8.
+;
+; EMIT_BIT_IMM uses i2c bus mode just to give it a meaningful
+; vocabulary; this is not a real I2C transaction.
+
+        LOAD_TIMING       reg=0, divider=59
+        SET_BUS_MODE      i2c
+        SET_ROLE          controller
+
+        LOAD_IMM          R5, 255           ; outer counter
+outer_top:
+        LOAD_LOOP         255               ; inner counter via R6 sugar
+inner_top:
+        EMIT_BIT_IMM      tx=dominant
+        EMIT_BIT_IMM      tx=dominant
+        EMIT_BIT_IMM      tx=dominant
+        EMIT_BIT_IMM      tx=dominant
+        EMIT_BIT_IMM      tx=dominant
+        EMIT_BIT_IMM      tx=dominant
+        EMIT_BIT_IMM      tx=dominant
+        EMIT_BIT_IMM      tx=dominant
+        DEC               R6
+        BRANCH_ON         NOT_REG_ZERO, inner_top
+
+        DEC               R5
+        BRANCH_ON         NOT_REG_ZERO, outer_top
+
+        HALT              status=0
