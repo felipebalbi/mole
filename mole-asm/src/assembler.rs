@@ -596,8 +596,8 @@ fn resolve_tx_key(
         loc,
         format!(
             "E-OP-002: {key}='{sym}' is not a named tx symbol \
-             (allowed: {:?})",
-            symbols::sorted_names(TX_SYMBOLS)
+             (allowed: {})",
+            symbols::sorted_names_csv(TX_SYMBOLS)
         ),
     ))
 }
@@ -609,8 +609,8 @@ fn resolve_cond(tok: &str, loc: &SourceLocation) -> Result<u8> {
             loc,
             format!(
                 "E-LEX-004: cond code '{tok}' is not named \
-                 (allowed: {:?})",
-                symbols::sorted_names(COND_CODES)
+                 (allowed: {})",
+                symbols::sorted_names_csv(COND_CODES)
             ),
         )
     })
@@ -1082,8 +1082,8 @@ fn encode_mnemonic(
                         loc,
                         format!(
                             "E-OP-006: bus mode '{raw_tok}' is not named \
-                             (allowed: {:?})",
-                            symbols::sorted_names(BUS_MODES)
+                             (allowed: {})",
+                            symbols::sorted_names_csv(BUS_MODES)
                         ),
                     )
                 })?;

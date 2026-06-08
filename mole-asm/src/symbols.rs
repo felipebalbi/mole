@@ -156,3 +156,13 @@ pub(crate) fn sorted_names<'a>(table: &'a [(&'a str, u8)]) -> Vec<&'a str> {
     names.sort();
     names
 }
+
+/// Format `sorted_names(table)` as a comma-separated list for use
+/// inside `(allowed: ...)` error fragments. Matches the canonical
+/// hand-written form used at other E-OP-006 / E-LEX-004 / E-OP-002
+/// sites (e.g. `i2c, i3c-od, i3c-pp, hdr-ddr`), so all three error
+/// codes render the same way regardless of which call path produced
+/// them.
+pub(crate) fn sorted_names_csv(table: &[(&str, u8)]) -> String {
+    sorted_names(table).join(", ")
+}

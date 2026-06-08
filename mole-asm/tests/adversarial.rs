@@ -1346,6 +1346,68 @@ fn malformed_integer_literal_emits_e_rng_001() {
     }
 }
 
+// --- B7: bus-mode / cond-code / tx-symbol "allowed" lists are CSV ---------
+
+#[test]
+fn allowed_lists_render_as_canonical_csv_not_debug_vec() {
+    // Before this fix, three error sites in assembler.rs used Rust's
+    // {:?} of a Vec<&str>, producing
+    //   (allowed: ["hdr-ddr", "i2c", "i3c-od", "i3c-pp"])
+    // while the *adjacent* hand-written sites for the same E-codes used
+    //   (allowed: i2c, i3c-OD, i3c-PP, hdr-ddr)
+    // -- inconsistent error contract on the same E-code.
+    //
+    // After the fix all three sites route through sorted_names_csv and
+    // render as a plain comma-separated list with no brackets and no
+    // double-quotes.
+
+    // E-OP-006 (BUS_MODES): exercise the unreachable third site by
+    // passing a non-numeric, identifier-shaped, non-bus-mode token that
+    // is_valid_bus_mode_ident accepts but BUS_MODES does not.
+    // is_valid_bus_mode_ident allows alphanum + '-', so "i2c-bogus"
+    // slips past the L1071 guard and into the L1080 lookup.
+    let err = assemble("SET_BUS_MODE i2c-bogus\nHALT\n", "<inline>")
+        .expect_err("bogus bus mode must fail");
+    let s = format!("{err}");
+    assert!(s.contains("E-OP-006"), "expected E-OP-006, got: {s}");
+    assert!(
+        !s.contains("[\""),
+        "rendered Vec<&str> debug form leaked into E-OP-006: {s}"
+    );
+    assert!(
+        s.contains("hdr-ddr, i2c, i3c-od, i3c-pp"),
+        "expected CSV allowed list, got: {s}"
+    );
+
+    // E-LEX-004 (COND_CODES)
+    let err =
+        assemble("BRANCH_ON BOGUS, 0\nHALT\n", "<inline>").expect_err("bogus cond code must fail");
+    let s = format!("{err}");
+    assert!(s.contains("E-LEX-004"), "expected E-LEX-004, got: {s}");
+    assert!(
+        !s.contains("[\""),
+        "rendered Vec<&str> debug form leaked into E-LEX-004: {s}"
+    );
+    assert!(
+        s.contains("ALWAYS, MISMATCH, NOT_MISMATCH"),
+        "expected CSV allowed list, got: {s}"
+    );
+
+    // E-OP-002 (TX_SYMBOLS)
+    let err = assemble("EMIT_BIT_IMM tx=bogus\nHALT\n", "<inline>")
+        .expect_err("bogus tx symbol must fail");
+    let s = format!("{err}");
+    assert!(s.contains("E-OP-002"), "expected E-OP-002, got: {s}");
+    assert!(
+        !s.contains("[\""),
+        "rendered Vec<&str> debug form leaked into E-OP-002: {s}"
+    );
+    assert!(
+        s.contains("dom, dominant, hiz, rec, recessive"),
+        "expected CSV allowed list, got: {s}"
+    );
+}
+
 // --- M2: parse_int_raw handles negative hex/bin literals -----------------
 
 #[test]
