@@ -1429,3 +1429,33 @@ fn flag_clear_neg_hex_raises_e_op_009_not_e_wire_003() {
         "should NOT raise E-WIRE-003: {s}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Regression: proptest shrunk repro from
+// `successful_assemble_always_frames` (fuzz.rs Property 7).
+//
+// `assemble("")` succeeds with a 2-word preamble-only vector
+// (body-length field = 0). `build_frame` then rejects it because it
+// requires at least PREAMBLE_WORDS + 1 words. The round-trip contract
+// is therefore broken for empty programs: `assemble` should either
+// reject empty source or `build_frame` should accept zero-body frames.
+//
+// TODO: fix in a follow-up `fix(asm)` commit — decide whether
+//       `assemble("")` should return `Err` (no instructions) or whether
+//       the frame builder should accept length-0 bodies as a NOP
+//       program. Track as "empty-source round-trip" issue.
+// ---------------------------------------------------------------------------
+#[test]
+#[ignore = "known contract gap: empty source round-trip; \
+            see TODO in adversarial.rs near end of file"]
+fn regression_empty_source_does_not_frame() {
+    // Shrunk repro: `lines = []` → src = ""
+    let words = mole_asm::assemble("", "<inline>").expect("assemble(\"\") currently succeeds");
+    // words.len() == 2 (preamble only); build_frame rejects it.
+    let result = mole_asm::frame::build_frame(&words);
+    assert!(
+        result.is_ok(),
+        "build_frame rejected assembler output for empty source: \
+         words={words:?}"
+    );
+}

@@ -16,3 +16,6 @@ path = "src/lib.rs"
 [dependencies]
 mole-abi = { path = "../mole-abi" }
 thiserror.workspace = true
+
+[dev-dependencies]
+proptest = "1"
