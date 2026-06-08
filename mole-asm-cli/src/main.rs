@@ -1,136 +1,187 @@
-//! CLI front-end for the `mole-asm` bytecode compiler.
+//! CLI front-end for the `mole-asm` bytecode compiler — v0.2.
 //!
-//! Layout mirrors the Python `mole-asm.py` it replaces:
-//!
+//! Subcommand layout:
 //! ```text
-//! mole-asm [OPTIONS] <INPUT.moleasm>
-//!     -o, --output <PATH>   Write packed .molecode here (default: <input>.molecode)
-//!         --frame           Also emit <input>.mole.bin (UART-ready frame)
+//! mole-asm assemble  [OPTIONS] <INPUT>   compile .moleasm → .molecode
+//! mole-asm inspect   [OPTIONS] <INPUT>   decode header/summary of bytecode
+//! mole-asm disassemble [OPTIONS] <INPUT> turn bytecode back into moleasm
 //! ```
 //!
-//! Rationale for the small-and-boring shape: this is a batch
-//! transformer, not a long-running daemon. `clap` + `color-eyre` is
-//! enough; we skip `tracing` because there is nothing to trace.
+//! The `assemble` subcommand is also the default when the first argument
+//! is not a recognized subcommand name (backward compatibility with the
+//! v0.1 positional CLI). In that case the argument list is forwarded to
+//! `assemble` unchanged.
 
-use std::fs;
-use std::path::{Path, PathBuf};
+mod commands;
+mod decode;
 
-use clap::Parser;
+use std::process;
+
+use clap::{Parser, Subcommand};
 use color_eyre::eyre::{Context, Result};
 
-/// Assemble a moleasm source file to packed bytecode and (optionally)
-/// the UART-ready frame the on-target loader expects.
+use commands::assemble::AssembleArgs;
+use commands::disassemble::DisassembleArgs;
+use commands::inspect::InspectArgs;
+
+// -----------------------------------------------------------------------
+// Clap top-level
+// -----------------------------------------------------------------------
+
 #[derive(Debug, Parser)]
 #[command(
     name = "mole-asm",
     version,
-    about,
-    long_about = "Layer-1 bytecode compiler for the Mole bit-cycle engine. \
-                  Reads a .moleasm source file and writes a .molecode \
-                  (packed little-endian 16-bit words). With --frame, also \
-                  writes a .mole.bin (length + words + CRC-16/XMODEM) ready \
-                  to ship over UART."
+    about = "Mole v0.2 bytecode assembler / inspector / disassembler",
+    long_about = "\
+Layer-1 bytecode compiler and inspector for the Mole bit-cycle engine.
+
+SUBCOMMANDS
+  assemble     Compile a .moleasm source file to packed bytecode (.molecode)
+               and optionally wrap it in a UART-ready .mole.bin frame.
+  inspect      Decode and print the preamble / header of a .molecode or
+               .mole.bin file.  Exit 2 on any header or CRC anomaly.
+  disassemble  Translate a .molecode or .mole.bin file back into moleasm
+               source.  Exit 2 if any unknown word is encountered.
+
+BACKWARD COMPATIBILITY
+  When the first argument is not a subcommand name, `assemble` is assumed.
+  This preserves the v0.1 usage `mole-asm [OPTIONS] <INPUT>`.
+"
 )]
 struct Cli {
-    /// Source file to assemble.
-    input: PathBuf,
-
-    /// Output path for the packed bytecode. Defaults to `INPUT.molecode`.
-    #[arg(short = 'o', long = "output", value_name = "PATH")]
-    output: Option<PathBuf>,
-
-    /// Also emit a `.mole.bin` UART frame next to (or instead of) the
-    /// bytecode. Defaults to placing it next to INPUT.
-    #[arg(long = "frame")]
-    frame: bool,
-
-    /// Path for the optional frame output. Defaults to `INPUT.mole.bin`.
-    /// Implies `--frame`.
-    #[arg(long = "frame-output", value_name = "PATH")]
-    frame_output: Option<PathBuf>,
+    #[command(subcommand)]
+    command: Command,
 }
 
-fn main() -> Result<()> {
-    // Parse arguments *before* installing color-eyre so that `--help`
-    // and version output stay clean of the eyre banner. Per
-    // rubber-duck #6.
-    let cli = Cli::parse();
-    color_eyre::install()?;
+#[derive(Debug, Subcommand)]
+enum Command {
+    /// Compile a .moleasm source file to packed bytecode.
+    Assemble(AssembleArgs),
+    /// Decode and summarise the preamble of a bytecode file.
+    Inspect(InspectArgs),
+    /// Translate a bytecode file back into moleasm source.
+    Disassemble(DisassembleArgs),
+}
 
-    let source = fs::read_to_string(&cli.input)
-        .wrap_err_with(|| format!("failed to read {}", cli.input.display()))?;
+// -----------------------------------------------------------------------
+// Entry point
+// -----------------------------------------------------------------------
 
-    let filename = cli.input.to_string_lossy();
-    let words = mole_asm::assemble(&source, &filename)
-        .wrap_err_with(|| format!("failed to assemble {}", cli.input.display()))?;
+fn main() {
+    // Install color-eyre *after* parsing so --help stays clean.
+    // We parse raw args first so we can inject "assemble" for compat.
+    let raw: Vec<String> = std::env::args().collect();
+    let args = inject_default_subcommand(raw);
 
-    let bytecode = mole_asm::frame::pack_bytecode(&words);
-    let bytecode_path = cli
-        .output
-        .clone()
-        .unwrap_or_else(|| swap_extension(&cli.input, "molecode"));
-    fs::write(&bytecode_path, &bytecode)
-        .wrap_err_with(|| format!("failed to write {}", bytecode_path.display()))?;
-    eprintln!(
-        "wrote {} words ({} bytes) -> {}",
-        words.len(),
-        bytecode.len(),
-        bytecode_path.display()
-    );
+    color_eyre::install().expect("color-eyre install failed");
 
-    let want_frame = cli.frame || cli.frame_output.is_some();
-    if want_frame {
-        let frame = mole_asm::frame::build_frame(&words).wrap_err("failed to build UART frame")?;
-        let frame_path = cli
-            .frame_output
-            .clone()
-            .unwrap_or_else(|| swap_extension(&cli.input, "mole.bin"));
-        fs::write(&frame_path, &frame)
-            .wrap_err_with(|| format!("failed to write {}", frame_path.display()))?;
-        eprintln!(
-            "wrote frame ({} bytes) -> {}",
-            frame.len(),
-            frame_path.display()
-        );
+    let cli = Cli::parse_from(args);
+
+    let result = dispatch(cli);
+    match result {
+        Ok(exit_code) => process::exit(exit_code),
+        Err(e) => {
+            eprintln!("error: {e:?}");
+            process::exit(1);
+        }
     }
-
-    Ok(())
 }
 
-/// Replace (or append) the file extension on `input`. Always overwrites
-/// any existing extension so `foo.moleasm` -> `foo.molecode` works the
-/// same as `foo` -> `foo.molecode`.
-fn swap_extension(input: &Path, new_ext: &str) -> PathBuf {
-    let mut out = input.to_path_buf();
-    out.set_extension(new_ext);
-    out
+/// Dispatch to the appropriate subcommand handler.
+/// Returns the desired exit code (0 = success, 1 = assemble error,
+/// 2 = inspect/disassemble validation error).
+fn dispatch(cli: Cli) -> Result<i32> {
+    match cli.command {
+        Command::Assemble(args) => {
+            commands::assemble::run(&args)?;
+            Ok(0)
+        }
+        Command::Inspect(args) => {
+            let ok = commands::inspect::run(&args).wrap_err("inspect failed")?;
+            if ok { Ok(0) } else { Ok(2) }
+        }
+        Command::Disassemble(args) => {
+            let ok = commands::disassemble::run(&args).wrap_err("disassemble failed")?;
+            if ok { Ok(0) } else { Ok(2) }
+        }
+    }
 }
+
+/// If the first non-binary argument is not a known subcommand keyword,
+/// insert "assemble" so clap sees a valid subcommand.
+///
+/// Known subcommand names: `assemble`, `inspect`, `disassemble`,
+/// plus built-in clap flags `--help`, `-h`, `--version`, `-V`.
+fn inject_default_subcommand(mut args: Vec<String>) -> Vec<String> {
+    const KNOWN_SUBS: &[&str] = &[
+        "assemble",
+        "inspect",
+        "disassemble",
+        "--help",
+        "-h",
+        "--version",
+        "-V",
+        "help",
+    ];
+    // args[0] is the binary name; args[1] (if present) is the first arg.
+    if let Some(first) = args.get(1) {
+        if !KNOWN_SUBS.contains(&first.as_str()) {
+            args.insert(1, "assemble".to_string());
+        }
+    }
+    args
+}
+
+// -----------------------------------------------------------------------
+// Unit tests
+// -----------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn swap_extension_replaces_existing() {
-        assert_eq!(
-            swap_extension(Path::new("foo.moleasm"), "molecode"),
-            PathBuf::from("foo.molecode")
-        );
+    fn inject_inserts_assemble_for_file_arg() {
+        let args = vec!["mole-asm".to_string(), "foo.moleasm".to_string()];
+        let injected = inject_default_subcommand(args);
+        assert_eq!(injected[1], "assemble");
+        assert_eq!(injected[2], "foo.moleasm");
     }
 
     #[test]
-    fn swap_extension_appends_when_missing() {
-        assert_eq!(
-            swap_extension(Path::new("foo"), "molecode"),
-            PathBuf::from("foo.molecode")
-        );
+    fn inject_leaves_assemble_subcommand_alone() {
+        let args = vec![
+            "mole-asm".to_string(),
+            "assemble".to_string(),
+            "foo.moleasm".to_string(),
+        ];
+        let injected = inject_default_subcommand(args.clone());
+        assert_eq!(injected, args);
     }
 
     #[test]
-    fn swap_extension_keeps_directories() {
-        assert_eq!(
-            swap_extension(Path::new("dir/sub/foo.moleasm"), "mole.bin"),
-            PathBuf::from("dir/sub/foo.mole.bin")
-        );
+    fn inject_leaves_inspect_alone() {
+        let args = vec![
+            "mole-asm".to_string(),
+            "inspect".to_string(),
+            "foo.molecode".to_string(),
+        ];
+        let injected = inject_default_subcommand(args.clone());
+        assert_eq!(injected, args);
+    }
+
+    #[test]
+    fn inject_leaves_help_flag_alone() {
+        let args = vec!["mole-asm".to_string(), "--help".to_string()];
+        let injected = inject_default_subcommand(args.clone());
+        assert_eq!(injected, args);
+    }
+
+    #[test]
+    fn inject_no_op_when_no_args() {
+        let args = vec!["mole-asm".to_string()];
+        let injected = inject_default_subcommand(args.clone());
+        assert_eq!(injected, args);
     }
 }
