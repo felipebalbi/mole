@@ -401,6 +401,7 @@ dependencies = [
  "color-eyre",
  "indicatif",
  "mole-abi",
+ "mole-asm",
  "mole-loader",
 ]
 

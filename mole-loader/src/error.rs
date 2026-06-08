@@ -1,12 +1,5 @@
 //! Structured loader / decoder errors.
 //!
-// FIXME(B6): mole-abi v0.2 rewrite changed MAX_PROGRAM_WORDS from 2048 to
-//            8192. The doc comment on FrameError::LengthOutOfRange below
-//            still says "currently 2048"; update to 8192 and revise the
-//            RingError::HaltReservedBitsSet / HaltStatusReserved variants
-//            for the new 32-bit HALT word layout (§11). B6 rewrites the
-//            loader for v0.2 frame and ring-record formats.
-//!
 //! `mole_loader` returns `Result<T, LoaderError>` from every fallible
 //! function. The variants partition the failure space the loader can
 //! actually see:
@@ -61,11 +54,15 @@ pub enum LoaderError {
     },
 }
 
-/// Malformed `.mole.bin` UART frame, discovered by [`crate::frame::verify_frame`].
+/// Malformed `.mole.bin` UART frame, discovered by
+/// [`crate::frame::verify_frame`] or [`crate::verify_program`].
 ///
-/// The wire format is `[len_lo, len_hi, words..., crc_lo, crc_hi]`
-/// little-endian, per `fpga/Mole/WIRE_FORMAT.md`. Anything that
-/// fails to round-trip back to a valid word vector lands here.
+/// The wire format is
+/// `[len_lo, len_hi, words..., crc_lo, crc_hi]` little-endian, per
+/// §10. 32-bit instruction words, valid program body length
+/// `1..=8192` words (total frame length `3..=8194` including the
+/// 2-word preamble). Anything that fails to round-trip back to a
+/// valid word vector lands here.
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
 pub enum FrameError {
     /// Frame is shorter than the 2-byte length header, so we cannot
@@ -80,8 +77,8 @@ pub enum FrameError {
 
     /// Frame's `len` header asks for a word count that does not match
     /// the bytes actually present. `expected_bytes` is what the header
-    /// implies (`2 + 2 * len_words + 2`); `got_bytes` is what the file
-    /// has.
+    /// implies (`2 + 4 * len_words + 2`); `got_bytes` is what the
+    /// file has.
     #[error(
         "frame length mismatch: header says {len_words} words \
          (= {expected_bytes} total bytes), got {got_bytes} bytes"
@@ -96,12 +93,14 @@ pub enum FrameError {
     },
 
     /// Frame's `len` header is outside the engine's accepted range
-    /// `1..=mole_abi::MAX_PROGRAM_WORDS` (currently 2048). Symmetric
-    /// with [`mole_asm`]'s `AsmError::FrameTooLarge` on the encoder
-    /// side.
+    /// `3..=8194` (preamble + 1..=8192 body words; currently 8192
+    /// max body words). Symmetric with [`mole_asm`]'s
+    /// `AsmError::FrameTooLarge` on the encoder side. Also covers
+    /// the §16.5 empty-program rejection (length ≤ `PREAMBLE_WORDS`
+    /// = 2 means zero body words).
     #[error(
         "frame word count {len_words} outside engine range \
-         1..=mole_abi::MAX_PROGRAM_WORDS"
+         3..=8194 (preamble_words + 1..=MAX_PROGRAM_WORDS)"
     )]
     LengthOutOfRange {
         /// Word count the header claims.
@@ -118,13 +117,66 @@ pub enum FrameError {
         /// What the trailing two bytes of the frame held.
         got: u16,
     },
+
+    /// Frame magic mismatch (§16.1): word 0 low 16 bits do not match
+    /// `mole_abi::MAGIC_LO_U16 = 0x4D4C`.
+    ///
+    /// `found` is the full 32-bit preamble word 0; `expected` is
+    /// `mole_abi::MAGIC`. This is distinct from a version mismatch:
+    /// the magic field identifies the format family, while the version
+    /// field identifies the revision within that family.
+    #[error("frame magic mismatch: found 0x{found:08x}, expected 0x{expected:08x}")]
+    MagicMismatch {
+        /// The full 32-bit preamble word 0 found in the frame.
+        found: u32,
+        /// The expected value (`mole_abi::MAGIC`).
+        expected: u32,
+    },
+
+    /// Frame version mismatch (§16.2): word 0 high 16 bits do not
+    /// match `mole_abi::FORMAT_VERSION = 0x0002`.
+    ///
+    /// The loader-CLI exits with a dedicated exit code for this error
+    /// so automated tooling can distinguish "wrong version" from
+    /// generic structural failures.
+    #[error("frame version mismatch: found 0x{found:04x}, expected 0x{expected:04x}")]
+    VersionMismatch {
+        /// The version value found in the frame's preamble word 0
+        /// high 16 bits.
+        found: u16,
+        /// The expected version (`mole_abi::FORMAT_VERSION`).
+        expected: u16,
+    },
+
+    /// A HALT instruction in the program body has a reserved status
+    /// code (§16.4).
+    ///
+    /// Status codes `0x1D`–`0x1E` are reserved for future engine
+    /// traps and must not appear in user programs. The loader rejects
+    /// such programs before any data is written to SPRAM. See spec
+    /// §16.4.
+    #[error(
+        "program contains HALT with reserved status 0x{status:02x} at PC {pc} \
+         (loader rejects; STATUS_RESERVED range 0x1D..=0x1E is \
+         engine-trap-only)"
+    )]
+    ReservedHaltStatusInBody {
+        /// 0-indexed instruction offset in the program body where the
+        /// HALT with reserved status was found.
+        pc: usize,
+        /// The reserved status value found (`0x1D` or `0x1E`).
+        status: u8,
+    },
 }
 
-/// Malformed result-ring buffer, discovered by [`crate::ring::decode_ring`].
+/// Malformed result-ring buffer, discovered by
+/// [`crate::ring::decode_ring`].
 ///
 /// The result ring's wire format is documented in
 /// `fpga/Mole/src/hw/BitCycleEngineCore.scala` (file header). Tags
-/// are `00=CAPTURE`, `01=reserved`, `10=MARK`, `11=HALT`.
+/// are `00=CAPTURE`, `01=reserved`, `10=MARK`, `11=HALT`. Ring words
+/// are 16 bits wide (the engine's result ring is 16-bit-addressed),
+/// independent of the 32-bit program-memory instruction width.
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
 pub enum RingError {
     /// Buffer is shorter than the minimum legal ring (REVISION lo +
@@ -149,7 +201,10 @@ pub enum RingError {
     /// returned the wrong byte count, the serial link dropped bytes,
     /// or the engine never reached `Halt` --- the tail slot is
     /// reserved exclusively for the HALT word.
-    #[error("ring tail word {word:#06x} does not have HALT tag (expected high 2 bits = 0b11)")]
+    #[error(
+        "ring tail word {word:#06x} does not have HALT tag \
+         (expected high 2 bits = 0b11)"
+    )]
     NoHaltAtTail {
         /// The word that was found in the tail slot.
         word: u16,
@@ -158,8 +213,9 @@ pub enum RingError {
     /// A MARK record header (tag `0b10`) appeared without the two
     /// timestamp words that must follow it before the HALT word.
     #[error(
-        "ring record at word offset {offset_words}: MARK header without two trailing \
-         timestamp words (only {remaining_words} word(s) left before HALT)"
+        "ring record at word offset {offset_words}: MARK header without two \
+         trailing timestamp words (only {remaining_words} word(s) left \
+         before HALT)"
     )]
     TruncatedMark {
         /// Word offset (from start of ring) of the MARK header.
@@ -188,51 +244,51 @@ pub enum RingError {
         expected: usize,
     },
 
-    /// HALT word's reserved low-byte field (`[7:0]`) is non-zero.
+    /// HALT word's reserved low-bit field (`[22:0]`) is non-zero.
     ///
-    /// Per INV-WIRE-HALT-RECORD the HALT word layout is
-    /// `[15:14]=11`, `[13]=overflow`, `[12]=mismatchAtHalt`,
-    /// `[11:8]=status`, `[7:0]=0`. Any non-zero bit in `[7:0]` is
-    /// either an engine-loader version skew (a future engine
-    /// repurposed the reserved field) or a corrupted drain. The
-    /// decoder fails fast rather than silently discarding the
+    /// Per INV-WIRE-HALT-RECORD the v0.2 HALT word layout is (§11
+    /// lines 1458-1492): `[31:30]=11`, `[29]=overflow`,
+    /// `[28]=mismatchAtHalt`, `[27:23]=status` (5 bits),
+    /// `[22:0]=0` (23 reserved bits). Any non-zero bit in `[22:0]`
+    /// is either an engine-loader version skew or a corrupted drain.
+    /// The decoder fails fast rather than silently discarding the
     /// information.
     #[error(
-        "HALT word {halt_word:#06x} has non-zero reserved low byte {reserved:#04x}; \
-         INV-WIRE-HALT-RECORD requires [7:0] == 0. Likely cause: \
+        "HALT word {halt_word:#010x} has non-zero reserved low 23 bits \
+         (reserved & 0x007FFFFF = {reserved:#010x}); \
+         INV-WIRE-HALT-RECORD requires [22:0] == 0. Likely cause: \
          engine-loader version skew, or a corrupted drain"
     )]
     HaltReservedBitsSet {
-        /// The full 16-bit HALT word for forensic inspection.
-        halt_word: u16,
-        /// The offending low-byte value (= `halt_word & 0x00FF`).
-        reserved: u8,
+        /// The full 32-bit HALT word for forensic inspection.
+        halt_word: u32,
+        /// The offending reserved-bits value
+        /// (= `halt_word & 0x007F_FFFF`).
+        reserved: u32,
     },
 
-    /// HALT word's status field is `0xD` or `0xE` --- reserved for
+    /// HALT word's status field is in `0x1D..=0x1E` --- reserved for
     /// future engine traps and not currently emitted by any shipped
-    /// engine.
+    /// engine (§11, INV-NUM-STATUS-RESERVED).
     ///
-    /// Per INV-NUM-STATUS-RESERVED, status codes `0x0..=0xC` are
-    /// caller-defined and `0xD..=0xF` are reserved for engine
-    /// traps. Today only `0xF` is in use (surfaced via the normal
-    /// [`crate::ring::HaltStatus`] path with
-    /// [`crate::ring::HaltStatus::is_engine_trap`]); `0xD` and
-    /// `0xE` are held for future trap classes. This decoder
-    /// rejects them so callers are not silently misled when a
-    /// future engine ships a new trap class. Likely cause:
-    /// engine-loader version skew, or a corrupted drain.
+    /// Per INV-NUM-STATUS-RESERVED, the 5-bit status field
+    /// `[27:23]` encodes: `0x00..=0x1C` caller-defined user halts,
+    /// `0x1D..=0x1E` reserved for future engine traps, `0x1F`
+    /// currently in use as the engine-trap code. This decoder rejects
+    /// `0x1D`/`0x1E` so callers are not silently misled when a future
+    /// engine ships a new trap class. Likely cause: engine-loader
+    /// version skew, or a corrupted drain.
     #[error(
-        "HALT word {halt_word:#06x} has reserved status code {status:#x}; \
-         INV-NUM-STATUS-RESERVED reserves 0xD and 0xE for future engine \
-         traps (today only 0xF is defined). Likely cause: \
+        "HALT word {halt_word:#010x} has reserved status code {status:#x}; \
+         INV-NUM-STATUS-RESERVED reserves 0x1D and 0x1E for future engine \
+         traps (today only 0x1F is defined). Likely cause: \
          engine-loader version skew, or a corrupted drain"
     )]
     HaltStatusReserved {
-        /// The reserved status value (`0xD` or `0xE`).
+        /// The reserved status value (`0x1D` or `0x1E`).
         status: u8,
-        /// The full 16-bit HALT word for forensic inspection.
-        halt_word: u16,
+        /// The full 32-bit HALT word for forensic inspection.
+        halt_word: u32,
     },
 }
 
@@ -284,9 +340,12 @@ pub enum TransportError {
 
     /// A blocking read or write returned an `io::ErrorKind::TimedOut`
     /// before the requested byte count completed. Usually means the
-    /// engine never reached `HALT`, the wrong baud is set on one side,
-    /// or hardware flow control is wired the wrong way around.
-    #[error("serial port {phase:?} timed out after {after_bytes} of {expected_bytes} bytes")]
+    /// engine never reached `HALT`, the wrong baud is set on one
+    /// side, or hardware flow control is wired the wrong way around.
+    #[error(
+        "serial port {phase:?} timed out after {after_bytes} \
+         of {expected_bytes} bytes"
+    )]
     Timeout {
         /// Which phase of the transaction timed out.
         phase: TransportPhase,

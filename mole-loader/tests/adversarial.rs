@@ -4,7 +4,16 @@
 //! error-class conflation, and endianness regressions. Each test, if
 //! it ever starts failing, signals a real bug --- not a cosmetic
 //! change.
+//!
+//! # v0.2 ring layout recap
+//!
+//! The result ring is 16-bit-addressed. Words are 16 bits. The HALT
+//! word is 32 bits per §11, serialised as two adjacent 16-bit ring
+//! slots: lo at `[N-2]`, hi at `[N-1]`. REVISION occupies words 0
+//! and 1; records start at word 2. Minimum ring size: 4 × 16-bit
+//! words = 8 bytes.
 
+use mole_abi::halt;
 use mole_asm::frame::{build_frame, crc16_xmodem};
 use mole_loader::{
     DEFAULT_RING_BYTES, DecodedRing, FrameError, HaltStatus, LoaderError, Record, Revision,
@@ -16,20 +25,31 @@ use mole_loader::{
 // ---------------------------------------------------------------------------
 
 /// Pack a sequence of u16 words into the result-ring byte layout
-/// (little-endian) with a given total word count. The caller supplies
-/// the revision (lo, hi), the record-stream words, the HALT word, and
-/// the total ring size in words; the middle is zero-padded (Verilator
-/// behavior).
-fn build_ring(revision: (u16, u16), records: &[u16], halt: u16, total_words: usize) -> Vec<u8> {
-    assert!(total_words >= 3 + records.len());
+/// (little-endian) with a given total word count.
+///
+/// `halt_word` is the 32-bit HALT value (§11); it is split into two
+/// 16-bit ring slots (lo at `[N-2]`, hi at `[N-1]`).
+/// `total_words` is the total number of 16-bit ring slots.
+/// The minimum valid ring is 4 words (2 REVISION + 2 HALT slots).
+fn build_ring(
+    revision: (u16, u16),
+    records: &[u16],
+    halt_word: u32,
+    total_words: usize,
+) -> Vec<u8> {
+    assert!(total_words >= 4 + records.len());
+    let halt_lo = (halt_word & 0xFFFF) as u16;
+    let halt_hi = (halt_word >> 16) as u16;
     let mut words = Vec::with_capacity(total_words);
     words.push(revision.0);
     words.push(revision.1);
     words.extend_from_slice(records);
-    while words.len() < total_words - 1 {
+    while words.len() < total_words - 2 {
         words.push(0x0000);
     }
-    words.push(halt);
+    words.push(halt_lo);
+    words.push(halt_hi);
+    assert_eq!(words.len(), total_words);
     let mut bytes = Vec::with_capacity(total_words * 2);
     for w in words {
         bytes.push((w & 0xFF) as u8);
@@ -38,23 +58,35 @@ fn build_ring(revision: (u16, u16), records: &[u16], halt: u16, total_words: usi
     bytes
 }
 
+/// Build a minimal HALT word (tag=0b11, status only, no overflow/
+/// mismatch, reserved bits = 0).
+const fn halt_word_status(status: u8) -> u32 {
+    (halt::TAG_HALT << halt::TAG_SHIFT) | ((status as u32) << halt::STATUS_SHIFT)
+}
+
+/// Standard clean halt: tag=11, status=0, no overflow, no mismatch.
+const HALT_CLEAN: u32 = halt_word_status(0);
+
 // ---------------------------------------------------------------------------
 // Frame verifier --- endianness, fuzz, error-class distinction
 // ---------------------------------------------------------------------------
 
 #[test]
 fn frame_words_are_little_endian_on_the_wire() {
-    // §"Wire contract" in mole-loader/README.md and WIRE_FORMAT.md
-    // specify little-endian words. Pin it explicitly so a future
-    // BE flip is caught.
-    let frame = build_frame(&[0xAABB]).unwrap();
-    // Frame: [len_lo=1, len_hi=0, word_lo=0xBB, word_hi=0xAA, crc_lo, crc_hi]
-    assert_eq!(frame[0], 0x01, "len_lo");
-    assert_eq!(frame[1], 0x00, "len_hi");
-    assert_eq!(frame[2], 0xBB, "word_lo");
-    assert_eq!(frame[3], 0xAA, "word_hi");
-    // And the verifier reconstructs the word identically.
-    assert_eq!(verify_frame(&frame).unwrap(), vec![0xAABB]);
+    // §10: 32-bit LE words. Pin it explicitly so a future BE flip is
+    // caught.
+    // Use 4 words: MAGIC, body_len=2, w1, w2.
+    let w1: u32 = 0xAABB_CCDD;
+    let words = vec![mole_abi::MAGIC, 2u32, w1, 0u32];
+    let frame = build_frame(&words).unwrap();
+    // Word 2 (index 10..14) = w1 in LE.
+    assert_eq!(frame[10], 0xDD, "w1 byte 0 (lo)");
+    assert_eq!(frame[11], 0xCC, "w1 byte 1");
+    assert_eq!(frame[12], 0xBB, "w1 byte 2");
+    assert_eq!(frame[13], 0xAA, "w1 byte 3 (hi)");
+    // The verifier must reconstruct the word identically.
+    let decoded = verify_frame(&frame).unwrap();
+    assert_eq!(decoded[2], w1);
 }
 
 #[test]
@@ -62,14 +94,11 @@ fn verify_frame_truncated_at_every_offset_never_panics() {
     // Cut a known-good frame at every byte offset from 0 to len-1.
     // For each truncation, the verifier must return a clean error
     // and never panic.
-    let frame = build_frame(&[0x1234, 0xABCD, 0xC000]).unwrap();
+    let words = vec![mole_abi::MAGIC, 3u32, 0x1234_0000u32, 0xABCD_0000u32, 0u32];
+    let frame = build_frame(&words).unwrap();
     for cut in 0..frame.len() {
         let slice = &frame[..cut];
         let result = verify_frame(slice);
-        // Some short slices may pass FrameError::TooShort; longer
-        // ones LengthMismatch or CrcMismatch. The point is: an
-        // error, never a panic, never a success on a truncated
-        // good frame.
         assert!(
             result.is_err(),
             "verify_frame accepted a truncated frame ({cut} bytes of {})",
@@ -80,11 +109,10 @@ fn verify_frame_truncated_at_every_offset_never_panics() {
 
 #[test]
 fn verify_frame_trailing_garbage_rejected_as_length_mismatch() {
-    // A good frame with one extra byte appended is *not* a "CRC
-    // problem" --- it's a length problem (we know the header). The
-    // verifier must report LengthMismatch, not CrcMismatch. This
-    // is the conflated-errors hazard called out in the brief.
-    let mut frame = build_frame(&[0x9000, 0x6000]).unwrap();
+    // A good frame with one extra byte appended is a length problem,
+    // not a CRC problem. The verifier must report LengthMismatch.
+    let words = vec![mole_abi::MAGIC, 2u32, 0x9000_0000u32, 0x6000_0000u32];
+    let mut frame = build_frame(&words).unwrap();
     frame.push(0xFF);
     let err = verify_frame(&frame).unwrap_err();
     assert!(
@@ -94,10 +122,10 @@ fn verify_frame_trailing_garbage_rejected_as_length_mismatch() {
 }
 
 #[test]
-fn verify_frame_header_says_one_but_payload_is_empty() {
-    // Header claims one word; only the header itself is present.
-    // Should be LengthMismatch (we got the header but not the body).
-    let buf = vec![0x01, 0x00];
+fn verify_frame_header_says_three_but_payload_has_only_header() {
+    // Header claims 3 words (minimum valid); only the 2-byte header
+    // itself is present. Must be LengthMismatch.
+    let buf = vec![0x03, 0x00];
     let err = verify_frame(&buf).unwrap_err();
     assert!(
         matches!(err, FrameError::LengthMismatch { .. }),
@@ -106,15 +134,15 @@ fn verify_frame_header_says_one_but_payload_is_empty() {
 }
 
 #[test]
-fn verify_frame_oversize_2049_distinct_from_2048_max() {
-    // 2048 is the inclusive max; 2049 must be LengthOutOfRange, not
-    // LengthMismatch. Off-by-one regressions on the cap would flip
-    // the error class.
-    let mut buf = vec![0x01, 0x08]; // 0x0801 = 2049
-    buf.extend(std::iter::repeat_n(0u8, 2049 * 2 + 2));
+fn verify_frame_oversize_8195_distinct_from_8194_max() {
+    // 8194 is the inclusive max (PREAMBLE_WORDS + MAX_PROGRAM_WORDS).
+    // 8195 must be LengthOutOfRange, not LengthMismatch.
+    let over: u16 = 8195;
+    let mut buf = over.to_le_bytes().to_vec();
+    buf.extend(std::iter::repeat_n(0u8, (over as usize) * 4 + 2));
     let err = verify_frame(&buf).unwrap_err();
     assert!(
-        matches!(err, FrameError::LengthOutOfRange { len_words: 2049 }),
+        matches!(err, FrameError::LengthOutOfRange { len_words: 8195 }),
         "got: {err:?}"
     );
 }
@@ -122,12 +150,11 @@ fn verify_frame_oversize_2049_distinct_from_2048_max() {
 #[test]
 fn verify_frame_crc_bit_flip_in_payload_caught() {
     // Flip exactly one bit in the middle of the payload and check
-    // that CRC catches it (the CRC-16/XMODEM polynomial has decent
-    // single-bit detection by construction; this regression-pins
-    // the CRC covers the right byte range).
-    let mut frame = build_frame(&[0x1111, 0x2222, 0x3333]).unwrap();
-    // Flip a bit in the second word's low byte.
-    frame[4] ^= 0x01;
+    // that CRC catches it.
+    let words = vec![mole_abi::MAGIC, 3u32, 0x1111_0000u32, 0x2222_0000u32, 0u32];
+    let mut frame = build_frame(&words).unwrap();
+    // Flip a bit in the third word's low byte (byte offset 2+8=10).
+    frame[10] ^= 0x01;
     let err = verify_frame(&frame).unwrap_err();
     assert!(
         matches!(err, FrameError::CrcMismatch { .. }),
@@ -137,10 +164,10 @@ fn verify_frame_crc_bit_flip_in_payload_caught() {
 
 #[test]
 fn verify_frame_crc_does_not_cover_itself() {
-    // If CRC were computed over the *whole* frame including the CRC
-    // bytes, flipping the CRC and re-CRCing would round-trip. As
-    // implemented it doesn't, so a wrong CRC stays wrong.
-    let mut frame = build_frame(&[0x0000]).unwrap();
+    // If CRC were computed over the whole frame including the CRC
+    // bytes, flipping the CRC and re-CRCing would round-trip.
+    let words = vec![mole_abi::MAGIC, 1u32, 0u32];
+    let mut frame = build_frame(&words).unwrap();
     let last = frame.len() - 1;
     frame[last] ^= 0xFF;
     frame[last - 1] ^= 0xFF;
@@ -157,11 +184,14 @@ fn verify_frame_crc_does_not_cover_itself() {
 #[test]
 fn revision_words_are_little_endian_on_the_wire() {
     // patch=0x1234 in word_lo, major=0x56 / minor=0x78 in word_hi.
-    // word_lo bytes: [0x34, 0x12]; word_hi bytes: [0x78, 0x56].
+    // Minimum ring: 4 × 16-bit = 8 bytes.
+    // HALT: 0xC000_0000 = tag=11 at [31:30], rest 0.
+    // halt_lo = 0x0000, halt_hi = 0xC000.
     let bytes: Vec<u8> = vec![
         0x34, 0x12, // word_lo = 0x1234 -> patch
         0x78, 0x56, // word_hi = 0x5678 -> major=0x56, minor=0x78
-        0x00, 0xC0, // halt: tag=11 only
+        0x00, 0x00, // halt_lo = 0x0000
+        0x00, 0xC0, // halt_hi = 0xC000 (tag=11 at [15:14])
     ];
     let ring = decode_ring(&bytes).unwrap();
     assert_eq!(
@@ -176,14 +206,12 @@ fn revision_words_are_little_endian_on_the_wire() {
 
 #[test]
 fn ring_decode_truncated_at_every_offset_never_panics() {
-    // Build a substantive ring and truncate it byte-by-byte. Every
-    // slice must produce either Ok or a structured RingError, never
-    // panic.
+    // Build a substantive ring and truncate it byte-by-byte.
     let bytes = build_ring(
         (0x0001, 0x0203),
         &[0x0001, 0x8000, 0xBEEF, 0xDEAD],
-        0xC000,
-        8,
+        HALT_CLEAN,
+        10,
     );
     for cut in 0..bytes.len() {
         let slice = &bytes[..cut];
@@ -206,15 +234,15 @@ fn ring_with_odd_byte_count_classified_distinctly() {
 
 #[test]
 fn ring_too_short_distinct_from_no_halt_at_tail() {
-    // 4-byte buffer is too short to even hold the minimum ring.
-    let err = decode_ring(&[0u8; 4]).unwrap_err();
+    // 6-byte buffer is too short (minimum is 8 bytes = 4 words).
+    let err = decode_ring(&[0u8; 6]).unwrap_err();
     assert!(
-        matches!(err, RingError::TooShort { got: 4 }),
+        matches!(err, RingError::TooShort { got: 6 }),
         "got: {err:?}"
     );
-    // A 6-byte buffer with tail tag != 0b11 is NoHaltAtTail, NOT
-    // TooShort.
-    let bytes = vec![0u8; 6]; // tail = 0x0000, tag = 00
+    // An 8-byte buffer with tail hi-half tag != 0b11 is NoHaltAtTail,
+    // NOT TooShort.
+    let bytes = vec![0u8; 8]; // halt_hi = 0x0000, tag = 00
     let err = decode_ring(&bytes).unwrap_err();
     assert!(
         matches!(err, RingError::NoHaltAtTail { .. }),
@@ -224,29 +252,22 @@ fn ring_too_short_distinct_from_no_halt_at_tail() {
 
 #[test]
 fn halt_status_flag_bits_independently_decoded() {
-    // Sweep every (overflow, mismatch, status) combination of the
-    // HALT word and verify decode is bit-for-bit. Catches a
-    // bit-shift regression in `decode_ring`'s tail parser.
-    for status in 0u8..=0xF {
-        // 0xD and 0xE are now rejected by the decoder as reserved
-        // engine-trap codes (RingError::HaltStatusReserved); they
-        // never produce a HaltStatus and so cannot be sweep-tested
-        // here. The dedicated T-009 tests below cover the rejection
-        // path explicitly.
-        if status == 0xD || status == 0xE {
+    // Sweep every status code + (overflow, mismatch) combination.
+    // v0.2: STATUS_SHIFT=23, OVERFLOW_BIT=29, MISMATCH_BIT=28,
+    // TAG_SHIFT=30.
+    // STATUS_RESERVED_LOW = 0x1D and STATUS_RESERVED_HIGH = 0x1E are
+    // rejected by the decoder; skip them here.
+    for status in 0u8..=halt::STATUS_TRAP {
+        if status == halt::STATUS_RESERVED_LOW || status == halt::STATUS_RESERVED_HIGH {
             continue;
         }
         for &mismatch in &[false, true] {
             for &overflow in &[false, true] {
-                let mut halt: u16 = 0xC000; // tag=11
-                if overflow {
-                    halt |= 1 << 13;
-                }
-                if mismatch {
-                    halt |= 1 << 12;
-                }
-                halt |= (status as u16) << 8;
-                let bytes = build_ring((0, 0), &[], halt, 3);
+                let halt_word = (halt::TAG_HALT << halt::TAG_SHIFT)
+                    | ((status as u32) << halt::STATUS_SHIFT)
+                    | if overflow { 1 << halt::OVERFLOW_BIT } else { 0 }
+                    | if mismatch { 1 << halt::MISMATCH_BIT } else { 0 };
+                let bytes = build_ring((0, 0), &[], halt_word, 4);
                 let ring = decode_ring(&bytes).unwrap();
                 assert_eq!(
                     ring.halt,
@@ -255,7 +276,7 @@ fn halt_status_flag_bits_independently_decoded() {
                         mismatch,
                         overflow,
                     },
-                    "halt={halt:#06x}: decode mismatch"
+                    "halt={halt_word:#010x}: decode mismatch"
                 );
             }
         }
@@ -264,15 +285,12 @@ fn halt_status_flag_bits_independently_decoded() {
 
 #[test]
 fn capture_run_boundary_sizes() {
-    // Capture aggregation isn't a thing in the current API --- the
-    // decoder just emits one `Record::Capture` per word --- but the
-    // brief asks us to pin boundary capture counts (0, 1, 7, 8, 9
-    // and a long run) so a future aggregator can be retrofitted
-    // without silently changing reported counts.
-    for &n in &[0usize, 1, 7, 8, 9, 32, 64, 256, 1024] {
+    // Pin boundary capture counts (0, 1, 7, 8, 9, 32) so a future
+    // aggregator change is loud.
+    for &n in &[0usize, 1, 7, 8, 9, 32, 64, 256] {
         let records: Vec<u16> = (0..n).map(|i| (i as u16) & 1).collect();
-        let total_words = 3 + n; // rev(2) + records + halt(1)
-        let bytes = build_ring((0, 0), &records, 0xC000, total_words);
+        let total_words = 4 + n; // rev(2) + records + halt(2)
+        let bytes = build_ring((0, 0), &records, HALT_CLEAN, total_words);
         let ring = decode_ring(&bytes).unwrap();
         assert_eq!(
             ring.records.len(),
@@ -286,12 +304,9 @@ fn capture_run_boundary_sizes() {
 
 #[test]
 fn capture_sda_bit_only_uses_bit_0() {
-    // CAPTURE word tag=00; SDA is bit 0. Bits [13:1] must be
-    // ignored by the decoder --- any other bit influencing the
-    // decoded sda value is a bug.
-    // Try a few words that all have bit 0 = 1 but garbage elsewhere.
+    // CAPTURE word tag=00; SDA is bit 0. Bits [13:1] must be ignored.
     for body in [0x0001u16, 0x3FFF, 0x2AAB, 0x1555] {
-        let bytes = build_ring((0, 0), &[body], 0xC000, 4);
+        let bytes = build_ring((0, 0), &[body], HALT_CLEAN, 5);
         let ring = decode_ring(&bytes).unwrap();
         assert_eq!(
             ring.records,
@@ -300,9 +315,8 @@ fn capture_sda_bit_only_uses_bit_0() {
              of [13:1]"
         );
     }
-    // And bit 0 = 0:
     for body in [0x0000u16, 0x3FFE, 0x2AAA, 0x1554] {
-        let bytes = build_ring((0, 0), &[body], 0xC000, 4);
+        let bytes = build_ring((0, 0), &[body], HALT_CLEAN, 5);
         let ring = decode_ring(&bytes).unwrap();
         assert_eq!(ring.records, vec![Record::Capture { sda: false }]);
     }
@@ -310,11 +324,8 @@ fn capture_sda_bit_only_uses_bit_0() {
 
 #[test]
 fn mark_timestamp_little_endian_lo_then_hi() {
-    // MARK is 3 words: header, ts_lo, ts_hi. The full 32-bit
-    // timestamp is `(ts_hi << 16) | ts_lo`. Pin the byte order to
-    // catch a future word-swap regression. We use a value whose
-    // halves are clearly distinct (0xCAFEBABE).
-    let bytes = build_ring((0, 0), &[0x8000, 0xBABE, 0xCAFE], 0xC000, 6);
+    // MARK is 3 words: header, ts_lo, ts_hi. Pin word order.
+    let bytes = build_ring((0, 0), &[0x8000, 0xBABE, 0xCAFE], HALT_CLEAN, 7);
     let ring = decode_ring(&bytes).unwrap();
     assert_eq!(
         ring.records,
@@ -328,10 +339,9 @@ fn mark_timestamp_little_endian_lo_then_hi() {
 #[test]
 fn mark_label_uses_low_byte_only() {
     // MARK header low 8 bits = label; high 6 bits (above tag) are
-    // reserved. Stuff garbage into [13:8] and check label decode
-    // is still just the low byte.
+    // reserved. Stuff garbage into [13:8] and check label decode.
     for header in [0x8042u16, 0xBF42, 0xA042] {
-        let bytes = build_ring((0, 0), &[header, 0, 0], 0xC000, 6);
+        let bytes = build_ring((0, 0), &[header, 0, 0], HALT_CLEAN, 7);
         let ring = decode_ring(&bytes).unwrap();
         let Record::Mark { label, .. } = ring.records[0] else {
             panic!("expected Mark");
@@ -342,36 +352,28 @@ fn mark_label_uses_low_byte_only() {
 
 #[test]
 fn ring_with_no_records_reports_full_gap_as_trailing_garbage() {
-    // 8-word ring: rev(2) + 5 garbage slots + halt(1). Our `build_ring`
-    // fills the gap with zeros; tag(0x0000) = 00 = CAPTURE, so the
-    // decoder will decode them all as `Capture { sda: false }`.
-    // This is the documented "trailing garbage" hazard --- pin it so
-    // a future strict-mode flip is loud.
-    let bytes = build_ring((0, 0), &[], 0xC000, 8);
+    // 8-word ring: rev(2) + 4 gap slots + halt(2). Zero-tagged
+    // slots decode as CAPTURE(sda=false) per the documented hazard.
+    let bytes = build_ring((0, 0), &[], HALT_CLEAN, 8);
     let ring = decode_ring(&bytes).unwrap();
     assert_eq!(
         ring.records.len(),
-        5,
-        "zero-tagged garbage decodes as CAPTURE per documented hazard \
-         (mole-loader/README.md §Trailing-garbage hazard); if this \
-         drops to 0, strict mode landed --- update the test and the \
-         README in the same PR"
+        4,
+        "zero-tagged garbage decodes as CAPTURE per documented hazard; \
+         if this drops to 0, strict mode landed --- update the test"
     );
     assert_eq!(ring.trailing_garbage_words, 0);
 }
 
 #[test]
 fn ring_decode_handles_megabyte_ring_in_bounded_time() {
-    // 1 MiB ring = 512 Ki words. The decoder must walk it linearly
-    // and not allocate quadratically. We don't time it; we just
-    // confirm it completes and reports the right structure.
+    // 1 MiB ring = 512 Ki 16-bit words. Confirm it completes.
     let total_words = 512 * 1024;
-    let bytes = build_ring((0, 0), &[0x0001], 0xC000, total_words);
+    let bytes = build_ring((0, 0), &[0x0001], HALT_CLEAN, total_words);
     let ring = decode_ring(&bytes).unwrap();
-    // 1 real capture, then (total_words - 4) zero-tagged "garbage"
-    // captures, then HALT. Our walker decodes zeros as captures
-    // because tag(0x0000) = 00.
-    assert_eq!(ring.records.len(), total_words - 3);
+    // 1 real capture + (total_words - 4) zero-tagged "garbage" captures
+    // (tag 0b00 = CAPTURE). 2 REVISION + 2 HALT = 4 overhead words.
+    assert_eq!(ring.records.len(), total_words - 4);
 }
 
 // ---------------------------------------------------------------------------
@@ -381,20 +383,15 @@ fn ring_decode_handles_megabyte_ring_in_bounded_time() {
 #[test]
 fn ring_decoder_does_not_silently_strip_a_prefix() {
     // A buffer that "looks like" a ring after skipping one word
-    // (i.e. someone concatenated a stray word) must be rejected,
-    // not silently aligned. We confirm by prepending two bytes
-    // that would re-frame the rest as a valid ring --- the
-    // decoder must use the new tail (offset == len-2) for HALT
-    // checking and reject when tag mismatches.
-    let inner = build_ring((0x0001, 0x0203), &[], 0xC000, 3);
+    // must be rejected, not silently aligned. Capability-gap pin.
+    let inner = build_ring((0x0001, 0x0203), &[], HALT_CLEAN, 4);
     let mut buf = vec![0xAA, 0xBB];
     buf.extend_from_slice(&inner);
     // Now tail bytes are still the HALT word from `inner`, so the
     // tail tag IS 0b11. The "REVISION" the decoder sees will be
-    // [0xAA, 0xBB, 0x01, 0x00] -> word_lo=0xBBAA, word_hi=0x0001.
-    // The decoder will accept this as a valid ring (no integrity
-    // beyond the tail tag). This is a *capability gap*: prefix
-    // tolerance.
+    // different. The decoder will accept this as a valid ring (no
+    // integrity beyond the tail tag). This is a *capability gap*:
+    // prefix tolerance.
     let ring = decode_ring(&buf).expect("decoder is currently tolerant");
     assert_ne!(
         ring.revision.patch, 0x0001,
@@ -418,9 +415,6 @@ fn revision_parser_rejects_empty_string_cleanly() {
 
 #[test]
 fn revision_parser_rejects_negative_components() {
-    // unsigned components: negatives must be rejected. The parser
-    // also rejects a leading `+` (libstd's `u8::from_str` would
-    // otherwise accept it), so "+1.0.0" is errored too.
     assert!("-1.0.0".parse::<Revision>().is_err());
     assert!("1.-1.0".parse::<Revision>().is_err());
     assert!("1.0.-1".parse::<Revision>().is_err());
@@ -435,24 +429,28 @@ fn revision_parser_rejects_whitespace() {
 }
 
 // ---------------------------------------------------------------------------
-// Cross-crate integration: assemble -> verify_frame -> decode words
+// Cross-crate integration: assemble -> verify_frame -> verify_program
 // ---------------------------------------------------------------------------
 
 #[test]
 fn assemble_then_verify_frame_round_trip() {
-    // The one place round-tripping is genuinely useful: it crosses
-    // the mole-asm / mole-loader boundary. If this ever breaks, the
-    // two crates have drifted on frame format.
+    // Crossing the mole-asm / mole-loader boundary: frame must round-
+    // trip through verify_frame. The returned words include the
+    // 2-word preamble (MAGIC + body_len).
     let frame = mole_asm::assemble_to_frame("HALT status=0\nHALT status=1\n", "<rt>").unwrap();
     let words = verify_frame(&frame).unwrap();
-    assert_eq!(words, vec![0x0000, 0x0080]);
+    // words[0] = MAGIC, words[1] = body_len(2), words[2..] = body.
+    assert_eq!(words[0], mole_abi::MAGIC);
+    assert_eq!(words[1], 2u32); // two HALT instructions
+    // Two HALT instructions: verify_program strips the preamble.
+    let (_ver, body) = mole_loader::verify_program(&words).expect("valid assembled frame");
+    assert_eq!(body.len(), 2);
 }
 
 #[test]
 fn assemble_to_frame_then_loader_error_is_frame_variant() {
     // Corrupt a frame produced by the assembler; the LoaderError
-    // variant must be Frame(_), not Ring(_) (which is the most
-    // common conflation hazard).
+    // variant must be Frame(_), not Ring(_).
     let mut frame = mole_asm::assemble_to_frame("HALT\n", "<t>").unwrap();
     let last = frame.len() - 1;
     frame[last] ^= 0xFF;
@@ -464,23 +462,119 @@ fn assemble_to_frame_then_loader_error_is_frame_variant() {
 }
 
 // ---------------------------------------------------------------------------
-// Format version mismatch (capability gap)
+// Format version / magic validation (§16.1, §16.2)
 // ---------------------------------------------------------------------------
 
 #[test]
-#[ignore = "blocked: adding a frame-format version field requires a \
-            coordinated change to the FPGA engine's loader FSM in \
-            fpga/Mole/ (it expects the existing [len, words, crc] \
-            wire layout; a host-only version prepend would break \
-            the hardware loop). Tracked as architect S1; needs to \
-            land together with the engine-side change. AGENTS.md \
-            §3.17 commits to bytecode-format stability once Phase 0 \
-            ships; pre-Phase-0 the format may break cleanly when \
-            both sides change in lockstep."]
-fn frame_format_version_mismatch_rejected() {
-    // Placeholder. Once the frame grows a 1-byte / 1-word format-
-    // version field, feeding the verifier a wrong version must
-    // produce a dedicated FrameError variant (not a CrcMismatch).
+fn verify_program_rejects_wrong_magic() {
+    // Build a frame whose word 0 has a bad low-u16 (magic field).
+    let mut words = vec![mole_abi::MAGIC, 1u32, 0u32];
+    words[0] = (mole_abi::MAGIC & 0xFFFF_0000) | 0x0000_1234; // wrong magic
+    let frame = build_frame(&words).unwrap();
+    let decoded_words = verify_frame(&frame).unwrap();
+    let err = mole_loader::verify_program(&decoded_words).unwrap_err();
+    assert!(
+        matches!(err, FrameError::MagicMismatch { .. }),
+        "wrong magic must produce MagicMismatch, got: {err:?}"
+    );
+}
+
+#[test]
+fn verify_program_rejects_wrong_version() {
+    // Build a frame with correct magic but wrong version (0x0001).
+    let mut words = vec![mole_abi::MAGIC, 1u32, 0u32];
+    words[0] = (0x0001u32 << 16) | (mole_abi::MAGIC_LO_U16 as u32); // version=1
+    let frame = build_frame(&words).unwrap();
+    let decoded_words = verify_frame(&frame).unwrap();
+    let err = mole_loader::verify_program(&decoded_words).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            FrameError::VersionMismatch {
+                found: 0x0001,
+                expected: 0x0002,
+            }
+        ),
+        "wrong version must produce VersionMismatch, got: {err:?}"
+    );
+}
+
+#[test]
+fn verify_program_accepts_correct_frame() {
+    let frame = mole_asm::assemble_to_frame("HALT status=0\n", "<t>").unwrap();
+    let words = verify_frame(&frame).unwrap();
+    let (ver, body) = mole_loader::verify_program(&words).unwrap();
+    assert_eq!(ver, mole_abi::FORMAT_VERSION);
+    assert_eq!(body.len(), 1);
+}
+
+// ---------------------------------------------------------------------------
+// Reserved-status-in-body scan (§16.4)
+// ---------------------------------------------------------------------------
+
+#[test]
+fn verify_program_rejects_halt_with_reserved_status_0x1d() {
+    // Build a HALT instruction with status=0x1D in the body.
+    // HALT encoding: [31:30]=01, [29:26]=0000, [7:3]=status, rest=0.
+    // HALT opcode at [31:26] = 0b01_0000 = 0x10.
+    // status=0x1D at [7:3]: 0x1D << 3 = 0xE8.
+    let halt_instr: u32 = (0b01_0000u32 << 26) | (0x1Du32 << 3);
+    let words = vec![mole_abi::MAGIC, 1u32, halt_instr];
+    let frame = build_frame(&words).unwrap();
+    let decoded = verify_frame(&frame).unwrap();
+    let err = mole_loader::verify_program(&decoded).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            FrameError::ReservedHaltStatusInBody {
+                pc: 0,
+                status: 0x1D,
+            }
+        ),
+        "reserved status 0x1D must be rejected, got: {err:?}"
+    );
+}
+
+#[test]
+fn verify_program_rejects_halt_with_reserved_status_0x1e() {
+    let halt_instr: u32 = (0b01_0000u32 << 26) | (0x1Eu32 << 3);
+    let words = vec![mole_abi::MAGIC, 1u32, halt_instr];
+    let frame = build_frame(&words).unwrap();
+    let decoded = verify_frame(&frame).unwrap();
+    let err = mole_loader::verify_program(&decoded).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            FrameError::ReservedHaltStatusInBody {
+                pc: 0,
+                status: 0x1E,
+            }
+        ),
+        "reserved status 0x1E must be rejected, got: {err:?}"
+    );
+}
+
+#[test]
+fn verify_program_accepts_halt_status_user_max_0x1c() {
+    // 0x1C is STATUS_USER_MAX; it must NOT be rejected.
+    let halt_instr: u32 = (0b01_0000u32 << 26) | (0x1Cu32 << 3);
+    let words = vec![mole_abi::MAGIC, 1u32, halt_instr];
+    let frame = build_frame(&words).unwrap();
+    let decoded = verify_frame(&frame).unwrap();
+    assert!(mole_loader::verify_program(&decoded).is_ok());
+}
+
+#[test]
+fn verify_program_accepts_halt_status_trap_0x1f() {
+    // 0x1F is STATUS_TRAP; the loader does NOT pre-reject it --- the
+    // engine emits it on malformed instructions and user programs
+    // should never emit it, but the loader spec only rejects
+    // 0x1D..=0x1E. STATUS_TRAP passes verify_program.
+    let halt_instr: u32 = (0b01_0000u32 << 26) | (0x1Fu32 << 3);
+    let words = vec![mole_abi::MAGIC, 1u32, halt_instr];
+    let frame = build_frame(&words).unwrap();
+    let decoded = verify_frame(&frame).unwrap();
+    assert!(mole_loader::verify_program(&decoded).is_ok());
 }
 
 // ---------------------------------------------------------------------------
@@ -489,20 +583,17 @@ fn frame_format_version_mismatch_rejected() {
 
 #[test]
 fn halt_mismatch_flag_is_sticky_across_all_status_codes() {
-    // §3.15: sticky flags (MISMATCH_FLAG etc.) are write-once until
-    // overwritten. The HALT word's `mismatch` bit reflects the
-    // sticky flag at HALT entry --- it must decode independently of
-    // the status code value. Loop over every status code with
-    // mismatch=1 and confirm the decoded HaltStatus carries it.
-    for status in 0u8..=0xF {
-        // 0xD and 0xE are rejected as reserved engine-trap codes
-        // (see T-009 tests below); skip them in the sweep so this
-        // test stays focused on the sticky-flag invariant.
-        if status == 0xD || status == 0xE {
+    // §3.15: sticky flags are write-once until overwritten. The HALT
+    // word's `mismatch` bit reflects the sticky flag at HALT entry
+    // independently of the status code. Skip reserved codes.
+    for status in 0u8..=halt::STATUS_TRAP {
+        if status == halt::STATUS_RESERVED_LOW || status == halt::STATUS_RESERVED_HIGH {
             continue;
         }
-        let halt: u16 = 0xC000 | (1 << 12) | ((status as u16) << 8);
-        let bytes = build_ring((0, 0), &[], halt, 3);
+        let halt_word = (halt::TAG_HALT << halt::TAG_SHIFT)
+            | (1 << halt::MISMATCH_BIT)
+            | ((status as u32) << halt::STATUS_SHIFT);
+        let bytes = build_ring((0, 0), &[], halt_word, 4);
         let ring = decode_ring(&bytes).unwrap();
         assert!(
             ring.halt.mismatch,
@@ -522,9 +613,7 @@ fn halt_mismatch_flag_is_sticky_across_all_status_codes() {
             mole-loader decoder will gain the matching fields once \
             the engine emits them."]
 fn all_four_sticky_flags_observable_in_decoded_ring() {
-    // Placeholder. When the engine grows additional sticky-flag
-    // bits in the HALT word (or a separate flag record), this test
-    // exercises the full set --- START, STOP, TIMEOUT, MISMATCH.
+    // Placeholder.
 }
 
 // ---------------------------------------------------------------------------
@@ -533,21 +622,15 @@ fn all_four_sticky_flags_observable_in_decoded_ring() {
 
 #[test]
 fn decoded_ring_equality_is_field_wise() {
-    // Two identical builds must compare equal; perturbing any
-    // single field must compare unequal. Catches a future PartialEq
-    // derivation regression.
-    let a: DecodedRing = decode_ring(&build_ring((0, 0), &[], 0xC000, 3)).unwrap();
-    let b = decode_ring(&build_ring((0, 0), &[], 0xC000, 3)).unwrap();
+    let a: DecodedRing = decode_ring(&build_ring((0, 0), &[], HALT_CLEAN, 4)).unwrap();
+    let b = decode_ring(&build_ring((0, 0), &[], HALT_CLEAN, 4)).unwrap();
     assert_eq!(a, b);
-    let c = decode_ring(&build_ring((1, 0), &[], 0xC000, 3)).unwrap();
+    let c = decode_ring(&build_ring((1, 0), &[], HALT_CLEAN, 4)).unwrap();
     assert_ne!(a, c);
 }
 
 #[test]
 fn crc_helper_re_export_matches_mole_asm_implementation() {
-    // The loader uses `mole_asm::frame::crc16_xmodem` directly;
-    // pin the published catalog value here too so a regression
-    // anywhere in the CRC path lights up *both* crates' suites.
     assert_eq!(crc16_xmodem(b"123456789"), 0x31C3);
     assert_eq!(crc16_xmodem(b""), 0x0000);
 }
@@ -555,29 +638,32 @@ fn crc_helper_re_export_matches_mole_asm_implementation() {
 // ---------------------------------------------------------------------------
 // T-008 / T-009 --- HALT word validation (F-HOST-001)
 //
-// INV-WIRE-HALT-RECORD: HALT word = [15:14]=11, [13]=overflow,
-//   [12]=mismatchAtHalt, [11:8]=status, [7:0]=0.
-// INV-NUM-STATUS-RESERVED: status 0x0..0xC caller-defined,
-//   0xD..0xF reserved for engine traps; today only 0xF is in use.
+// v0.2 HALT word layout (§11 lines 1458-1492):
+//   [31:30]=11 (tag), [29]=overflow, [28]=mismatch, [27:23]=status,
+//   [22:0]=0 (reserved). Status 0x00..=0x1C user, 0x1D..=0x1E
+//   reserved, 0x1F engine-trap.
 // ---------------------------------------------------------------------------
 
 /// Build a ring of exactly `DEFAULT_RING_BYTES` with a REVISION
-/// header at words 0..2, the supplied HALT word at the final slot,
-/// and the middle filled with tag-`01` reserved-tag words so the
-/// record-stream walker terminates immediately (rather than
-/// decoding ~4000 phantom CAPTUREs of zeroed slots).
-fn build_minimal_ring_with_halt(halt_word: u16) -> Vec<u8> {
+/// header at words 0..2, the supplied 32-bit HALT word at the final
+/// two 16-bit slots, and the middle filled with tag-`01` reserved-tag
+/// words so the record-stream walker terminates immediately.
+fn build_minimal_ring_with_halt(halt_word: u32) -> Vec<u8> {
     let total_words = DEFAULT_RING_BYTES / 2;
+    let halt_lo = (halt_word & 0xFFFF) as u16;
+    let halt_hi = (halt_word >> 16) as u16;
     let mut words = Vec::with_capacity(total_words);
-    words.push(0x0001); // revision lo (patch = 1)
-    words.push(0x0203); // revision hi (major=2, minor=3)
+    words.push(0x0001u16); // revision lo (patch = 1)
+    words.push(0x0203u16); // revision hi (major=2, minor=3)
     // Fill the gap with 0x4001 (tag 01 reserved). The walker
     // recognises tag 01 as "trailing garbage starts here" and
     // stops on the first slot, keeping the test cheap.
-    while words.len() < total_words - 1 {
+    while words.len() < total_words - 2 {
         words.push(0x4001);
     }
-    words.push(halt_word);
+    words.push(halt_lo);
+    words.push(halt_hi);
+    assert_eq!(words.len(), total_words);
     let mut bytes = Vec::with_capacity(total_words * 2);
     for w in words {
         bytes.push((w & 0xFF) as u8);
@@ -588,28 +674,36 @@ fn build_minimal_ring_with_halt(halt_word: u16) -> Vec<u8> {
 
 #[test]
 fn halt_reserved_bits_low_byte_rejected() {
-    // 0xC042 = tag=11, status=0, reserved=0x42
-    let ring = build_minimal_ring_with_halt(0xC042);
+    // Set bit 6 in the reserved [22:0] range.
+    // halt_word = 0xC000_0040 (tag=11, reserved bit 6 set).
+    let halt_word: u32 = HALT_CLEAN | 0x0000_0040;
+    let ring = build_minimal_ring_with_halt(halt_word);
     let r = decode_ring_strict(&ring, ring.len());
     assert!(
         matches!(
             r,
             Err(RingError::HaltReservedBitsSet {
-                halt_word: 0xC042,
-                reserved: 0x42,
-            })
+                halt_word: hw,
+                reserved: rb,
+            }) if hw == halt_word && rb == 0x0000_0040
         ),
-        "expected HaltReservedBitsSet {{ 0xC042, 0x42 }}, got {r:?}"
+        "expected HaltReservedBitsSet with reserved=0x40, got {r:?}"
     );
 }
 
 #[test]
 fn halt_reserved_bits_low_byte_rejected_across_patterns() {
-    // Sweep a small set of reserved-bit patterns; every non-zero
-    // value in [7:0] must trip the fail-fast check regardless of
-    // which bit is set.
-    for reserved in [0x01u8, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0x42, 0xFF] {
-        let halt_word = 0xC000 | (reserved as u16);
+    // Sweep a set of reserved-bit patterns; every non-zero value in
+    // [22:0] must trip the fail-fast check.
+    for reserved in [
+        0x0000_0001u32,
+        0x0000_0002,
+        0x0000_0040,
+        0x0000_0080,
+        0x0007_FFFF,
+        0x007F_FFFF,
+    ] {
+        let halt_word = HALT_CLEAN | reserved;
         let ring = build_minimal_ring_with_halt(halt_word);
         let r = decode_ring_strict(&ring, ring.len());
         assert!(
@@ -620,15 +714,17 @@ fn halt_reserved_bits_low_byte_rejected_across_patterns() {
                     reserved: rb,
                 }) if hw == halt_word && rb == reserved
             ),
-            "reserved={reserved:#04x}: expected HaltReservedBitsSet, got {r:?}"
+            "reserved={reserved:#010x}: expected HaltReservedBitsSet, \
+             got {r:?}"
         );
     }
 }
 
 #[test]
 fn halt_status_reserved_for_engine_traps_rejected() {
-    for status in [0xD_u8, 0xE_u8] {
-        let halt_word = 0xC000_u16 | ((status as u16) << 8);
+    // STATUS_RESERVED_LOW = 0x1D and STATUS_RESERVED_HIGH = 0x1E.
+    for status in [halt::STATUS_RESERVED_LOW, halt::STATUS_RESERVED_HIGH] {
+        let halt_word = halt_word_status(status);
         let ring = build_minimal_ring_with_halt(halt_word);
         let r = decode_ring_strict(&ring, ring.len());
         assert!(
@@ -645,24 +741,20 @@ fn halt_status_reserved_for_engine_traps_rejected() {
 }
 
 #[test]
-fn halt_status_engine_trap_0xf_still_decodes_with_trap_flag() {
-    // 0xF is the documented engine-trap code; the decoder must
-    // NOT reject it (it is part of the contract surface). It must
-    // surface as HaltStatus.status == 0xF and
-    // HaltStatus::is_engine_trap() == true.
-    let halt_word = 0xC000_u16 | (0xF_u16 << 8);
+fn halt_status_engine_trap_0x1f_still_decodes_with_trap_flag() {
+    // 0x1F is STATUS_TRAP; the decoder must NOT reject it.
+    let halt_word = halt_word_status(halt::STATUS_TRAP);
     let ring = build_minimal_ring_with_halt(halt_word);
-    let decoded = decode_ring_strict(&ring, ring.len()).expect("0xF must decode");
-    assert_eq!(decoded.halt.status, 0xF);
+    let decoded = decode_ring_strict(&ring, ring.len()).expect("0x1F must decode");
+    assert_eq!(decoded.halt.status, halt::STATUS_TRAP);
     assert!(decoded.halt.is_engine_trap());
 }
 
 #[test]
 fn halt_clean_status_zero_still_decodes_after_validation_lands() {
-    // Regression: the canonical "clean halt" word (0xC000) must
-    // still decode after the new HaltReservedBitsSet /
-    // HaltStatusReserved checks were added.
-    let ring = build_minimal_ring_with_halt(0xC000);
+    // Regression: the canonical "clean halt" (tag=11, status=0,
+    // reserved=0) must still decode after the HALT validation checks.
+    let ring = build_minimal_ring_with_halt(HALT_CLEAN);
     let decoded = decode_ring_strict(&ring, ring.len()).expect("clean HALT must decode");
     assert_eq!(
         decoded.halt,
@@ -678,9 +770,8 @@ fn halt_clean_status_zero_still_decodes_after_validation_lands() {
 fn halt_reserved_bits_rejected_before_reserved_status() {
     // A HALT word that violates BOTH invariants (reserved bits set
     // AND reserved status code) must be reported as
-    // HaltReservedBitsSet --- the structural check fires first by
-    // design, so callers see the more fundamental defect.
-    let halt_word = 0xC000_u16 | (0xD_u16 << 8) | 0x01;
+    // HaltReservedBitsSet --- the structural check fires first.
+    let halt_word = halt_word_status(halt::STATUS_RESERVED_LOW) | 0x0000_0001u32;
     let ring = build_minimal_ring_with_halt(halt_word);
     let r = decode_ring_strict(&ring, ring.len());
     assert!(

@@ -1,11 +1,5 @@
 //! CLI front-end for `mole-loader`.
 //!
-// FIXME(B6): mole-abi v0.2 rewrite changed DEFAULT_BAUD from 1_000_000
-//            to 2_000_000. The help text below and the doc comments in
-//            mole-loader/src/transport.rs still say "1 Mbaud". Update
-//            prose and --baud default-value text when B6 rewrites the
-//            loader for v0.2 frame and ring-record formats.
-//!
 //! Round-trip a `.mole.bin` artifact against a real Mole engine:
 //! verify the frame locally, ship it over UART, drain the result
 //! ring, decode it, print it.
@@ -13,14 +7,27 @@
 //! ```text
 //! mole-loader [OPTIONS] <FRAME>
 //!     -p, --port <PATH>                Serial port (e.g. /dev/ttyUSB0)
-//!     -b, --baud <RATE>                Baud rate [default: 1000000]
+//!     -b, --baud <RATE>                Baud rate [default: 2000000]
 //!         --ring-bytes <BYTES>         Result-ring size [default: 8192]
 //!         --expect-revision <X.Y.Z>    Assert engine revision
 //!         --timeout <SECS>             Per-op I/O timeout [default: 30]
 //!         --no-verify-frame            Skip CRC pre-flight
-//!         --dry-run                    Verify frame and exit
+//!         --dry-run                    Verify frame + program, exit 0
+//!         --validate-only              Validate frame + program, print
+//!                                      result, exit without transport
 //!         --dump-ring <PATH>           Save raw ring bytes
 //! ```
+//!
+//! ## Exit codes
+//!
+//! | Code | Meaning                                                    |
+//! |------|------------------------------------------------------------|
+//! | 0    | Success (program loaded and ran, or validation passed).    |
+//! | 1    | I/O or argument error; engine reported a non-clean halt.   |
+//! | 2    | Frame structure error (bad length, CRC, or empty program). |
+//! | 3    | Frame version mismatch (§16.2 dedicated exit code).        |
+//! | 4    | Frame magic mismatch (§16.1).                              |
+//! | 5    | Reserved HALT status in program body (§16.4).              |
 //!
 //! Pass `-` as `<FRAME>` to read from stdin.
 
@@ -35,8 +42,8 @@ use color_eyre::eyre::{Context, Result, eyre};
 use indicatif::{ProgressBar, ProgressStyle};
 
 use mole_loader::{
-    DEFAULT_BAUD, DEFAULT_RING_BYTES, DecodedRing, HaltStatus, Progress, Record, Revision,
-    Transport, decode_ring_strict, verify_frame,
+    DEFAULT_BAUD, DEFAULT_RING_BYTES, DecodedRing, FrameError, HaltStatus, Progress, Record,
+    Revision, Transport, decode_ring_strict, verify_frame,
 };
 
 /// Load a Mole program over UART and decode the engine's result ring.
@@ -45,22 +52,31 @@ use mole_loader::{
     name = "mole-loader",
     version,
     about,
-    long_about = "Ship a .mole.bin frame to a Mole bit-cycle engine over UART (1 Mbaud, \
-                  8N1, hardware RTS/CTS), wait for HALT, drain the result ring, and \
-                  decode its REVISION / CAPTURE / MARK / HALT records. Pass '-' as \
-                  FRAME to read from stdin."
+    long_about = "Ship a .mole.bin frame to a Mole bit-cycle engine over UART (2 Mbaud \
+                  default; use --baud 1000000 for the 16x fallback), 8N1, hardware \
+                  RTS/CTS), wait for HALT, drain the result ring, and decode its \
+                  REVISION / CAPTURE / MARK / HALT records. Pass '-' as FRAME to \
+                  read from stdin.\n\n\
+                  Exit codes:\n  \
+                  0  success (or --validate-only: program is valid)\n  \
+                  1  I/O / argument error; engine non-clean halt\n  \
+                  2  frame structure error (length, CRC, empty program)\n  \
+                  3  frame version mismatch (§16.2)\n  \
+                  4  frame magic mismatch (§16.1)\n  \
+                  5  reserved HALT status in program body (§16.4)"
 )]
 struct Cli {
     /// Path to the `.mole.bin` frame, or `-` to read from stdin.
     frame: PathBuf,
 
     /// Serial port path (e.g. `/dev/ttyUSB0`, `COM3`).
-    /// Required unless `--dry-run` is set.
+    /// Required unless `--dry-run` or `--validate-only` is set.
     #[arg(short = 'p', long = "port", value_name = "PATH")]
     port: Option<String>,
 
-    /// Baud rate. Default matches the Mole engine's WIRE_FORMAT.md
-    /// (1 Mbaud).
+    /// Baud rate. Default: 2 Mbaud (per WIRE_FORMAT.md).
+    /// Use 1000000 for the 16x oversampling fallback when 2 Mbaud
+    /// is not achievable on a particular host adapter.
     #[arg(short = 'b', long = "baud", default_value_t = DEFAULT_BAUD)]
     baud: u32,
 
@@ -68,10 +84,7 @@ struct Cli {
     /// matches `MoleConfig.resultRingByteCount` on the Verde build
     /// (4096 words = 8192 bytes), mirrored host-side as
     /// `mole_abi::RESULT_RING_BYTE_COUNT`. Must match the engine
-    /// bitstream: under-sized leaves the HALT word in the kernel
-    /// buffer and the next decode trips on a mid-ring record;
-    /// over-sized blocks the read on bytes the engine will never
-    /// send.
+    /// bitstream.
     #[arg(long = "ring-bytes", default_value_t = DEFAULT_RING_BYTES)]
     ring_bytes: usize,
 
@@ -86,16 +99,25 @@ struct Cli {
     timeout: u64,
 
     /// Skip the pre-flight CRC / length check on the input frame.
-    /// Intended for debugging deliberately malformed frames. The
-    /// engine will reject corrupt frames on its end regardless.
+    /// Intended for debugging deliberately malformed frames.
     #[arg(long = "no-verify-frame")]
     no_verify_frame: bool,
 
-    /// Verify the frame locally and exit without opening a serial
-    /// port. Useful for CI / smoke-testing artifacts in environments
-    /// without hardware.
+    /// Verify the frame and run all §16 validation checks locally,
+    /// then exit without opening a serial port. Useful for CI /
+    /// smoke-testing artifacts in environments without hardware.
+    /// Exit codes: 0=valid, 2=frame-error, 3=version-mismatch,
+    /// 4=magic-mismatch, 5=reserved-status.
     #[arg(long = "dry-run")]
     dry_run: bool,
+
+    /// Validate the frame and program (§16 checks) without any
+    /// transport interaction. Distinct from `--dry-run` in that it
+    /// always prints a structured result and uses the full exit-code
+    /// table (codes 2/3/4/5). Exits 0 when the program is safe to
+    /// load.
+    #[arg(long = "validate-only")]
+    validate_only: bool,
 
     /// Also write the raw drained ring bytes to this path
     /// (before decoding). Useful for archiving the raw evidence
@@ -110,7 +132,7 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
     if let Err(e) = color_eyre::install() {
         eprintln!("failed to install color-eyre: {e}");
-        return ExitCode::from(2);
+        return ExitCode::from(1);
     }
 
     match run(cli) {
@@ -119,6 +141,24 @@ fn main() -> ExitCode {
             eprintln!("mole-loader: {e:?}");
             ExitCode::from(1)
         }
+    }
+}
+
+/// Map a [`FrameError`] to one of the structured exit codes 2/3/4/5.
+///
+/// | Code | Error kind                               |
+/// |------|------------------------------------------|
+/// | 2    | structural (TooShort, LengthMismatch,    |
+/// |      | LengthOutOfRange, CrcMismatch)           |
+/// | 3    | VersionMismatch (§16.2)                  |
+/// | 4    | MagicMismatch   (§16.1)                  |
+/// | 5    | ReservedHaltStatusInBody (§16.4)         |
+fn frame_error_exit_code(err: &FrameError) -> u8 {
+    match err {
+        FrameError::VersionMismatch { .. } => 3,
+        FrameError::MagicMismatch { .. } => 4,
+        FrameError::ReservedHaltStatusInBody { .. } => 5,
+        _ => 2,
     }
 }
 
@@ -132,25 +172,56 @@ fn run(cli: Cli) -> Result<ExitCode> {
         display_source(&cli.frame)
     );
 
-    // ----------------------------------------------------- 2. Verify
-    if !cli.no_verify_frame {
-        let words = verify_frame(&frame_bytes).wrap_err("frame failed pre-flight verification")?;
-        eprintln!("verified frame: {} program words, CRC matches", words.len());
+    // ----------------------------------------------------- 2. Verify frame
+    let words_opt = if !cli.no_verify_frame {
+        match verify_frame(&frame_bytes) {
+            Ok(words) => {
+                eprintln!(
+                    "verified frame: {} total words (preamble + body), CRC matches",
+                    words.len()
+                );
+                Some(words)
+            }
+            Err(e) => {
+                eprintln!("mole-loader: frame pre-flight failed: {e}");
+                return Ok(ExitCode::from(frame_error_exit_code(&e)));
+            }
+        }
     } else {
-        eprintln!("warning: --no-verify-frame set; sending unverified bytes to engine");
+        eprintln!("warning: --no-verify-frame set; sending unverified bytes");
+        None
+    };
+
+    // ----------------------------------------------------- 3. §16 program check
+    // Run verify_program when we have words AND either --validate-only
+    // / --dry-run is set, or the frame was verified normally.
+    if let Some(ref words) = words_opt {
+        match mole_loader::verify_program(words) {
+            Ok((ver, body)) => {
+                eprintln!(
+                    "program validated: format version 0x{ver:04x}, \
+                     {} body word(s)",
+                    body.len()
+                );
+            }
+            Err(e) => {
+                eprintln!("mole-loader: program validation failed: {e}");
+                return Ok(ExitCode::from(frame_error_exit_code(&e)));
+            }
+        }
     }
 
-    // ----------------------------------------------------- 3. Dry-run exit
-    if cli.dry_run {
-        eprintln!("dry run: frame ok, not opening serial port");
+    // ----------------------------------------------------- 4. Validate-only / dry-run exit
+    if cli.validate_only || cli.dry_run {
+        eprintln!("validate-only: program ok, not opening serial port");
         return Ok(ExitCode::SUCCESS);
     }
 
-    // ----------------------------------------------------- 4. Open port
+    // ----------------------------------------------------- 5. Open port
     let port_path = cli.port.as_deref().ok_or_else(|| {
         eyre!(
-            "--port <PATH> is required when --dry-run is not set \
-             (e.g. --port /dev/ttyUSB0)"
+            "--port <PATH> is required when --dry-run / --validate-only \
+             are not set (e.g. --port /dev/ttyUSB0)"
         )
     })?;
     eprintln!(
@@ -163,7 +234,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
         .with_timeout(Duration::from_secs(cli.timeout))
         .wrap_err("failed to configure I/O timeout")?;
 
-    // ----------------------------------------------------- 5. Send frame
+    // ----------------------------------------------------- 6. Send frame
     let load_bar = make_progress_bar(frame_bytes.len() as u64, "load ");
     {
         let bar = load_bar.clone();
@@ -174,7 +245,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
     }
     load_bar.finish_with_message("done");
 
-    // ----------------------------------------------------- 6. Drain
+    // ----------------------------------------------------- 7. Drain
     let drain_bar = make_progress_bar(cli.ring_bytes as u64, "drain");
     let ring_bytes = {
         let bar = drain_bar.clone();
@@ -185,7 +256,7 @@ fn run(cli: Cli) -> Result<ExitCode> {
     };
     drain_bar.finish_with_message("done");
 
-    // ----------------------------------------------------- 7. Dump?
+    // ----------------------------------------------------- 8. Dump?
     if let Some(path) = &cli.dump_ring {
         fs::write(path, &ring_bytes)
             .wrap_err_with(|| format!("failed to write --dump-ring {}", path.display()))?;
@@ -196,15 +267,11 @@ fn run(cli: Cli) -> Result<ExitCode> {
         );
     }
 
-    // ----------------------------------------------------- 8. Decode
-    // Strict decode: the drainer is supposed to hand back exactly
-    // `cli.ring_bytes` bytes. Any deviation is a louder signal of a
-    // real problem (wrong --ring-bytes, dropped framing, stale kernel
-    // buffer) than the structural errors `decode_ring` alone catches.
+    // ----------------------------------------------------- 9. Decode
     let decoded =
         decode_ring_strict(&ring_bytes, cli.ring_bytes).wrap_err("failed to decode result ring")?;
 
-    // ----------------------------------------------------- 9. Optional REVISION check
+    // ---------------------------------------------------- 10. Optional REVISION check
     if let Some(expected) = cli.expect_revision {
         if decoded.revision != expected {
             return Err(eyre!(
@@ -214,10 +281,10 @@ fn run(cli: Cli) -> Result<ExitCode> {
         }
     }
 
-    // ----------------------------------------------------- 10. Render
+    // ---------------------------------------------------- 11. Render
     render_decoded(&decoded);
 
-    // ----------------------------------------------------- 11. Exit code
+    // ---------------------------------------------------- 12. Exit code
     if halt_indicates_failure(&decoded.halt) {
         Ok(ExitCode::from(1))
     } else {
@@ -318,7 +385,7 @@ fn render_decoded(ring: &DecodedRing) {
 /// Decide whether the engine reported a clean run.
 ///
 /// A "failure" is any of: non-zero caller status, sticky MISMATCH at
-/// HALT entry, ring overflow, or the engine-internal `0xF` trap.
+/// HALT entry, ring overflow, or the engine-internal `0x1F` trap.
 fn halt_indicates_failure(halt: &HaltStatus) -> bool {
     halt.status != 0 || halt.mismatch || halt.overflow || halt.is_engine_trap()
 }
@@ -370,7 +437,7 @@ mod tests {
     #[test]
     fn halt_indicates_failure_on_engine_trap() {
         let h = HaltStatus {
-            status: 0xF,
+            status: 0x1F,
             mismatch: false,
             overflow: false,
         };
@@ -381,5 +448,42 @@ mod tests {
     fn display_source_stdin_sentinel() {
         assert_eq!(display_source(Path::new("-")), "<stdin>");
         assert_eq!(display_source(Path::new("foo.mole.bin")), "foo.mole.bin");
+    }
+
+    #[test]
+    fn frame_error_exit_codes_are_correct() {
+        assert_eq!(
+            frame_error_exit_code(&FrameError::VersionMismatch {
+                found: 1,
+                expected: 2
+            }),
+            3
+        );
+        assert_eq!(
+            frame_error_exit_code(&FrameError::MagicMismatch {
+                found: 0,
+                expected: mole_abi::MAGIC
+            }),
+            4
+        );
+        assert_eq!(
+            frame_error_exit_code(&FrameError::ReservedHaltStatusInBody {
+                pc: 0,
+                status: 0x1D
+            }),
+            5
+        );
+        assert_eq!(
+            frame_error_exit_code(&FrameError::CrcMismatch {
+                computed: 0,
+                got: 1
+            }),
+            2
+        );
+        assert_eq!(frame_error_exit_code(&FrameError::TooShort { got: 0 }), 2);
+        assert_eq!(
+            frame_error_exit_code(&FrameError::LengthOutOfRange { len_words: 0 }),
+            2
+        );
     }
 }

@@ -19,3 +19,8 @@ mole-loader = { path = "../mole-loader" }
 clap.workspace = true
 color-eyre.workspace = true
 indicatif.workspace = true
+
+[dev-dependencies]
+mole-abi = { path = "../mole-abi" }
+mole-asm = { path = "../mole-asm" }
+mole-loader = { path = "../mole-loader" }

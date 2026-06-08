@@ -1,18 +1,11 @@
 //! Serial-port transport: ship a `.mole.bin` frame to a Mole engine
 //! and drain the resulting ring back.
 //!
-// FIXME(B6): mole-abi v0.2 rewrite changed DEFAULT_BAUD from 1_000_000
-//            to 2_000_000. The doc comment in this file and the CLI help
-//            text (mole-loader-cli/src/main.rs) still say "1 Mbaud".
-//            No compile break, but the semantic change must be reflected
-//            in docs and any test that asserts the specific baud value.
-//            B6 rewrites the loader for v0.2 frame and ring-record
-//            formats; update DEFAULT_BAUD prose in the same pass.
-//!
 //! # Wire contract recap
 //!
-//! - UART, default 1 Mbaud, 8N1, **mandatory hardware RTS/CTS flow
-//!   control** (see `fpga/Mole/WIRE_FORMAT.md` and
+//! - UART, default 2 Mbaud (per AGENTS preference; fallback 1 Mbaud
+//!   at 16× via FALLBACK_BAUD), 8N1, **mandatory hardware RTS/CTS
+//!   flow control** (see `fpga/Mole/WIRE_FORMAT.md` and
 //!   `fpga/Mole/src/sim/MoleTopFlowControlSim.scala`).
 //! - The host writes the frame bytes; the engine pulls them through
 //!   its loader FSM, gated by CTS.
@@ -45,10 +38,19 @@ use serialport::{DataBits, FlowControl, Parity, SerialPort, StopBits};
 
 use crate::error::{TransportError, TransportPhase};
 
-/// Default baud rate the Mole engine speaks (see
-/// `fpga/Mole/WIRE_FORMAT.md`). Re-exported from
+/// Default baud rate the Mole engine speaks: 2 Mbaud at 8×
+/// oversampling (see `fpga/Mole/WIRE_FORMAT.md`). Re-exported from
 /// [`mole_abi::DEFAULT_BAUD`] so host and engine share one source.
+/// When 2 Mbaud is not achievable on a particular host adapter,
+/// use [`FALLBACK_BAUD`] instead.
 pub const DEFAULT_BAUD: u32 = mole_abi::DEFAULT_BAUD;
+
+/// Fallback baud rate when [`DEFAULT_BAUD`] (2 Mbaud) is not viable.
+///
+/// 1 Mbaud at 16× oversampling. Re-exported from
+/// [`mole_abi::FALLBACK_BAUD`] so the CLI and library share one
+/// source.
+pub const FALLBACK_BAUD: u32 = mole_abi::FALLBACK_BAUD;
 
 /// Default per-operation I/O timeout. Big enough that a slow program
 /// run plus the ring drain can complete; small enough that a missing
@@ -69,7 +71,7 @@ pub const DEFAULT_RING_BYTES: usize = mole_abi::RESULT_RING_BYTE_COUNT;
 
 /// Maximum I/O chunk size for incremental writes / reads. Small
 /// enough to give `indicatif` a smooth animation; large enough that
-/// per-syscall overhead is negligible at 1 Mbaud.
+/// per-syscall overhead is negligible at 2 Mbaud.
 const IO_CHUNK_BYTES: usize = 256;
 
 /// Tick callback handed to [`Transport::send_frame`] /
@@ -410,5 +412,17 @@ mod tests {
         p.tick(64);
         p.tick(128);
         assert_eq!(*observed.borrow(), vec![0, 64, 128]);
+    }
+
+    #[test]
+    fn default_baud_matches_abi() {
+        // Keep the assertion behind the constant so it is not a
+        // brittle literal that needs updating when the ABI changes.
+        assert_eq!(DEFAULT_BAUD, mole_abi::DEFAULT_BAUD);
+    }
+
+    #[test]
+    fn fallback_baud_matches_abi() {
+        assert_eq!(FALLBACK_BAUD, mole_abi::FALLBACK_BAUD);
     }
 }
