@@ -2,98 +2,98 @@ package mole
 
 import spinal.core._
 import spinal.lib._
-import spinal.lib.pipeline._
+import spinal.lib.misc.pipeline._
 
 /** STATUS_TRAP constant (spec §11): engine trap status value 0x1F. */
 object StatusCode {
   val TRAP: Int = 0x1f
 }
 
-/** Stageables flowing through the F → D → R → X → W pipeline.
+/** Payloads flowing through the F → D → R → X → W pipeline.
   *
   * C.6 catalog: enough to support HALT (executes) and all other opcodes (trap
   * to STATUS_TRAP). C.7/C.8/C.9 will extend this catalog with WIRE / CTRL /
-  * DATA execution stageables.
+  * DATA execution payloads.
   */
 object PipeStageables {
 
   // ---- F → all subsequent stages ----------------------------------------
 
   /** Program counter of the fetched instruction (word address). */
-  val PC = Stageable(UInt(13 bits))
+  val PC = Payload(UInt(13 bits))
 
   /** Raw 32-bit instruction word from SPRAM. */
-  val INSTRUCTION = Stageable(Bits(32 bits))
+  val INSTRUCTION = Payload(Bits(32 bits))
 
   // ---- D → all subsequent stages ----------------------------------------
 
   /** 2-bit opcode group from bits [31:30]. */
-  val OPCODE_GROUP = Stageable(UInt(2 bits))
+  val OPCODE_GROUP = Payload(UInt(2 bits))
 
   /** 4-bit sub-opcode from bits [29:26]. */
-  val OPCODE_SUB = Stageable(UInt(4 bits))
+  val OPCODE_SUB = Payload(UInt(4 bits))
 
   /** True when the decoded opcode is CTRL.HALT (group=01, sub=0000). */
-  val IS_HALT = Stageable(Bool())
+  val IS_HALT = Payload(Bool())
 
   /** True when the decoded opcode must trap (any non-HALT in C.6). */
-  val IS_TRAP = Stageable(Bool())
+  val IS_TRAP = Payload(Bool())
 
   /** 5-bit halt status: extracted from instruction [7:3] for HALT, or
     * STATUS_TRAP (0x1F) for trap cases.
     */
-  val HALT_STATUS = Stageable(UInt(5 bits))
+  val HALT_STATUS = Payload(UInt(5 bits))
 
   /** Register A read address (for future WIRE/DATA opcodes). */
-  val READ_REG_A_ADDR = Stageable(UInt(3 bits))
+  val READ_REG_A_ADDR = Payload(UInt(3 bits))
 
   /** Register B read address (for future WIRE/DATA opcodes). */
-  val READ_REG_B_ADDR = Stageable(UInt(3 bits))
+  val READ_REG_B_ADDR = Payload(UInt(3 bits))
 
   /** True when the current instruction reads register A. */
-  val READS_REG_A = Stageable(Bool())
+  val READS_REG_A = Payload(Bool())
 
   /** True when the current instruction reads register B. */
-  val READS_REG_B = Stageable(Bool())
+  val READS_REG_B = Payload(Bool())
 
   /** True when the E-stage instruction is a stall-inducing load-use producer.
     * Always False in C.6.
     */
-  val IS_LOAD_USE = Stageable(Bool())
+  val IS_LOAD_USE = Payload(Bool())
 
   // ---- R → X/W stages ---------------------------------------------------
 
   /** Forwarded register-A value (combinational from RegFile port 0). */
-  val REG_A_VALUE = Stageable(Bits(32 bits))
+  val REG_A_VALUE = Payload(Bits(32 bits))
 
   /** Forwarded register-B value (combinational from RegFile port 1). */
-  val REG_B_VALUE = Stageable(Bits(32 bits))
+  val REG_B_VALUE = Payload(Bits(32 bits))
 
   // ---- X → W stage ------------------------------------------------------
 
   /** True when this instruction writes a register in W. False in C.6. */
-  val WRITES_REG = Stageable(Bool())
+  val WRITES_REG = Payload(Bool())
 
   /** Destination register address for the W-stage register write. */
-  val WRITE_REG_ADDR = Stageable(UInt(3 bits))
+  val WRITE_REG_ADDR = Payload(UInt(3 bits))
 
   /** Data to write to the destination register. */
-  val WRITE_REG_DATA = Stageable(Bits(32 bits))
+  val WRITE_REG_DATA = Payload(Bits(32 bits))
 
   /** True when X requests a halt (HALT or trap). */
-  val HALT_REQUEST = Stageable(Bool())
+  val HALT_REQUEST = Payload(Bool())
 
   /** True when X wants to push a word to the result ring. */
-  val RING_WRITE_VALID = Stageable(Bool())
+  val RING_WRITE_VALID = Payload(Bool())
 
   /** The 32-bit result-ring word to push (HALT word layout per spec §11). */
-  val RING_WRITE_DATA = Stageable(Bits(32 bits))
+  val RING_WRITE_DATA = Payload(Bits(32 bits))
 
   /** True when X requests a PC redirect. */
-  val PC_REDIRECT_VALID = Stageable(Bool())
+  val PC_REDIRECT_VALID = Payload(Bool())
 
   /** PC redirect target. */
-  val PC_REDIRECT_TARGET = Stageable(UInt(13 bits))
+  val PC_REDIRECT_TARGET = Payload(UInt(13 bits))
 }
 
 /** 5-stage (6-stage with F split into F1/F2) pipeline for the Mole v0.2
@@ -101,10 +101,14 @@ object PipeStageables {
   *
   * Stage topology: F1 (fetch request) → F2 (fetch response/latch) → D (decode)
   * → R (register read) → X (execute) → W (writeback). F1+F2 model the one-cycle
-  * SPRAM read latency without hiding it in haltIt().
+  * SPRAM read latency without hiding it in haltWhen().
   *
   * C.6 execution: HALT executes and pushes a HALT word to the result ring;
   * every other opcode traps to STATUS_TRAP (0x1F) with the same ring push.
+  *
+  * Pipeline framework: spinal.lib.misc.pipeline — 6 CtrlLinks (f1/f2/d/r/x/w),
+  * 5 StageLinks (registered M2S between each adjacent pair), 18 Payloads,
+  * assembled with Builder(f1, f2, d, r, x, w, f1f2, f2d, dr, rx, xw).
   *
   * Bus-shaped FSM idiom (AGENTS §"Bus-shaped FSM idiom"):
   *   - Bus driver registers are `Reg(Bool())`s at component scope.
@@ -233,31 +237,21 @@ case class EnginePipeline(cfg: MoleConfig) extends Component {
   io.ringWrite.payload.data := B(0, 32 bits)
 
   // --------------------------------------------------------------------------
-  // Pipeline construction
+  // Pipeline construction — spinal.lib.misc.pipeline
+  //
+  // Six CtrlLinks (one per pipeline stage) + five StageLinks (M2S registers
+  // between adjacent stages). Builder() assembles them all.
   // --------------------------------------------------------------------------
-  val pip = new Pipeline
 
-  // Six stages: F1 (fetch req), F2 (fetch resp/latch), D, R, X, W.
-  val sF1 = new Stage()(pip)
-  val sF2 = new Stage()(pip)
-  val sD = new Stage()(pip)
-  val sR = new Stage()(pip)
-  val sX = new Stage()(pip)
-  val sW = new Stage()(pip)
+  // Six stage control nodes.
+  val f1, f2, d, r, x, w = CtrlLink()
 
-  sF1.setCompositeName(this, "F1")
-  sF2.setCompositeName(this, "F2")
-  sD.setCompositeName(this, "D")
-  sR.setCompositeName(this, "R")
-  sX.setCompositeName(this, "X")
-  sW.setCompositeName(this, "W")
-
-  // Registered (M2S) connections between stages.
-  pip.connect(sF1, sF2)(Connection.M2S())
-  pip.connect(sF2, sD)(Connection.M2S())
-  pip.connect(sD, sR)(Connection.M2S())
-  pip.connect(sR, sX)(Connection.M2S())
-  pip.connect(sX, sW)(Connection.M2S())
+  // Five inter-stage registers (M2S = data + valid registers).
+  val f1f2 = StageLink(f1.down, f2.up)
+  val f2d = StageLink(f2.down, d.up)
+  val dr = StageLink(d.down, r.up)
+  val rx = StageLink(r.down, x.up)
+  val xw = StageLink(x.down, w.up)
 
   // --------------------------------------------------------------------------
   // F1: Fetch Request
@@ -265,7 +259,7 @@ case class EnginePipeline(cfg: MoleConfig) extends Component {
   // --------------------------------------------------------------------------
 
   // Drive the first stage valid: always trying to produce a fetch.
-  sF1.internals.input.valid := True
+  f1.up.valid := True
 
   // Drive spramRead from F1.
   io.spramRead.valid := fetchActive
@@ -274,13 +268,13 @@ case class EnginePipeline(cfg: MoleConfig) extends Component {
   // Stall F1 when:
   //   (a) not fetch-active (halted / not started / PC out of range), or
   //   (b) SPRAM not ready.
-  sF1.haltIt(!fetchActive || !io.spramRead.ready)
+  f1.haltWhen(!fetchActive || !io.spramRead.ready)
 
-  // latch PC used for the current fetch into the PC stageable.
-  sF1(PipeStageables.PC) := pcReg.resize(13 bits)
+  // Latch PC used for the current fetch into the PC payload.
+  f1.up(PipeStageables.PC) := pcReg.resize(13 bits)
 
   // Advance PC when a fetch fires.
-  when(sF1.isFiring) {
+  when(f1.down.isFiring) {
     pcReg := pcReg + 1
   }
 
@@ -291,59 +285,59 @@ case class EnginePipeline(cfg: MoleConfig) extends Component {
   // --------------------------------------------------------------------------
 
   // Halt F2 while waiting for the SPRAM response.
-  sF2.haltIt(sF2.valid && !io.spramResp.valid)
+  f2.haltWhen(f2.isValid && !io.spramResp.valid)
 
-  sF2(PipeStageables.INSTRUCTION) := io.spramResp.payload
+  f2.up(PipeStageables.INSTRUCTION) := io.spramResp.payload
 
   // --------------------------------------------------------------------------
   // D: Decode
   // --------------------------------------------------------------------------
 
-  val dInsn = sD(PipeStageables.INSTRUCTION)
+  val dInsn = d(PipeStageables.INSTRUCTION)
   val dGroup = dInsn(31 downto 30).asUInt
   val dSub = dInsn(29 downto 26).asUInt
 
-  sD(PipeStageables.OPCODE_GROUP) := dGroup
-  sD(PipeStageables.OPCODE_SUB) := dSub
+  d.up(PipeStageables.OPCODE_GROUP) := dGroup
+  d.up(PipeStageables.OPCODE_SUB) := dSub
 
   // CTRL.HALT: group=0b01 (1), sub=0b0000 (0)
   val dIsHalt = (dGroup === 1) && (dSub === 0)
-  sD(PipeStageables.IS_HALT) := dIsHalt
-  sD(PipeStageables.IS_TRAP) := !dIsHalt
+  d.up(PipeStageables.IS_HALT) := dIsHalt
+  d.up(PipeStageables.IS_TRAP) := !dIsHalt
 
   // HALT status from instruction [7:3]; override to STATUS_TRAP for traps.
   val dHaltStatus = dInsn(7 downto 3).asUInt
-  sD(PipeStageables.HALT_STATUS) := Mux(
+  d.up(PipeStageables.HALT_STATUS) := Mux(
     dIsHalt,
     dHaltStatus,
     U(StatusCode.TRAP, 5 bits)
   )
 
   // Register operand decoding (unused in C.6; stable for C.7+).
-  sD(PipeStageables.READ_REG_A_ADDR) := dInsn(25 downto 23).asUInt
-  sD(PipeStageables.READ_REG_B_ADDR) := dInsn(22 downto 20).asUInt
-  sD(PipeStageables.READS_REG_A) := False
-  sD(PipeStageables.READS_REG_B) := False
-  sD(PipeStageables.IS_LOAD_USE) := False
+  d.up(PipeStageables.READ_REG_A_ADDR) := dInsn(25 downto 23).asUInt
+  d.up(PipeStageables.READ_REG_B_ADDR) := dInsn(22 downto 20).asUInt
+  d.up(PipeStageables.READS_REG_A) := False
+  d.up(PipeStageables.READS_REG_B) := False
+  d.up(PipeStageables.IS_LOAD_USE) := False
 
   // --------------------------------------------------------------------------
   // R: Register Read
   // --------------------------------------------------------------------------
 
-  regFile.io.readAddr0 := sR(PipeStageables.READ_REG_A_ADDR)
-  regFile.io.readAddr1 := sR(PipeStageables.READ_REG_B_ADDR)
+  regFile.io.readAddr0 := r(PipeStageables.READ_REG_A_ADDR)
+  regFile.io.readAddr1 := r(PipeStageables.READ_REG_B_ADDR)
 
-  sR(PipeStageables.REG_A_VALUE) := regFile.io.readData0
-  sR(PipeStageables.REG_B_VALUE) := regFile.io.readData1
+  r.up(PipeStageables.REG_A_VALUE) := regFile.io.readData0
+  r.up(PipeStageables.REG_B_VALUE) := regFile.io.readData1
 
   // Stall R on load-use hazard (always 0 in C.6; wiring stays).
-  sR.haltWhen(regFile.io.loadUseStall)
+  r.haltWhen(regFile.io.loadUseStall)
 
-  // RegFile E-stage signals: driven from the X stage's stageables.
-  // We need to compute these combinationally from sX's current content.
-  regFile.io.eValid := sX.valid && sX(PipeStageables.WRITES_REG)
-  regFile.io.eWriteAddr := sX(PipeStageables.WRITE_REG_ADDR)
-  regFile.io.eIsLoadUse := sX(PipeStageables.IS_LOAD_USE)
+  // RegFile E-stage signals: driven from the X stage's current content.
+  // Use isValid for reads per API convention.
+  regFile.io.eValid := x.isValid && x(PipeStageables.WRITES_REG)
+  regFile.io.eWriteAddr := x(PipeStageables.WRITE_REG_ADDR)
+  regFile.io.eIsLoadUse := x(PipeStageables.IS_LOAD_USE)
 
   // --------------------------------------------------------------------------
   // X: Execute
@@ -351,47 +345,47 @@ case class EnginePipeline(cfg: MoleConfig) extends Component {
   // --------------------------------------------------------------------------
 
   // Register write intent (no writers in C.6).
-  sX(PipeStageables.WRITES_REG) := False
-  sX(PipeStageables.WRITE_REG_ADDR) := U(0, 3 bits)
-  sX(PipeStageables.WRITE_REG_DATA) := B(0, 32 bits)
+  x.up(PipeStageables.WRITES_REG) := False
+  x.up(PipeStageables.WRITE_REG_ADDR) := U(0, 3 bits)
+  x.up(PipeStageables.WRITE_REG_DATA) := B(0, 32 bits)
 
   // HALT or TRAP → issue halt request.
-  val xHaltOrTrap = sX(PipeStageables.IS_HALT) || sX(PipeStageables.IS_TRAP)
-  sX(PipeStageables.HALT_REQUEST) := xHaltOrTrap
+  val xHaltOrTrap = x(PipeStageables.IS_HALT) || x(PipeStageables.IS_TRAP)
+  x.up(PipeStageables.HALT_REQUEST) := xHaltOrTrap
 
   // Build HALT word (spec §11):
   //   [31:30]=11 [29]=overflow [28]=mismatch [27:23]=status [22:0]=0
-  val xStatus = sX(PipeStageables.HALT_STATUS)
+  val xStatus = x(PipeStageables.HALT_STATUS)
   val xHaltWord = B"11" ##
     ringOverflow.asBits ##
     mismatchFlagReg.asBits ##
     xStatus.asBits ##
     B(0, 23 bits)
 
-  sX(PipeStageables.RING_WRITE_VALID) := xHaltOrTrap
-  sX(PipeStageables.RING_WRITE_DATA) := xHaltWord
-  sX(PipeStageables.PC_REDIRECT_VALID) := xHaltOrTrap
-  sX(PipeStageables.PC_REDIRECT_TARGET) := sX(PipeStageables.PC)
+  x.up(PipeStageables.RING_WRITE_VALID) := xHaltOrTrap
+  x.up(PipeStageables.RING_WRITE_DATA) := xHaltWord
+  x.up(PipeStageables.PC_REDIRECT_VALID) := xHaltOrTrap
+  x.up(PipeStageables.PC_REDIRECT_TARGET) := x(PipeStageables.PC)
 
   // Stall X when ring write is back-pressured.
-  sX.haltWhen(sX(PipeStageables.RING_WRITE_VALID) && !io.ringWrite.ready)
+  x.haltWhen(x(PipeStageables.RING_WRITE_VALID) && !io.ringWrite.ready)
 
   // --------------------------------------------------------------------------
   // W: Writeback
   // --------------------------------------------------------------------------
 
   // Commit RegFile write (no writers in C.6; wiring stays for C.7+).
-  regFile.io.writeEnable := sW.isFiring && sW(PipeStageables.WRITES_REG)
-  regFile.io.writeAddr := sW(PipeStageables.WRITE_REG_ADDR)
-  regFile.io.writeData := sW(PipeStageables.WRITE_REG_DATA)
+  regFile.io.writeEnable := w.down.isFiring && w(PipeStageables.WRITES_REG)
+  regFile.io.writeAddr := w(PipeStageables.WRITE_REG_ADDR)
+  regFile.io.writeData := w(PipeStageables.WRITE_REG_DATA)
 
   // Commit ring push and advance ring pointer.
-  when(sW.isFiring && sW(PipeStageables.RING_WRITE_VALID)) {
+  when(w.down.isFiring && w(PipeStageables.RING_WRITE_VALID)) {
     io.ringWrite.valid := True
     io.ringWrite.payload.addr :=
       (U(resultBase, spramAddrWidth bits) +
         ringWrPtr.resize(spramAddrWidth bits)).resized
-    io.ringWrite.payload.data := sW(PipeStageables.RING_WRITE_DATA)
+    io.ringWrite.payload.data := w(PipeStageables.RING_WRITE_DATA)
     when(ringWrPtr < U(resultWordCount - 1, ringPtrWidth bits)) {
       ringWrPtr := ringWrPtr + 1
     } otherwise {
@@ -400,21 +394,31 @@ case class EnginePipeline(cfg: MoleConfig) extends Component {
   }
 
   // Commit halt.
-  when(sW.isFiring && sW(PipeStageables.HALT_REQUEST)) {
+  when(w.down.isFiring && w(PipeStageables.HALT_REQUEST)) {
     haltedReg := True
     // Status lives at [27:23] of the ring word (spec §11).
-    haltStatusReg := sW(PipeStageables.RING_WRITE_DATA)(27 downto 23).asUInt
+    haltStatusReg := w(PipeStageables.RING_WRITE_DATA)(27 downto 23).asUInt
   }
 
   // Stall W when ring write is back-pressured (commit point must not advance).
-  sW.haltWhen(sW(PipeStageables.RING_WRITE_VALID) && !io.ringWrite.ready)
+  w.haltWhen(w(PipeStageables.RING_WRITE_VALID) && !io.ringWrite.ready)
 
   // Flush pipeline on commit of a halt: squash F1/F2/D/R/X bubbles.
-  // haltedReg gates F1 from issuing new reads.
-  sW.flushIt(sW.isFiring && sW(PipeStageables.HALT_REQUEST))
+  // haltedReg gates F1 from issuing new reads after the flush resolves.
+  //
+  // CPU-style flush pattern (spinal.lib.misc.pipeline):
+  //   Component-scope `flush` register raised from W's HALT commit path;
+  //   all upstream CtrlLinks receive throwWhen(flush, usingReady=true).
+  val flush = False
+  when(w.down.isFiring && w(PipeStageables.HALT_REQUEST)) {
+    flush := True
+  }
+  for (upstream <- List(f1, f2, d, r, x)) {
+    upstream.throwWhen(flush, usingReady = true)
+  }
 
   // --------------------------------------------------------------------------
-  // Build
+  // Build — assemble all CtrlLinks and StageLinks.
   // --------------------------------------------------------------------------
-  pip.build()
+  Builder(f1, f2, d, r, x, w, f1f2, f2d, dr, rx, xw)
 }
