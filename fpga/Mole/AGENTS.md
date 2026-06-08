@@ -1,6 +1,6 @@
 # Mole/fpga/Mole --- AGENTS.md
 
-Project-specific conventions for the Mole v0 SpinalHDL bit-cycle
+Project-specific conventions for the Mole v0.2 SpinalHDL bit-cycle
 engine. The repo-wide rules in `../../AGENTS.md` still apply; this
 file adds Mole-engine-only ones.
 
@@ -46,58 +46,101 @@ rule in `../../AGENTS.md` §3.4.
 
 ## ISA is a stable contract
 
-The **15-opcode ISA** --- `EMIT_BIT`, `EMIT_QUARTER`,
-`STRETCH_SCL`, `WAIT_ON`, `SET_BUS_MODE`, `SAMPLE_BIT_ON_SCL`,
-`DRIVE_BIT_ON_SCL`, `JMP`, `BRANCH_ON`, `HALT`, `MARK`,
-`LOAD_TIMING`, `LOAD_LOOP`, `DEC_BRANCH`, `SET_ROLE` (plus 17
-reserved opcode slots in the 5-bit opcode field at `[15:11]`)
---- and its **16-bit fixed-width** encoding are externally
-visible: the host compiler emits exactly this byte format and
-every deployed Mole decodes it. Reordering opcodes, shrinking
-fields, repurposing reserved bits, moving the flag triple off
-`[2:0]`, *or changing the fixed 16-bit width* (to 8-bit, to
-variable-length, or anything else) is a wire-format break that
-requires a bytecode-version bump. See ROADMAP §"ISA" and
-§"Encoding width" for the per-opcode field budget and why
-narrower widths were rejected.
+The **in-development format is v0.2**: a **25-opcode ISA** (32-bit
+fixed-width instructions, opcode `{group[31:30], sub[29:26]}`; 9
+WIRE + 8 CTRL + 8 DATA opcodes; LOOP group fully reserved) with
+magic `0x0002_4D4C` and format version `0x0002`. The normative
+encoding is `docs/MOLE-0.2-SPEC.md`; that file wins whenever
+this AGENTS.md and the spec disagree.
 
-If the ISA truly needs to change:
+### Pre-Phase-0 mutability caveat
+
+Until the first tagged Phase 0 encoder release the v0.2 wire
+format is **NOT** a stable contract --- any field may change
+without a version bump. See root `AGENTS.md` §3.17 and
+`docs/MOLE-0.2-SPEC.md` §1 and §10 for the full caveat.
+
+The v0 engine (15 opcodes, 16-bit instructions) ran on real
+hardware through Step 17 (TMP108 I2C closed). Phase C reworks
+the engine to v0.2 in-place; do not treat v0 encoding as the
+current target. **v0 bytecode is not cross-compatible with the
+v0.2 engine or encoder.**
+
+### Post-tagging discipline (applies once Phase 0 tags)
+
+Once Phase 0 ships its first tagged encoder release, bytecode is
+a stable contract between the host compiler and every deployed
+Mole. From that point:
+
 1. Bump a bytecode-format version word at the top of every
-   program.
-2. Update `ROADMAP.md` §"Layer 0 --- the bit-cycle engine".
+   program when the encoding changes.
+2. Update `ROADMAP.md` §"Layer 0 --- the bit-cycle engine" and
+   `docs/MOLE-0.2-SPEC.md`.
 3. Update the host encoder (the Rust `mole-asm` crate at
-   `../../mole-asm/`, with its CLI front-end in `../../mole-asm-cli/`)
-   in the same PR.
+   `../../mole-asm/`, with its CLI front-end in
+   `../../mole-asm-cli/`) in the same PR.
+4. Mark the commit `feat(engine)!:` with a `BREAKING CHANGE:`
+   footer. See root `AGENTS.md` §6.
 
-The `FLAG_CLEAR`, `CAPTURE_RUN`, `CALL`, and `RET` opcodes are
-**reserved for v0.5** (see ROADMAP §"Reserved for v0.5"). Do not
-implement them in v0 even if a step seems to want them --- add
-the requirement to the v0.5 plan instead. Likewise the
-`tx_symbol = 11` encoding is reserved for the v0.5 `raw_override`
-escape and must not be repurposed.
+### Opcode group table (v0.2)
 
-(Slots `0xC` and `0xD` --- originally reserved for `WAIT_ADDRESSED`
-and `MISMATCH_CLEAR` --- graduated to v0 as `LOAD_LOOP` and
-`DEC_BRANCH`. See ROADMAP §"Reserved for v0.5" for the
-displacement rationale.)
+| Group | Bits `[31:30]` | Live opcodes | Notes                   |
+|-------|----------------|--------------|-------------------------|
+| WIRE  | `0b00`         | 9            | Emit/sample/stretch     |
+| CTRL  | `0b01`         | 8            | Branch, wait, config    |
+| DATA  | `0b10`         | 8            | ALU, load, move         |
+| LOOP  | `0b11`         | 0            | Fully reserved          |
 
-**`EMIT_BYTE` (and any byte-level / word-level emit) is
-explicitly rejected**, not deferred. See ROADMAP §"Why no
-byte-level emit". A "byte" on the wire is 9 bits, not 8, and the
-9th is structurally different from the first 8 --- the SDK
-encodes `write-byte` as a macro that expands to 9 `EMIT_BIT`s
-with correct per-bit operands. Treat any review that re-proposes
-`EMIT_BYTE` as a sign the SDK needs a new macro, not the engine
-a new opcode.
+Full sub-opcode lists are in `docs/MOLE-0.2-SPEC.md` §4.
 
-**Putting `tx_symbol` into `BUS_MODE` is also explicitly
-rejected.** `BUS_MODE` owns the symbol-to-electrical *mapping*
-(slow state: changes a handful of times per transaction). The
-bitstream carries the *value* (fast data: per-bit). Folding the
-value into the mapping turns every bit-level driver flip into a
-`SET_BUS_MODE` churn and defeats the point of having a per-bit
-field at all. See ROADMAP §"Why SDA does *not* live in
+### Retired v0 vocabulary (do not reintroduce)
+
+The v0 ISA used unsuffixed `EMIT_BIT`, `EMIT_QUARTER`, and
+`STRETCH_SCL`; a fused `DEC_BRANCH`; dedicated `LOAD_LOOP` and
+`MARK` opcodes at specific slot numbers; and a 16-bit instruction
+width with opcode at `[15:11]`. All of these are retired in v0.2:
+
+- `EMIT_BIT` / `EMIT_QUARTER` / `STRETCH_SCL` → replaced by
+  explicit `_IMM` / `_REG` variants. The unsuffixed names are
+  not live opcodes in v0.2; the assembler rejects them.
+- `DEC_BRANCH` → retired. Use separate `DEC Rx` followed by
+  `BRANCH_ON REG_ZERO, <label>`. There are no `LCR0`/`LCR1`
+  dedicated loop-counter registers; R6 is just a GP register
+  conventionally used for loops.
+- `LOAD_LOOP n` is **assembler sugar** for `LOAD_IMM R6, n`
+  (spec §12.3). It is a legal mnemonic in source. It does NOT
+  correspond to a hardware opcode; do not add one.
+- 16-bit instruction width and opcode at `[15:11]` are retired.
+  v0.2 is 32-bit fixed; opcode is `{group[31:30], sub[29:26]}`.
+
+### EMIT_BYTE and byte-level emits
+
+`EMIT_BYTE` is a **live opcode in v0.2** (WIRE group, sub
+`0b0100`). It shifts out R7[7:0] MSB first with full SCL pulses,
+then clocks an ACK/NAK slot with `hiz` SDA, applying
+`expect`/`mask`/`capture` to that ninth bit. See spec §5.5.
+
+Any review proposing a higher-level byte emit beyond what §5.5
+already defines should be treated as a sign the SDK needs a new
+macro, not the engine a new opcode.
+
+### tx_symbol and BUS_MODE are separate
+
+**`tx_symbol` into `BUS_MODE` is explicitly rejected.**
+`BUS_MODE` owns the symbol-to-electrical *mapping* (slow state:
+changes a handful of times per transaction). The bitstream
+carries the *value* (fast data: per-bit). Folding the value into
+the mapping turns every bit-level driver flip into a
+`SET_BUS_MODE` churn. See ROADMAP §"Why SDA does *not* live in
 `BUS_MODE`" for the full asymmetry argument.
+
+### Reserved for v0.5
+
+`FLAG_CLEAR`, `CAPTURE_RUN`, `CALL`, and `RET` are reserved for
+v0.5 (see ROADMAP §"Reserved for v0.5"). `FLAG_CLEAR` is now
+**live in v0.2** (CTRL sub `0b0101`); the remaining three are
+still v0.5 reserved. The `tx_symbol = 0b11` encoding is reserved
+for the v0.5 `raw_override` escape and must not be repurposed.
 
 ## Quarter-bit is the timing unit on the wire
 
@@ -107,70 +150,83 @@ cycles per quarter-bit at runtime (for pp / od / i2c frequency
 selection); `SET_BUS_MODE` picks which of those divider words is
 active. There is no sub-quarter-bit timing knob.
 
+**Fabric frequency targets.** On iCE40 UP5K the target
+`engineClk` for v0.2 is **48 MHz** (Phase C bring-up target).
+The v0 engine achieved **24 MHz** on UP5K --- that is the
+_previous_ target, now historical. The `uartClk` domain runs at
+24 MHz regardless of `engineClk`. See `docs/MOLE-0.2-SPEC.md`
+§2 for the clock-domain table.
+
 This means:
-- Every state in the bit-cycle FSM advances on a quarter-bit
-  boundary --- no half-bit, no "between quarters" state.
-- `EMIT_BIT` carries the **canonical bit shape** for all 4
-  quarters: SCL low / low / high / high (engine-generated, not
-  in the bitstream), SDA held at the bit's `tx_symbol`. A
-  single-cycle pad-boundary output pipeline on SDA only (SCL is
-  unpipelined) gives every SDA transition --- bit-to-bit,
-  between EMIT_QUARTERs, idle release --- a one-fabric-cycle lag
-  behind the corresponding SCL change. That is the `tHD;DAT`
-  data-hold; see ROADMAP §"Canonical EMIT_BIT shape" for the
-  spec rationale and the LPI2C / FlexComm motivation. The
-  `tx_symbol` is decoded against the active `BUS_MODE`
-  (dominant → OD-low or PP-drive-0; recessive → OD-release or
-  PP-drive-1; hiz → driver-off). The SDK emits one `EMIT_BIT`
-  per wire bit and never has to reason about the SCL waveform.
-- **Stretch-aware Q2 entry on controller-role `EMIT_BIT`.** The
-  engine auto-syncs to slave-stretched SCL at the Q1→Q2 boundary:
-  if `observer.sclSampled` is low when the engine would have
-  advanced to Q2, it pauses the `QuarterBitTimer` and spins in a
-  wait branch *inside* `emitBitState` (gated by an inline
-  `waitingForStretch` register, not a dedicated FSM state ---
-  the inline shape was needed to close 24 MHz timing) until SCL
-  releases or `MoleConfig.stretchTimeoutCycles` fabric cycles
-  elapse (default 2^20 ≈ 44 ms at 24 MHz, counted in a 21-bit
+- Every state in the bit-cycle pipeline advances on a
+  quarter-bit boundary --- no half-bit, no "between quarters"
+  state.
+- `EMIT_BIT_IMM` / `EMIT_BIT_REG` carry the **canonical bit
+  shape** for all 4 quarters: SCL low / low / high / high
+  (engine-generated, not in the bitstream), SDA held at the
+  bit's `tx_symbol`. A single-cycle pad-boundary output
+  pipeline on SDA only (SCL is unpipelined) gives every SDA
+  transition --- bit-to-bit, between EMIT_QUARTERs, idle
+  release --- a one-fabric-cycle lag behind the corresponding
+  SCL change. That is the `tHD;DAT` data-hold; see ROADMAP
+  §"Canonical EMIT_BIT shape" for the spec rationale and the
+  LPI2C / FlexComm motivation. The `tx_symbol` is decoded
+  against the active `BUS_MODE` (dominant → OD-low or
+  PP-drive-0; recessive → OD-release or PP-drive-1; hiz →
+  driver-off). The SDK emits one `EMIT_BIT_IMM` per wire bit
+  and never has to reason about the SCL waveform.
+- **Stretch-aware Q2 entry on controller-role `EMIT_BIT_*`.**
+  The engine auto-syncs to slave-stretched SCL at the Q1→Q2
+  boundary: if `observer.sclSampled` is low when the engine
+  would have advanced to Q2, it pauses the `QuarterBitTimer`
+  and spins in a wait branch *inside* the X stage's WIRE-bearer
+  execute path (gated by an inline `waitingForStretch` register,
+  not a dedicated pipeline stage --- the inline shape was needed
+  to close Fmax, matching the v0 finding) until SCL releases or
+  `MoleConfig.stretchTimeoutCycles` fabric cycles elapse
+  (default 2^20 ≈ 22 ms at 48 MHz, counted in a 21-bit
   countdown with a pipelined zero-comparator). PP-class
   `BUS_MODE` slaves that stretch are treated as compliance
-  violations: immediate HALT `0xD`, no wait. The guard is
-  bypassed in target role (`!roleReg`), and `EMIT_QUARTER` /
-  `STRETCH_SCL` are untouched (user retains literal-wire-shape
-  control / forced-stretch semantics). See ROADMAP §"Stretch-
-  aware Q2 entry" for the wire contract.
-- **SCL is engine-generated during `EMIT_BIT`, bitstream-
-  controlled during `EMIT_QUARTER`.** This is the only path to
-  per-quarter SCL control; `EMIT_BIT`'s bitstream does not carry
-  an SCL drive field. The engine's `SclWaveformGen` reads
-  `BUS_MODE.mode[2]` to choose OD-release vs PP-high for the
-  high half of every `EMIT_BIT`. In target role the engine
+  violations: immediate HALT with status `STATUS_TRAP`, no
+  wait. The guard is bypassed in target role (`!roleReg`), and
+  `EMIT_QUARTER_IMM` / `EMIT_QUARTER_REG` / `STRETCH_SCL_*`
+  are untouched (user retains literal-wire-shape control /
+  forced-stretch semantics). See ROADMAP §"Stretch-aware Q2
+  entry" for the wire contract.
+- **SCL is engine-generated during `EMIT_BIT_*`, bitstream-
+  controlled during `EMIT_QUARTER_*`.** This is the only path
+  to per-quarter SCL control; `EMIT_BIT_*`'s bitstream does not
+  carry an SCL drive field. The engine's `SclWaveformGen` reads
+  `BUS_MODE.mode[1]` to choose OD-release vs PP-high for the
+  high half of every `EMIT_BIT_*`. In target role the engine
   releases SCL entirely and slaves to the external clock; the
-  controller-side opcodes (`EMIT_BIT`, `EMIT_QUARTER`) are
+  controller-side opcodes (`EMIT_BIT_*`, `EMIT_QUARTER_*`) are
   replaced by `SAMPLE_BIT_ON_SCL` / `DRIVE_BIT_ON_SCL` which
   pace off external SCL edges.
 - Glitch injection (and any other per-quarter deviation from the
   canonical shape, including SCL glitches) happens by emitting 4
-  explicit `EMIT_QUARTER`s in place of one `EMIT_BIT`. The engine
-  itself stays glitch-free --- the bitstream encodes the shape.
-  Target-role lint: `EMIT_QUARTER` with `scl_symbol = recessive`
-  is rejected by the SDK under PP-class `BUS_MODE` (would
-  request PP-drive-1 of SCL); `dominant` (pull low: stretch,
-  fuzz) and `hiz` (release) are always legal.
-- `EMIT_BIT` and `EMIT_QUARTER` coexist deliberately: see the
-  ISA-contract section above and ROADMAP §"Why not
+  explicit `EMIT_QUARTER_IMM`s in place of one `EMIT_BIT_IMM`.
+  The engine itself stays glitch-free --- the bitstream encodes
+  the shape. Target-role lint: `EMIT_QUARTER_IMM` with
+  `scl=recessive` is rejected by the SDK under PP-class
+  `BUS_MODE` (would request PP-drive-1 of SCL); `dominant`
+  (pull low: stretch, fuzz) and `hiz` (release) are always
+  legal.
+- `EMIT_BIT_*` and `EMIT_QUARTER_*` coexist deliberately: see
+  the ISA-contract section above and ROADMAP §"Why not
   `EMIT_QUARTER`-only?" for the asymmetry that justifies keeping
   both.
-- **`EMIT_QUARTER` is the escape hatch, not the workhorse.** It
-  exists for the bounded set of non-canonical wire shapes ---
+- **`EMIT_QUARTER_*` is the escape hatch, not the workhorse.**
+  It exists for the bounded set of non-canonical wire shapes ---
   Start / Stop / Repeated Start, HDR data bits, compliance
-  violations (setup/hold violations, SCL/SDA glitches, early/late
-  release), and optional bus-idle waits. A typical I3C SDR write
-  is ~4 % `EMIT_QUARTER`, ~96 % `EMIT_BIT`. If a code review
-  surfaces a program *dominated* by `EMIT_QUARTER`, that is a
-  signal the SDK macro layer is missing an abstraction, not that
-  the ISA grain is wrong. See ROADMAP §"When to use EMIT_QUARTER"
-  for the enumerated use cases and the not-used-for list.
+  violations (setup/hold violations, SCL/SDA glitches,
+  early/late release), and optional bus-idle waits. A typical
+  I3C SDR write is ~4 % `EMIT_QUARTER_*`, ~96 % `EMIT_BIT_*`.
+  If a code review surfaces a program *dominated* by
+  `EMIT_QUARTER_*`, that is a signal the SDK macro layer is
+  missing an abstraction, not that the ISA grain is wrong. See
+  ROADMAP §"When to use EMIT_QUARTER" for the enumerated use
+  cases and the not-used-for list.
 
 ## Open-drain primitive: custom `MoleBus`, not `ReadableOpenDrain`
 
@@ -215,9 +271,10 @@ in `BUS_MODE`):
 | `i2c`, `i3c-OD`       | NMOS on  → `(1, 0)`  | both off → `(0, 0)`       | `(0, 0)` |
 | `i3c-PP`, `hdr-ddr`   | NMOS on  → `(1, 0)`  | PMOS on  → `(0, 1)`       | `(0, 0)` |
 
-In OD modes `recessive` and `hiz` are electrically indistinguishable
-(both produce `(0, 0)` and the external pull-up wins). In PP modes
-`recessive` actively drives high; `hiz` is genuine driver-off.
+In OD modes `recessive` and `hiz` are electrically
+indistinguishable (both produce `(0, 0)` and the external
+pull-up wins). In PP modes `recessive` actively drives high;
+`hiz` is genuine driver-off.
 
 Three rules:
 - The engine drives low or drives high based on the symbol
@@ -244,19 +301,32 @@ The engine reports back to the host:
 - The mismatch flag set by the most recent `EMIT_*` against its
   expect mask.
 - `MARK` records (label + implicit timestamp).
-- `HALT` status code.
+- `HALT` status word.
 
 That is the whole result-ring contract.
 
-Result-ring layout (canonical reference: `WIRE_FORMAT.md`
-§"Frame layout (engine -> host: result drain)" and `TODO.md`
-Step 11 "Result-ring format"): the `REVISION` word lives at
-offset 0 (low word, high word, little-endian per 16-bit ring
-grain); the record stream follows, made of CAPTURE records
-(`tag = 00`, 1 word) and MARK records (`tag = 10`, 3 words);
-the HALT status word (`tag = 11`) sits at `resultLimit` as a
+Result-ring records (canonical reference:
+`docs/MOLE-0.2-SPEC.md` §11 for the HALT word; result-ring
+CAPTURE/MARK/HALT record format is unchanged from v0 ---
+see `mole-abi/src/lib.rs`): the `REVISION` word lives at offset 0
+(low word, high word, little-endian per 16-bit ring grain); the
+record stream follows, made of CAPTURE records (`tag = 00`, 1
+word) and MARK records (`tag = 10`, 3 words); the HALT status
+word (`tag = 11`) is a **32-bit** record at `resultLimit` as a
 reserved slot that overflowing records can never overwrite.
-Overflow and recovery semantics live in `WIRE_FORMAT.md` §7.
+The HALT word layout is:
+
+```text
+[31:30] tag      = 0b11
+[29]    overflow (sticky overflow latch)
+[28]    mismatch (snapshot of MISMATCH_FLAG at halt entry)
+[27:23] status   (5 bits, 0x00..0x1F; 0x1F = engine trap)
+[22: 0] reserved
+```
+
+See spec §11 for the full ABI constants. Overflow and recovery
+semantics: result-ring overflow latches into the HALT word's
+`[29]` bit; records written after overflow are dropped.
 
 ## Bus-shaped FSM idiom
 
@@ -303,11 +373,11 @@ Reading the states top-to-bottom gives the bus waveform.
 
 ### Compile-time toggles via Scala `if`, not Spinal `when`
 
-Optional features keyed off `MoleConfig` (e.g. capture-ring depth,
-WAIT-SCL-RELEASE wired-in vs gated out) use a Scala-time `if` so
-the optional logic disappears entirely from the synthesised
-design when the toggle is `false`. A Spinal `when(...)` would
-still emit the gating and the sense wire.
+Optional features keyed off `MoleConfig` (e.g. capture-ring
+depth, WAIT-SCL-RELEASE wired-in vs gated out) use a Scala-time
+`if` so the optional logic disappears entirely from the
+synthesised design when the toggle is `false`. A Spinal
+`when(...)` would still emit the gating and the sense wire.
 
 **Exception: `MoleConfig.role`.** Role is the one `MoleConfig`
 field that intentionally departs from this convention. It is the
@@ -321,6 +391,18 @@ than the LUT savings a Scala-time strip would have bought. Other
 `MoleConfig` fields keep the Scala-`if` discipline; do not
 generalise the runtime-register pattern to them without an
 equivalent justification.
+
+**Pipeline framework note (Phase C onward).** The v0.2 engine
+is built on `spinal.lib.pipeline.Pipeline` with 5 stages
+(F/D/R/X/W). The three sub-rules above still bind: registered
+drivers per stage, no per-stage combinational drives onto the bus
+pins, no `releaseAll()`-shaped helpers. The pipeline framework
+does NOT relax the bus-shaped FSM idiom --- it just changes how
+state is held between stages (`Stageable[T]` slots instead of
+state-machine register declarations). The stretch-aware Q1→Q2
+guard remains an inline guard on the X stage's WIRE-bearer
+execute path (NOT a dedicated pipeline stage), preserving the
+v0 Fmax finding documented in the v0 engine source.
 
 ## REVISION word convention
 
@@ -357,5 +439,14 @@ When closing a step:
 ## Hardware bring-up gating
 
 Sim-only completion does not equal step done for any step whose
-hint says it ships hardware. The MCXA-as-DUT bring-up (Phase 3)
-is the gate for declaring v0 done --- not the final smoke sim.
+hint says it ships hardware.
+
+**v0 silicon status.** Step 17 (TMP108 I2C) closed against v0
+silicon. Step 18 (MCXA268 I3C target soak) is now planned to
+close under v0.2 in Phase C.11; it is not a gate for calling v0
+done --- v0 silicon is retired. Reopen Step 18 with v0.2 framing
+when Phase C.11 arrives.
+
+**v0.2 gate.** The v0.2 engine acceptance gate is Phase C.11
+(MCXA268 I3C target soak under v0.2). Do not declare v0.2 done
+before that step closes on real hardware.
