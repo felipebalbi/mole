@@ -83,7 +83,9 @@ fn flag_triple(expect: bool, mask: bool, capture: bool) -> u32 {
 /// reserved encoding `0b11` and `raw_mode` is false.
 fn check_tx(name: &str, tx: u8, raw_mode: bool) -> Result<(), String> {
     if tx > 3 {
-        return Err(format!("{name}: tx symbol must be 0..3, got {tx}"));
+        return Err(format!(
+            "E-RNG-001: {name}: tx symbol must be 0..3, got {tx}"
+        ));
     }
     if tx == 0b11 && !raw_mode {
         return Err(format!(

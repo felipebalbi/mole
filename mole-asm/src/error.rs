@@ -89,7 +89,10 @@ pub enum AsmError {
     /// (including the 2-word preamble).
     // FIXME(B5): update limit to use mole_abi::MAX_PROGRAM_WORDS + 2
     // once B5 adds PREAMBLE_WORDS.
-    #[error("frame must contain 1..=8194 total words (8192 body + 2 preamble), got {word_count}")]
+    #[error(
+        "E-FRM-001: frame must contain 1..=8194 total words \
+         (8192 body + 2 preamble), got {word_count}"
+    )]
     FrameTooLarge {
         /// Total word count (preamble + body) that was rejected.
         word_count: usize,

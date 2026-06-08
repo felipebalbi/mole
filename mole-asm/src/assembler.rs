@@ -175,7 +175,7 @@ fn try_split_label(body: &str) -> Option<(&str, &str)> {
 
 fn parse_int(tok: &str, loc: &SourceLocation) -> Result<i64> {
     if tok.is_empty() {
-        return Err(AsmError::range(loc, "empty numeric literal"));
+        return Err(AsmError::range(loc, "E-RNG-001: empty numeric literal"));
     }
     let (negative, body) = match tok.strip_prefix('-') {
         Some(rest) => (true, rest),
@@ -511,19 +511,19 @@ fn resolve_flag_triple(
     if !matches!(expect_str.as_str(), "0" | "1" | "X") {
         return Err(AsmError::operand(
             loc,
-            format!("expect must be 0|1|X, got '{expect_str}'"),
+            format!("E-OP-005: expect must be 0|1|X, got '{expect_str}'"),
         ));
     }
     if !matches!(mask_str.as_str(), "0" | "1") {
         return Err(AsmError::operand(
             loc,
-            format!("mask must be 0|1, got '{mask_str}'"),
+            format!("E-OP-002: mask must be 0|1, got '{mask_str}'"),
         ));
     }
     if !matches!(capture_str.as_str(), "0" | "1") {
         return Err(AsmError::operand(
             loc,
-            format!("capture must be 0|1, got '{capture_str}'"),
+            format!("E-OP-002: capture must be 0|1, got '{capture_str}'"),
         ));
     }
 
@@ -723,15 +723,20 @@ fn find_emit_byte_pair(
 
 /// Parse an integer without a SourceLocation (used for pairing check).
 fn parse_int_raw(tok: &str) -> std::result::Result<i64, ()> {
-    let clean: String = tok.chars().filter(|&c| c != '_').collect();
+    let (negative, body) = match tok.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, tok),
+    };
+    let clean: String = body.chars().filter(|&c| c != '_').collect();
     let s = clean.as_str();
-    if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
-        i64::from_str_radix(hex, 16).map_err(|_| ())
+    let val = if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        i64::from_str_radix(hex, 16).map_err(|_| ())?
     } else if let Some(bin) = s.strip_prefix("0b").or_else(|| s.strip_prefix("0B")) {
-        i64::from_str_radix(bin, 2).map_err(|_| ())
+        i64::from_str_radix(bin, 2).map_err(|_| ())?
     } else {
-        s.parse::<i64>().map_err(|_| ())
-    }
+        s.parse::<i64>().map_err(|_| ())?
+    };
+    Ok(if negative { -val } else { val })
 }
 
 // -----------------------------------------------------------------------

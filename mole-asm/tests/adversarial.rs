@@ -1121,3 +1121,94 @@ fn emit_byte_pairing_accepts_equated_flag_clear_mask() {
                HALT\n";
     assert!(assemble(src, "<inline>").is_ok());
 }
+
+// ---------------------------------------------------------------------------
+// Phase B3 reviewer fixes (M1 / M2 / n1 / n4)
+// ---------------------------------------------------------------------------
+
+// --- M1: E-RNG-001 prefix on empty numeric literal -----------------------
+
+#[test]
+fn empty_numeric_literal_emits_e_rng_001() {
+    // parse_int("") must produce E-RNG-001: empty numeric literal.
+    // Triggered via HALT status=<empty-value>.
+    let err = assemble("HALT status=\n", "<inline>").expect_err("must fail on empty value");
+    let s = format!("{err}");
+    assert!(
+        s.contains("E-RNG-001"),
+        "expected E-RNG-001 for empty literal, got: {s}"
+    );
+}
+
+// --- n4: identical path confirmed via HALT status= -----------------------
+
+#[test]
+fn halt_status_empty_value_emits_e_rng_001() {
+    let err = assemble("HALT status=\n", "<inline>").expect_err("must fail");
+    let s = format!("{err}");
+    assert!(s.contains("E-RNG-001"), "expected E-RNG-001, got: {s}");
+}
+
+// --- M1: E-OP-005 prefix on bad expect value -----------------------------
+
+#[test]
+fn bad_expect_value_emits_e_op_005() {
+    // expect= must be 0, 1, or X; anything else is E-OP-005.
+    let err = assemble("EMIT_BIT_IMM tx=dom expect=2\n", "<inline>")
+        .expect_err("must fail on bad expect value");
+    let s = format!("{err}");
+    assert!(
+        s.contains("E-OP-005"),
+        "expected E-OP-005 for bad expect value, got: {s}"
+    );
+}
+
+// --- M1: E-OP-002 prefix on bad mask value --------------------------------
+
+#[test]
+fn bad_mask_value_emits_e_op_002() {
+    // mask= must be 0 or 1; anything else is E-OP-002.
+    let err = assemble("EMIT_BIT_IMM tx=dom mask=2\n", "<inline>")
+        .expect_err("must fail on bad mask value");
+    let s = format!("{err}");
+    assert!(
+        s.contains("E-OP-002"),
+        "expected E-OP-002 for bad mask value, got: {s}"
+    );
+}
+
+// --- M1: E-OP-002 prefix on bad capture value ----------------------------
+
+#[test]
+fn bad_capture_value_emits_e_op_002() {
+    // capture= must be 0 or 1; anything else is E-OP-002.
+    let err = assemble("EMIT_BIT_IMM tx=dom capture=2\n", "<inline>")
+        .expect_err("must fail on bad capture value");
+    let s = format!("{err}");
+    assert!(
+        s.contains("E-OP-002"),
+        "expected E-OP-002 for bad capture value, got: {s}"
+    );
+}
+
+// --- M2: parse_int_raw handles negative hex/bin literals -----------------
+
+#[test]
+fn flag_clear_neg_hex_raises_e_op_009_not_e_wire_003() {
+    // Before the fix, parse_int_raw("-0x11") failed → FLAG_CLEAR appeared
+    // un-paired → E-WIRE-003.  After the fix it parses to -17 which is
+    // out of the 0..31 range → E-OP-009.
+    let src = "EMIT_BYTE expect=0 mask=1\n\
+               FLAG_CLEAR -0x11\n\
+               HALT\n";
+    let err = assemble(src, "<inline>").expect_err("must fail");
+    let s = format!("{err}");
+    assert!(
+        s.contains("E-OP-009"),
+        "expected E-OP-009 (FLAG_CLEAR range), got: {s}"
+    );
+    assert!(
+        !s.contains("E-WIRE-003"),
+        "should NOT raise E-WIRE-003: {s}"
+    );
+}
