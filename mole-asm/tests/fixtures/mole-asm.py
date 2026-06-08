@@ -1,759 +1,1140 @@
 #!/usr/bin/env python3
-"""mole-asm --- the golden moleasm assembler.
+"""mole-asm --- golden moleasm assembler (Mole v0.2 ISA).
 
-Reads a `.moleasm` source file and emits raw 16-bit little-endian bytecode
-into a sibling `.molecode` file. With `--frame` it also writes a framed
-`.mole.bin` (len + words + CRC-16/XMODEM) ready to drop onto the
-iCEbreaker UART at 1 Mbaud.
+Reads a ``.moleasm`` source file and emits raw 32-bit little-endian
+bytecode into a sibling ``.molecode`` file.  With ``--frame`` it also
+writes a framed ``.mole.bin`` (len-in-words u16 + program bytes +
+CRC-16/XMODEM u16) ready to drop onto the Mole UART.
 
-This is the *reference* implementation that the Rust `mole-asm` crate
-(at `../../../mole-asm/`, with its CLI front-end at
-`../../../mole-asm-cli/`) is diffed against. Every line of grammar
-here lines up with one of:
+This is the *reference oracle* that the Rust ``mole-asm`` crate
+(at ``../../../mole-asm/``, CLI at ``../../../mole-asm-cli/``) is
+diffed against byte-for-byte.  The encoding in this file follows
+``docs/MOLE-0.2-SPEC.md`` (25 live opcodes, 32-bit fixed-width
+instructions, 6-bit opcode space = {group[31:30], sub[29:26]}).
 
-    AGENTS.md  §3.16    moleasm syntax (locked)
-    ROADMAP.md §"Example: I2C write-one-byte in moleasm"  conventions
-    fpga/Mole/src/hw/Instruction.scala                     encoder oracle
+Reference:
+  docs/MOLE-0.2-SPEC.md   -- normative ISA and wire-format spec
+  mole-asm/src/encoder.rs  -- Rust encoder (matches this file)
+  mole-asm/src/assembler.rs-- Rust assembler (grammar reference)
+  mole-asm/src/symbols.rs  -- symbol tables (same constants)
 
-The instruction-word encoder layer mirrors `Instruction.scala`'s `encode`
-byte-for-byte; the round-trip suite in `__main__` asserts both the
-already-handed-out `.mole.bin` blobs (`first-light`, `tmp108`) and the
-ROADMAP worked example.
-
-CLI:
+CLI::
 
     python mole-asm.py [-h] [--frame] [-o OUT] INPUT.moleasm
+    python mole-asm.py           # no args: runs self-check suite
 
-Defaults output to `INPUT.molecode` next to the input. `--frame` adds
-`INPUT.mole.bin` alongside, framed and ready for UART.
+Running with no args regenerates fixture bytecode files in this
+directory and runs the full self-check suite; exits 0 on success.
 
-Running this file as `__main__` (no args) regenerates the three bundled
-`.moleasm` programs into `.molecode` + `.mole.bin` in this directory and
-runs the full self-check suite.
+Encoding note: FIXME(B5): replace hard-coded magic/version/max-words
+constants with mole_abi crate values once B5 freezes the ABI.
 """
 
 from __future__ import annotations
 
 import argparse
-import re
+import struct
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable, Iterable, Optional
-
-# ===========================================================================
-# Opcode positions (mirrors Opcode.position in Instruction.scala)
-#
-# Wire format: 5-bit opcode at [15:11], 11-bit payload at [10:0]. Slots
-# 0x00..0x0D are v0; 0x0E (FLAG_CLEAR) and 0x0F (CAPTURE_RUN) are
-# reserved-v0.5; 0x10 is SET_ROLE (added with the 5-bit opcode widening);
-# 0x11..0x1F are reserved for v0.5+.
-# ===========================================================================
-
-OP_HALT = 0x00
-OP_EMIT_BIT = 0x01
-OP_EMIT_QUARTER = 0x02
-OP_STRETCH_SCL = 0x03
-OP_WAIT_ON = 0x04
-OP_BRANCH_ON = 0x05
-OP_JMP = 0x06
-OP_SET_BUS_MODE = 0x07
-OP_LOAD_TIMING = 0x08
-OP_MARK = 0x09
-OP_SAMPLE_BIT = 0x0A
-OP_DRIVE_BIT = 0x0B
-OP_LOAD_LOOP = 0x0C
-OP_DEC_BRANCH = 0x0D
-# 0x0E (FLAG_CLEAR) and 0x0F (CAPTURE_RUN) are reserved v0.5; reach
-# them via `.dw` if you really must.
-OP_SET_ROLE = 0x10
-# 0x11..0x1F are reserved v0.5+; reachable via `.dw` only.
+from typing import Dict, List, Optional, Tuple
 
 
-# ===========================================================================
-# Named symbol tables (lower-case canonical, mirrors Instruction.scala)
-# ===========================================================================
+# ---------------------------------------------------------------------------
+# Wire-format preamble constants  (§10, §16)
+# FIXME(B5): replace with mole_abi::MAGIC / FORMAT_VERSION /
+#            MAX_PROGRAM_WORDS once B5 updates mole-abi.
+# ---------------------------------------------------------------------------
 
-# TxSymbol.position --- per-line drive operand for EMIT_BIT, EMIT_QUARTER,
-# DRIVE_BIT_ON_SCL. `reserved` (0b11) is held for v0.5 raw_override; the
-# assembler refuses to emit it directly --- use `.dw` if you really need it.
-TX_SYMBOLS: dict[str, int] = {
-    "dominant": 0b00,
-    "dom": 0b00,
+PREAMBLE_MAGIC: int = 0x0002_4D4C   # bytes on wire: 4C 4D 02 00
+MAX_PROGRAM_WORDS: int = 8192        # §10 / §16
+
+
+# ---------------------------------------------------------------------------
+# Group / sub-opcode constants  (§4)
+# ---------------------------------------------------------------------------
+
+GROUP_WIRE: int = 0b00
+GROUP_CTRL: int = 0b01
+GROUP_DATA: int = 0b10
+GROUP_LOOP: int = 0b11   # entirely reserved in v0.2
+
+# WIRE sub-opcodes
+S_EMIT_BIT_IMM:     int = 0b0000
+S_EMIT_BIT_REG:     int = 0b0001
+S_EMIT_QUARTER_IMM: int = 0b0010
+S_EMIT_QUARTER_REG: int = 0b0011
+S_EMIT_BYTE:        int = 0b0100
+S_SAMPLE_BIT_ON_SCL: int = 0b0101
+S_DRIVE_BIT_ON_SCL: int = 0b0110
+S_STRETCH_SCL_IMM:  int = 0b0111
+S_STRETCH_SCL_REG:  int = 0b1000
+
+# CTRL sub-opcodes
+S_HALT:         int = 0b0000
+S_BRANCH_ON:    int = 0b0001
+S_WAIT_ON:      int = 0b0010
+S_SET_BUS_MODE: int = 0b0011
+S_SET_ROLE:     int = 0b0100
+S_FLAG_CLEAR:   int = 0b0101
+S_MARK:         int = 0b0110
+S_LOAD_TIMING:  int = 0b0111
+
+# DATA sub-opcodes
+S_LOAD_IMM: int = 0b0000
+S_MOV:      int = 0b0001
+S_ADD_IMM:  int = 0b0010
+S_DEC:      int = 0b0011
+S_AND_IMM:  int = 0b0100
+S_OR_IMM:   int = 0b0101
+S_XOR_IMM:  int = 0b0110
+S_SHIFT:    int = 0b0111
+
+# SHIFT direction constants
+SHIFT_LEFT:  int = 0  # arith=0, dir=0
+SHIFT_RIGHT: int = 1  # arith=0, dir=1
+SHIFT_ARIGHT: int = 2  # arith=1, dir=1
+
+
+# ---------------------------------------------------------------------------
+# Named symbol tables  (mirrors mole-asm/src/symbols.rs)
+# ---------------------------------------------------------------------------
+
+# tx_symbol vocabulary (§2, §3).
+# dominant=0b00, recessive=0b01, hiz=0b10, reserved=0b11 (raw-only).
+# Short forms dom/rec accepted.  Stored lowercase; callers lowercase input.
+TX_SYMBOLS: Dict[str, int] = {
+    "dominant":  0b00,
+    "dom":       0b00,
     "recessive": 0b01,
-    "rec": 0b01,
-    "hiz": 0b10,
+    "rec":       0b01,
+    "hiz":       0b10,
+    # NOTE: "reserved" absent here; raw/ mode adds 0b11 explicitly.
 }
 
-# BusMode wire values (defaultEncoding "busModeWire" in Instruction.scala).
-# Non-sequential by design --- see ROADMAP §"Bus mode register".
-BUS_MODES: dict[str, int] = {
-    "i2c": 0,
-    "i3c-od": 1,
-    "i3c-pp": 6,
-    "hdr-ddr": 7,
+# BUS_MODE wire values (§9).  RENUMBERED from v0:
+#   i2c=0, i3c-OD=1, i3c-PP=2, hdr-ddr=3
+# Stored lowercase with hyphens; callers lowercase input.
+BUS_MODES: Dict[str, int] = {
+    "i2c":     0,
+    "i3c-od":  1,
+    "i3c-pp":  2,
+    "hdr-ddr": 3,
 }
 
-# CondCode.position --- shared namespace for BRANCH_ON and WAIT_ON.
-# Note: ROADMAP §"Unified condition codes" lists `NEVER` at code 1, but the
-# Scala implementation has `MISMATCH` at 1 and no `NEVER`. The Scala wins
-# (it's what the engine decodes); the ROADMAP table needs a doc fix.
-COND_CODES: dict[str, int] = {
-    "ALWAYS": 0x0,
-    "MISMATCH": 0x1,
-    "NOT_MISMATCH": 0x2,
-    "START_SEEN": 0x3,
-    "STOP_SEEN": 0x4,
-    "SDA_LOW": 0x5,
-    "SDA_HIGH": 0x6,
-    "SCL_HIGH": 0x7,
-    "TIMEOUT": 0x8,
-    "NOT_TIMEOUT": 0x9,
+# Condition-code namespace shared by BRANCH_ON and WAIT_ON (§6).
+# Codes 0-11 live; 12-15 reserved.
+# Stored UPPERCASE; callers uppercase input.
+COND_CODES: Dict[str, int] = {
+    "ALWAYS":       0,
+    "MISMATCH":     1,
+    "NOT_MISMATCH": 2,
+    "START_SEEN":   3,
+    "STOP_SEEN":    4,
+    "SDA_LOW":      5,
+    "SDA_HIGH":     6,
+    "SCL_HIGH":     7,
+    "TIMEOUT":      8,
+    "NOT_TIMEOUT":  9,
+    "REG_ZERO":     10,
+    "NOT_REG_ZERO": 11,
 }
 
-# LOAD_TIMING register aliases. `timingRegs(busModeReg[1:0])` is the
-# active register, so each BUS_MODE maps to one of the four:
-#   i2c     wire 0b000 -> mode[1:0]=00 -> reg 0  (i2c_freq)
-#   i3c-OD  wire 0b001 -> mode[1:0]=01 -> reg 1  (i3c_od_freq)
-#   i3c-PP  wire 0b110 -> mode[1:0]=10 -> reg 2  (i3c_pp_freq)
-#   hdr-DDR wire 0b111 -> mode[1:0]=11 -> reg 3  (hdr_ddr_freq)
-TIMING_REG_ALIASES: dict[str, int] = {
-    "i2c_freq": 0,
-    "i3c_od_freq": 1,
-    "i3c_pp_freq": 2,
-    "hdr_ddr_freq": 3,
-}
-
-
-# Loop-counter register aliases for LOAD_LOOP / DEC_BRANCH. One bit on
-# the wire (lcr0 -> 0, lcr1 -> 1); the [9:8] pad above stays reserved
-# for a future 4-LCR widening with no wire-format break.
-LOOP_REG_ALIASES: dict[str, int] = {
-    "lcr0": 0,
-    "lcr1": 1,
-}
-
-
-# SET_ROLE role aliases. One bit on the wire (controller -> 0,
-# target -> 1); the [9:0] pad stays reserved for future role-mode
-# extensions.
-ROLE_ALIASES: dict[str, int] = {
+# SET_ROLE named operands (§5.14).
+ROLE_NAMES: Dict[str, int] = {
     "controller": 0,
-    "target": 1,
+    "target":     1,
 }
 
-
-# Mnemonic dispatch (UPPER CASE). Maps to a per-opcode operand-parse +
-# encoder function; populated below the function definitions.
-MNEMONICS: set[str] = {
-    "HALT",
-    "EMIT_BIT",
-    "EMIT_QUARTER",
-    "STRETCH_SCL",
-    "WAIT_ON",
-    "BRANCH_ON",
-    "JMP",
-    "SET_BUS_MODE",
-    "LOAD_TIMING",
-    "MARK",
-    "SAMPLE_BIT_ON_SCL",
-    "DRIVE_BIT_ON_SCL",
-    "LOAD_LOOP",
-    "DEC_BRANCH",
-    "SET_ROLE",
+# SHIFT direction keywords (§5.25).
+SHIFT_DIRS: Dict[str, int] = {
+    "left":   SHIFT_LEFT,
+    "right":  SHIFT_RIGHT,
+    "aright": SHIFT_ARIGHT,
 }
 
-# Reserved-v0.5 mnemonics; assembler rejects them and points the user at
-# `.dw` for raw-word injection. Names mirror Opcode case names. Slots
-# 0xC / 0xD (formerly WAIT_ADDRESSED / MISMATCH_CLEAR) graduated to v0
-# as LOAD_LOOP / DEC_BRANCH; only the remaining reservations are listed.
-RESERVED_V05_MNEMONICS: set[str] = {
-    "FLAG_CLEAR",
-    "CAPTURE_RUN",
-}
+# All live mnemonic names (uppercase canonical).  Sugar forms included.
+MNEMONICS = frozenset([
+    # WIRE group
+    "EMIT_BIT_IMM", "EMIT_BIT_REG",
+    "EMIT_QUARTER_IMM", "EMIT_QUARTER_REG",
+    "EMIT_BYTE",
+    "SAMPLE_BIT_ON_SCL", "DRIVE_BIT_ON_SCL",
+    "STRETCH_SCL_IMM", "STRETCH_SCL_REG",
+    # CTRL group
+    "HALT", "BRANCH_ON", "WAIT_ON",
+    "SET_BUS_MODE", "SET_ROLE",
+    "FLAG_CLEAR", "MARK", "LOAD_TIMING",
+    # DATA group
+    "LOAD_IMM", "MOV",
+    "ADD_IMM", "DEC",
+    "AND_IMM", "OR_IMM", "XOR_IMM",
+    "SHIFT",
+    # Sugar forms
+    "JMP", "LOAD_LOOP",
+])
 
-# Names the user cannot redefine via labels or `.equ`.
-RESERVED_NAMES: set[str] = (
-    set(MNEMONICS)
-    | set(RESERVED_V05_MNEMONICS)
-    | set(TX_SYMBOLS)
-    | set(BUS_MODES)
-    | set(COND_CODES)
-    | set(TIMING_REG_ALIASES)
-    | set(LOOP_REG_ALIASES)
-    | set(ROLE_ALIASES)
-)
+
+def is_reserved_name(name: str) -> bool:
+    """True iff ``name`` collides with a built-in mnemonic/symbol.
+
+    Mirrors ``mole-asm/src/symbols.rs::is_reserved_name``.
+    """
+    upper = name.upper()
+    lower = name.lower()
+    if upper in MNEMONICS:
+        return True
+    if upper in COND_CODES:
+        return True
+    if lower in TX_SYMBOLS:
+        return True
+    if lower in BUS_MODES:
+        return True
+    if lower in ROLE_NAMES:
+        return True
+    if lower in SHIFT_DIRS:
+        return True
+    return False
 
 
-# ===========================================================================
-# Diagnostic carrier
-# ===========================================================================
-
+# ---------------------------------------------------------------------------
+# Error class
+# ---------------------------------------------------------------------------
 
 class AsmError(Exception):
-    """Raised on the first syntactic / semantic error. Carries a
-    file:line prefix so the user can jump straight to the bad token."""
+    """Assembler error carrying a short error code and source location."""
 
-    def __init__(self, where: str, msg: str) -> None:
-        super().__init__(f"{where}: {msg}")
-        self.where = where
-        self.msg = msg
+    def __init__(self, code: str, message: str,
+                 line: int = 0, filename: str = "<unknown>",
+                 col: int = 0) -> None:
+        self.code = code
+        self.message = message
+        self.line = line
+        self.col = col
+        self.filename = filename
+        super().__init__(self._format())
+
+    def _format(self) -> str:
+        loc = f"{self.filename}:{self.line}" if self.line else self.filename
+        return f"{loc}: {self.code}: {self.message}"
 
 
-# ===========================================================================
-# Instruction-word encoders (mirror Instruction.scala `encode`)
-#
-# Wire format (post-widening): 5-bit opcode at [15:11], 11-bit payload
-# at [10:0]. Every field shift below is anchored against bit 11.
-# ===========================================================================
+# ---------------------------------------------------------------------------
+# Low-level encoder helpers
+# ---------------------------------------------------------------------------
 
-
-# Low bit of the opcode field within the 16-bit instruction word.
-OPCODE_LO = 11
+def _opcode(group: int, sub: int) -> int:
+    """Build the 6-bit opcode prefix: ``group << 30 | sub << 26``."""
+    return (group << 30) | (sub << 26)
 
 
 def _flag_triple(expect: bool, mask: bool, capture: bool) -> int:
-    """Pack the expect/mask/capture flag triple into bits [2:0].
+    """Pack expect/mask/capture into bits [2:0].
 
-    Layout: [2]=expect [1]=mask [0]=capture. Per AGENTS §3.10 these
-    positions are fixed on every opcode that carries the triple.
+    Layout per §3: [2]=expect, [1]=mask, [0]=capture.
     """
-    return (
-        ((1 if expect else 0) << 2) | ((1 if mask else 0) << 1) | (1 if capture else 0)
-    )
+    return (int(expect) << 2) | (int(mask) << 1) | int(capture)
 
 
-def enc_halt(status: int) -> int:
-    if not 0 <= status < (1 << 4):
-        raise ValueError(f"HALT status must be 0..15, got {status}")
-    # Layout: [15:11]op [10:7]status [6:0]reserved=0
-    return (OP_HALT << OPCODE_LO) | (status << 7)
+def _check_tx(name: str, tx: int, raw_mode: bool,
+              line: int = 0, filename: str = "<unknown>") -> None:
+    if tx > 3:
+        raise AsmError("E-WIRE-001",
+                       f"{name}: tx symbol must be 0..3, got {tx}",
+                       line=line, filename=filename)
+    if tx == 0b11 and not raw_mode:
+        raise AsmError("E-WIRE-001",
+                       "tx=reserved (0b11) requires '(use-raw-primitives)' "
+                       "pragma; use .dw or declare raw/",
+                       line=line, filename=filename)
 
 
-def enc_emit_bit(tx: int, expect: bool, mask: bool, capture: bool) -> int:
-    if not 0 <= tx < 4:
-        raise ValueError(f"EMIT_BIT tx symbol must be 0..3, got {tx}")
-    if tx == 0b11:
-        raise ValueError("EMIT_BIT tx=reserved (0b11) is v0.5; use .dw")
-    # Layout: [15:11]op [10:9]tx [8:3]reserved [2:0]flags
-    return (OP_EMIT_BIT << OPCODE_LO) | (tx << 9) | _flag_triple(expect, mask, capture)
+def _check_reg(name: str, reg: int,
+               line: int = 0, filename: str = "<unknown>") -> None:
+    if reg > 7:
+        raise AsmError("E-OP-007",
+                       f"{name}: register R{reg} is not valid; use R0..R7",
+                       line=line, filename=filename)
 
 
-def enc_emit_quarter(
-    sda: int, scl: int, expect: bool, mask: bool, capture: bool
-) -> int:
-    if not 0 <= sda < 4 or not 0 <= scl < 4:
-        raise ValueError(f"EMIT_QUARTER sda/scl must be 0..3, got sda={sda} scl={scl}")
-    if sda == 0b11 or scl == 0b11:
-        raise ValueError("EMIT_QUARTER sda/scl=reserved (0b11) is v0.5; use .dw")
-    # Layout: [15:11]op [10:9]sda [8:7]scl [6:3]reserved [2:0]flags
-    return (
-        (OP_EMIT_QUARTER << OPCODE_LO)
-        | (sda << 9)
-        | (scl << 7)
-        | _flag_triple(expect, mask, capture)
-    )
+# ---------------------------------------------------------------------------
+# WIRE group encoders  (§5.1 – §5.9)
+# ---------------------------------------------------------------------------
 
+def enc_emit_bit_imm(tx: int, expect: bool, mask: bool, capture: bool,
+                     raw_mode: bool,
+                     line: int = 0, filename: str = "<unknown>") -> int:
+    """WIRE.EMIT_BIT_IMM (§5.1).
 
-def enc_stretch_scl(n_quarters: int) -> int:
-    if not 0 <= n_quarters < (1 << 11):
-        raise ValueError(f"STRETCH_SCL n_quarters must be 0..2047, got {n_quarters}")
-    # Layout: [15:11]op [10:0]n_quarters
-    return (OP_STRETCH_SCL << OPCODE_LO) | n_quarters
-
-
-def enc_wait_on(cond: int, timeout_quarters: int) -> int:
-    if not 0 <= cond < 16:
-        raise ValueError(f"WAIT_ON cond must be 0..15, got {cond}")
-    if not 0 <= timeout_quarters < (1 << 7):
-        raise ValueError(
-            f"WAIT_ON timeout must be 0..127 quarters, got {timeout_quarters}"
-        )
-    # Layout: [15:11]op [10:7]cond [6:0]timeout
-    return (OP_WAIT_ON << OPCODE_LO) | (cond << 7) | (timeout_quarters & 0x7F)
-
-
-def enc_branch_on(cond: int, pc_rel_offset: int) -> int:
-    if not 0 <= cond < 16:
-        raise ValueError(f"BRANCH_ON cond must be 0..15, got {cond}")
-    if not -64 <= pc_rel_offset <= 63:
-        raise ValueError(
-            f"BRANCH_ON pc-rel offset must be -64..63, got {pc_rel_offset}"
-        )
-    # Layout: [15:11]op [10:7]cond [6:0]offset_signed
-    return (OP_BRANCH_ON << OPCODE_LO) | (cond << 7) | (pc_rel_offset & 0x7F)
-
-
-def enc_jmp(addr: int) -> int:
-    if not 0 <= addr < (1 << 11):
-        raise ValueError(f"JMP addr must fit in 11 bits (0..2047), got {addr}")
-    # Layout: [15:11]op [10:0]addr
-    return (OP_JMP << OPCODE_LO) | addr
-
-
-def enc_set_bus_mode(mode_wire: int) -> int:
-    if mode_wire not in {0, 1, 6, 7}:
-        raise ValueError(f"SET_BUS_MODE wire value must be 0|1|6|7, got {mode_wire}")
-    # Layout: [15:11]op [10:8]mode_wire [7:0]reserved=0
-    return (OP_SET_BUS_MODE << OPCODE_LO) | (mode_wire << 8)
-
-
-def enc_load_timing(reg: int, divider_word: int) -> int:
-    if not 0 <= reg < 4:
-        raise ValueError(f"LOAD_TIMING reg must be 0..3, got {reg}")
-    if not 0 <= divider_word < (1 << 9):
-        raise ValueError(
-            f"LOAD_TIMING divider_word must be 0..511, got {divider_word}"
-        )
-    # Layout: [15:11]op [10:9]reg [8:0]divider_word
-    return (OP_LOAD_TIMING << OPCODE_LO) | (reg << 9) | divider_word
-
-
-def enc_mark(label: int) -> int:
-    if not 0 <= label < (1 << 8):
-        raise ValueError(f"MARK label must be 0..255, got {label}")
-    # Layout: [15:11]op [10:3]label [2:0]reserved=0
-    return (OP_MARK << OPCODE_LO) | (label << 3)
-
-
-def enc_sample_bit(expect: bool, mask: bool, capture: bool) -> int:
-    # Layout: [15:11]op [10:3]reserved [2:0]flags
-    return (OP_SAMPLE_BIT << OPCODE_LO) | _flag_triple(expect, mask, capture)
-
-
-def enc_drive_bit(tx: int, expect: bool, mask: bool, capture: bool) -> int:
-    if not 0 <= tx < 4:
-        raise ValueError(f"DRIVE_BIT_ON_SCL tx symbol must be 0..3, got {tx}")
-    if tx == 0b11:
-        raise ValueError("DRIVE_BIT_ON_SCL tx=reserved (0b11) is v0.5; use .dw")
-    # Layout: [15:11]op [10:9]tx [8:3]reserved [2:0]flags
-    return (OP_DRIVE_BIT << OPCODE_LO) | (tx << 9) | _flag_triple(expect, mask, capture)
-
-
-def enc_load_loop(reg: int, imm: int) -> int:
-    """LOAD_LOOP reg, imm8 -> [15:11]op [10]reg [9:8]reserved=0 [7:0]imm8.
-
-    `reg` is one bit on the wire (lcr0 = 0, lcr1 = 1); the [9:8] pad
-    stays reserved so a future 4-LCR widening can claim those bits
-    without breaking the wire format. See Instruction.scala's LoadLoop
-    case-class doc for the full design note.
+    [31:30]=00 [29:26]=0000 [25:5]=0 [4:3]=tx [2:0]=flags
     """
-    if not 0 <= reg < 2:
-        raise ValueError(f"LOAD_LOOP reg must be 0 or 1, got {reg}")
-    if not 0 <= imm < (1 << 8):
-        raise ValueError(f"LOAD_LOOP imm must be 0..255, got {imm}")
-    return (OP_LOAD_LOOP << OPCODE_LO) | (reg << 10) | (imm & 0xFF)
+    _check_tx("EMIT_BIT_IMM", tx, raw_mode, line, filename)
+    return (_opcode(GROUP_WIRE, S_EMIT_BIT_IMM)
+            | (tx << 3)
+            | _flag_triple(expect, mask, capture))
 
 
-def enc_dec_branch(reg: int, pc_rel_offset: int) -> int:
-    """DEC_BRANCH reg, offset -> decrement LCR[reg], back-edge if non-zero.
+def enc_emit_bit_reg(src: int, expect: bool, mask: bool, capture: bool,
+                     line: int = 0, filename: str = "<unknown>") -> int:
+    """WIRE.EMIT_BIT_REG (§5.2).
 
-    Wire: [15:11]op [10]reg [9:8]reserved=0 [7:0]offset_signed. 8-bit
-    wrap on the decrement (0 -> 0xFF). DEC_BRANCH keeps the wider
-    signed-8 offset (-128..127) where BRANCH_ON narrowed to signed-7
-    (-64..63) --- counted-loop bodies benefit from the longer reach.
+    [31:30]=00 [29:26]=0001 [25:23]=0 [22:20]=src [19:3]=0 [2:0]=flags
     """
-    if not 0 <= reg < 2:
-        raise ValueError(f"DEC_BRANCH reg must be 0 or 1, got {reg}")
-    if not -128 <= pc_rel_offset <= 127:
-        raise ValueError(
-            f"DEC_BRANCH pc-rel offset must be -128..127, got {pc_rel_offset}"
-        )
-    return (OP_DEC_BRANCH << OPCODE_LO) | (reg << 10) | (pc_rel_offset & 0xFF)
+    _check_reg("EMIT_BIT_REG src", src, line, filename)
+    return (_opcode(GROUP_WIRE, S_EMIT_BIT_REG)
+            | (src << 20)
+            | _flag_triple(expect, mask, capture))
 
 
-def enc_set_role(role: int) -> int:
-    """SET_ROLE role -> switch controller (0) / target (1) at runtime.
+def enc_emit_quarter_imm(sda: int, scl: int, expect: bool, mask: bool,
+                         capture: bool, raw_mode: bool,
+                         line: int = 0, filename: str = "<unknown>") -> int:
+    """WIRE.EMIT_QUARTER_IMM (§5.3).
 
-    Wire: [15:11]op [10]role [9:0]reserved=0. Lives in opcode slot 0x10
-    (the first slot exposed by the 5-bit opcode widening). All v0
-    opcodes remain valid in either role; SET_ROLE only flips which
-    role-specific arms the engine dispatches to.
+    [31:30]=00 [29:26]=0010 [25:7]=0 [6:5]=scl [4:3]=sda [2:0]=flags
     """
-    if role not in (0, 1):
-        raise ValueError(f"SET_ROLE role must be 0|1 (controller|target), got {role}")
-    return (OP_SET_ROLE << OPCODE_LO) | (role << 10)
+    _check_tx("EMIT_QUARTER_IMM sda", sda, raw_mode, line, filename)
+    _check_tx("EMIT_QUARTER_IMM scl", scl, raw_mode, line, filename)
+    return (_opcode(GROUP_WIRE, S_EMIT_QUARTER_IMM)
+            | (scl << 5)
+            | (sda << 3)
+            | _flag_triple(expect, mask, capture))
 
 
-# ===========================================================================
-# CRC-16/XMODEM and frame builder (kept here for the --frame flag)
-# ===========================================================================
+def enc_emit_quarter_reg(src: int, expect: bool, mask: bool, capture: bool,
+                         line: int = 0, filename: str = "<unknown>") -> int:
+    """WIRE.EMIT_QUARTER_REG (§5.4).
 
+    [31:30]=00 [29:26]=0011 [25:23]=0 [22:20]=src [19:3]=0 [2:0]=flags
+    """
+    _check_reg("EMIT_QUARTER_REG src", src, line, filename)
+    return (_opcode(GROUP_WIRE, S_EMIT_QUARTER_REG)
+            | (src << 20)
+            | _flag_triple(expect, mask, capture))
+
+
+def enc_emit_byte(expect: bool, mask: bool, capture: bool) -> int:
+    """WIRE.EMIT_BYTE (§5.5).
+
+    [31:30]=00 [29:26]=0100 [25:3]=0 [2:0]=flags
+    """
+    return _opcode(GROUP_WIRE, S_EMIT_BYTE) | _flag_triple(expect, mask, capture)
+
+
+def enc_sample_bit_on_scl(dst: int, expect: bool, mask: bool, capture: bool,
+                           raw_mode: bool,
+                           line: int = 0, filename: str = "<unknown>") -> int:
+    """WIRE.SAMPLE_BIT_ON_SCL (§5.6).
+
+    [31:30]=00 [29:26]=0101 [25:23]=dst [22:3]=0 [2:0]=flags
+    dst must be R7 unless raw/ pragma.
+    """
+    _check_reg("SAMPLE_BIT_ON_SCL dst", dst, line, filename)
+    if dst != 7 and not raw_mode:
+        raise AsmError("E-REG-001",
+                       "capture must write to R7; use raw/ pragma to override",
+                       line=line, filename=filename)
+    return (_opcode(GROUP_WIRE, S_SAMPLE_BIT_ON_SCL)
+            | (dst << 23)
+            | _flag_triple(expect, mask, capture))
+
+
+def enc_drive_bit_on_scl(tx: int, expect: bool, mask: bool, capture: bool,
+                          raw_mode: bool,
+                          line: int = 0, filename: str = "<unknown>") -> int:
+    """WIRE.DRIVE_BIT_ON_SCL (§5.7).
+
+    [31:30]=00 [29:26]=0110 [25:23]=dst [22:5]=0 [4:3]=tx [2:0]=flags
+    Canonical: dst=0b000 when capture=0; dst=R7=7 when capture=1.
+    """
+    _check_tx("DRIVE_BIT_ON_SCL", tx, raw_mode, line, filename)
+    dst = 7 if capture else 0
+    return (_opcode(GROUP_WIRE, S_DRIVE_BIT_ON_SCL)
+            | (dst << 23)
+            | (tx << 3)
+            | _flag_triple(expect, mask, capture))
+
+
+def enc_drive_bit_on_scl_raw(dst: int, tx: int, expect: bool, mask: bool,
+                              capture: bool,
+                              line: int = 0,
+                              filename: str = "<unknown>") -> int:
+    """WIRE.DRIVE_BIT_ON_SCL with explicit dst (raw/ override, §5.7)."""
+    _check_reg("DRIVE_BIT_ON_SCL dst", dst, line, filename)
+    _check_tx("DRIVE_BIT_ON_SCL", tx, True, line, filename)
+    return (_opcode(GROUP_WIRE, S_DRIVE_BIT_ON_SCL)
+            | (dst << 23)
+            | (tx << 3)
+            | _flag_triple(expect, mask, capture))
+
+
+def enc_stretch_scl_imm(n_quarters: int,
+                         line: int = 0,
+                         filename: str = "<unknown>") -> int:
+    """WIRE.STRETCH_SCL_IMM (§5.8).
+
+    [31:30]=00 [29:26]=0111 [25:17]=0 [16:3]=n [2:0]=0
+    """
+    if not (0 <= n_quarters < (1 << 14)):
+        raise AsmError("E-RNG-001",
+                       f"STRETCH_SCL_IMM n_quarters must be 0..16383, "
+                       f"got {n_quarters}",
+                       line=line, filename=filename)
+    return _opcode(GROUP_WIRE, S_STRETCH_SCL_IMM) | (n_quarters << 3)
+
+
+def enc_stretch_scl_reg(src: int,
+                         line: int = 0,
+                         filename: str = "<unknown>") -> int:
+    """WIRE.STRETCH_SCL_REG (§5.9).
+
+    [31:30]=00 [29:26]=1000 [25:23]=0 [22:20]=src [19:3]=0 [2:0]=0
+    """
+    _check_reg("STRETCH_SCL_REG src", src, line, filename)
+    return _opcode(GROUP_WIRE, S_STRETCH_SCL_REG) | (src << 20)
+
+
+# ---------------------------------------------------------------------------
+# CTRL group encoders  (§5.10 – §5.17)
+# ---------------------------------------------------------------------------
+
+def enc_halt(status: int,
+             line: int = 0, filename: str = "<unknown>") -> int:
+    """CTRL.HALT (§5.10).
+
+    [31:30]=01 [29:26]=0000 [25:8]=0 [7:3]=status [2:0]=0
+    """
+    if not (0 <= status < 32):
+        raise AsmError("E-RNG-001",
+                       f"HALT status must be 0..31, got {status}",
+                       line=line, filename=filename)
+    return _opcode(GROUP_CTRL, S_HALT) | (status << 3)
+
+
+def enc_branch_on(cond: int, pc_rel_offset: int,
+                  line: int = 0, filename: str = "<unknown>") -> int:
+    """CTRL.BRANCH_ON (§5.11).
+
+    [31:30]=01 [29:26]=0001 [25:17]=0 [16:13]=cond [12:3]=offset [2:0]=0
+    offset: signed 10-bit, -512..511.
+    """
+    if cond > 15:
+        raise AsmError("E-CTRL-001",
+                       f"cond code {cond} is out of range 0..15",
+                       line=line, filename=filename)
+    if not (-512 <= pc_rel_offset <= 511):
+        raise AsmError("E-RNG-003",
+                       f"BRANCH_ON offset {pc_rel_offset} out of signed "
+                       f"10-bit range (-512..511)",
+                       line=line, filename=filename)
+    offset_bits = pc_rel_offset & 0x3FF
+    return (_opcode(GROUP_CTRL, S_BRANCH_ON)
+            | (cond << 13)
+            | (offset_bits << 3))
+
+
+def enc_wait_on(cond: int, timeout: int,
+                line: int = 0, filename: str = "<unknown>") -> int:
+    """CTRL.WAIT_ON (§5.12).
+
+    [31:30]=01 [29:26]=0010 [25:17]=0 [16:13]=cond [12:3]=timeout [2:0]=0
+    timeout: unsigned 10-bit, 0..1023.
+    """
+    if cond > 15:
+        raise AsmError("E-CTRL-001",
+                       f"cond code {cond} is out of range 0..15",
+                       line=line, filename=filename)
+    if not (0 <= timeout < 1024):
+        raise AsmError("E-RNG-004",
+                       f"WAIT_ON timeout must be 0..1023 quarters, "
+                       f"got {timeout}",
+                       line=line, filename=filename)
+    return (_opcode(GROUP_CTRL, S_WAIT_ON)
+            | (cond << 13)
+            | (timeout << 3))
+
+
+def enc_set_bus_mode(mode_wire: int,
+                     line: int = 0, filename: str = "<unknown>") -> int:
+    """CTRL.SET_BUS_MODE (§5.13).
+
+    [31:30]=01 [29:26]=0011 [25:7]=0 [6:3]=mode [2:0]=0
+    v0.2 wire values: i2c=0, i3c-OD=1, i3c-PP=2, hdr-ddr=3 (RENUMBERED).
+    """
+    if mode_wire > 15:
+        raise AsmError("E-OP-006",
+                       f"SET_BUS_MODE wire value must be 0..15, "
+                       f"got {mode_wire}",
+                       line=line, filename=filename)
+    return _opcode(GROUP_CTRL, S_SET_BUS_MODE) | (mode_wire << 3)
+
+
+def enc_set_role(role: bool) -> int:
+    """CTRL.SET_ROLE (§5.14).
+
+    [31:30]=01 [29:26]=0100 [25:4]=0 [3]=role [2:0]=0
+    """
+    return _opcode(GROUP_CTRL, S_SET_ROLE) | (int(role) << 3)
+
+
+def enc_flag_clear(mask: int,
+                   line: int = 0, filename: str = "<unknown>") -> int:
+    """CTRL.FLAG_CLEAR (§5.15).
+
+    [31:30]=01 [29:26]=0101 [25:8]=0 [7:3]=mask [2:0]=0
+    """
+    if not (0 <= mask <= 31):
+        raise AsmError("E-OP-009",
+                       f"FLAG_CLEAR mask must be a 5-bit value (0..31), "
+                       f"got {mask}",
+                       line=line, filename=filename)
+    return _opcode(GROUP_CTRL, S_FLAG_CLEAR) | (mask << 3)
+
+
+def enc_mark(label: int,
+             line: int = 0, filename: str = "<unknown>") -> int:
+    """CTRL.MARK (§5.16).
+
+    [31:30]=01 [29:26]=0110 [25:17]=0 [16:3]=label [2:0]=0
+    """
+    if not (0 <= label < (1 << 14)):
+        raise AsmError("E-RNG-001",
+                       f"MARK label must be 0..16383, got {label}",
+                       line=line, filename=filename)
+    return _opcode(GROUP_CTRL, S_MARK) | (label << 3)
+
+
+def enc_load_timing(reg: int, divider: int,
+                    line: int = 0, filename: str = "<unknown>") -> int:
+    """CTRL.LOAD_TIMING (§5.17).
+
+    [31:30]=01 [29:26]=0111 [25:20]=0 [19:17]=reg [16:3]=divider [2:0]=0
+    """
+    if not (0 <= reg < 8):
+        raise AsmError("E-RNG-001",
+                       f"LOAD_TIMING reg must be 0..7, got {reg}",
+                       line=line, filename=filename)
+    if not (0 <= divider < (1 << 14)):
+        raise AsmError("E-RNG-001",
+                       f"LOAD_TIMING divider must be 0..16383, "
+                       f"got {divider}",
+                       line=line, filename=filename)
+    return (_opcode(GROUP_CTRL, S_LOAD_TIMING)
+            | (reg << 17)
+            | (divider << 3))
+
+
+# ---------------------------------------------------------------------------
+# DATA group encoders  (§5.18 – §5.25)
+# ---------------------------------------------------------------------------
+
+def enc_load_imm(dst: int, imm14: int,
+                 line: int = 0, filename: str = "<unknown>") -> int:
+    """DATA.LOAD_IMM (§5.18).
+
+    [31:30]=10 [29:26]=0000 [25:23]=dst [22:17]=0 [16:3]=imm14 [2:0]=0
+    """
+    _check_reg("LOAD_IMM dst", dst, line, filename)
+    if not (0 <= imm14 < (1 << 14)):
+        raise AsmError("E-RNG-001",
+                       f"LOAD_IMM imm14 must be 0..16383, got {imm14}",
+                       line=line, filename=filename)
+    return _opcode(GROUP_DATA, S_LOAD_IMM) | (dst << 23) | (imm14 << 3)
+
+
+def enc_mov(dst: int, src: int,
+            line: int = 0, filename: str = "<unknown>") -> int:
+    """DATA.MOV (§5.19).
+
+    [31:30]=10 [29:26]=0001 [25:23]=dst [22:20]=src [19:3]=0 [2:0]=0
+    """
+    _check_reg("MOV dst", dst, line, filename)
+    _check_reg("MOV src", src, line, filename)
+    return _opcode(GROUP_DATA, S_MOV) | (dst << 23) | (src << 20)
+
+
+def enc_add_imm(dst: int, src: int, imm14: int,
+                line: int = 0, filename: str = "<unknown>") -> int:
+    """DATA.ADD_IMM (§5.20).
+
+    [31:30]=10 [29:26]=0010 [25:23]=dst [22:20]=src [19:17]=0
+    [16:3]=imm14 (signed 14-bit) [2:0]=0
+    """
+    _check_reg("ADD_IMM dst", dst, line, filename)
+    _check_reg("ADD_IMM src", src, line, filename)
+    if not (-8192 <= imm14 <= 8191):
+        raise AsmError("E-RNG-001",
+                       f"ADD_IMM imm14 must be -8192..8191, got {imm14}",
+                       line=line, filename=filename)
+    bits = imm14 & 0x3FFF
+    return (_opcode(GROUP_DATA, S_ADD_IMM)
+            | (dst << 23)
+            | (src << 20)
+            | (bits << 3))
+
+
+def enc_dec(reg: int,
+            line: int = 0, filename: str = "<unknown>") -> int:
+    """DATA.DEC (§5.21).
+
+    [31:30]=10 [29:26]=0011 [25:23]=dst(=reg) [22:20]=src(=reg) [19:3]=0 [2:0]=0
+    """
+    _check_reg("DEC", reg, line, filename)
+    return _opcode(GROUP_DATA, S_DEC) | (reg << 23) | (reg << 20)
+
+
+def enc_and_imm(dst: int, src: int, imm14: int,
+                line: int = 0, filename: str = "<unknown>") -> int:
+    """DATA.AND_IMM (§5.22).
+
+    [31:30]=10 [29:26]=0100 [25:23]=dst [22:20]=src [19:17]=0
+    [16:3]=imm14 (unsigned 14-bit) [2:0]=0
+    """
+    _check_reg("AND_IMM dst", dst, line, filename)
+    _check_reg("AND_IMM src", src, line, filename)
+    if not (0 <= imm14 < (1 << 14)):
+        raise AsmError("E-RNG-001",
+                       f"AND_IMM imm14 must be 0..16383, got {imm14}",
+                       line=line, filename=filename)
+    return (_opcode(GROUP_DATA, S_AND_IMM)
+            | (dst << 23)
+            | (src << 20)
+            | (imm14 << 3))
+
+
+def enc_or_imm(dst: int, src: int, imm14: int,
+               line: int = 0, filename: str = "<unknown>") -> int:
+    """DATA.OR_IMM (§5.23).  Identical layout to AND_IMM with sub=0b0101."""
+    _check_reg("OR_IMM dst", dst, line, filename)
+    _check_reg("OR_IMM src", src, line, filename)
+    if not (0 <= imm14 < (1 << 14)):
+        raise AsmError("E-RNG-001",
+                       f"OR_IMM imm14 must be 0..16383, got {imm14}",
+                       line=line, filename=filename)
+    return (_opcode(GROUP_DATA, S_OR_IMM)
+            | (dst << 23)
+            | (src << 20)
+            | (imm14 << 3))
+
+
+def enc_xor_imm(dst: int, src: int, imm14: int,
+                line: int = 0, filename: str = "<unknown>") -> int:
+    """DATA.XOR_IMM (§5.24).  Identical layout to AND_IMM with sub=0b0110."""
+    _check_reg("XOR_IMM dst", dst, line, filename)
+    _check_reg("XOR_IMM src", src, line, filename)
+    if not (0 <= imm14 < (1 << 14)):
+        raise AsmError("E-RNG-001",
+                       f"XOR_IMM imm14 must be 0..16383, got {imm14}",
+                       line=line, filename=filename)
+    return (_opcode(GROUP_DATA, S_XOR_IMM)
+            | (dst << 23)
+            | (src << 20)
+            | (imm14 << 3))
+
+
+def enc_shift(dst: int, src: int, shift_kind: int, shamt: int,
+              line: int = 0, filename: str = "<unknown>") -> int:
+    """DATA.SHIFT (§5.25).
+
+    [31:30]=10 [29:26]=0111 [25:23]=dst [22:20]=src
+    [19]=arith [18]=dir [17]=0 [16:8]=0 [7:3]=shamt [2:0]=0
+    shift_kind: SHIFT_LEFT=0, SHIFT_RIGHT=1, SHIFT_ARIGHT=2
+    """
+    _check_reg("SHIFT dst", dst, line, filename)
+    _check_reg("SHIFT src", src, line, filename)
+    if not (0 <= shamt < 32):
+        raise AsmError("E-RNG-001",
+                       f"SHIFT shamt must be 0..31, got {shamt}",
+                       line=line, filename=filename)
+    if shift_kind == SHIFT_LEFT:
+        arith, dire = 0, 0
+    elif shift_kind == SHIFT_RIGHT:
+        arith, dire = 0, 1
+    elif shift_kind == SHIFT_ARIGHT:
+        arith, dire = 1, 1
+    else:
+        raise AsmError("E-OP-002",
+                       f"unknown shift direction {shift_kind}; "
+                       f"use left, right, or aright",
+                       line=line, filename=filename)
+    return (_opcode(GROUP_DATA, S_SHIFT)
+            | (dst << 23)
+            | (src << 20)
+            | (arith << 19)
+            | (dire << 18)
+            | (shamt << 3))
+
+
+# ---------------------------------------------------------------------------
+# CRC-16/XMODEM
+# ---------------------------------------------------------------------------
 
 def crc16_xmodem(data: bytes) -> int:
-    """Standard CRC-16/XMODEM: poly 0x1021, init 0x0000, no reflect,
-    no XOR-out. Catalog check value: `crc16_xmodem(b'123456789')` = 0x31C3.
-    """
-    crc = 0x0000
-    for b in data:
-        crc ^= b << 8
+    """CRC-16/XMODEM: poly=0x1021, init=0, no reflection, no XOR-out."""
+    crc = 0
+    for byte in data:
+        crc ^= byte << 8
         for _ in range(8):
-            crc = (
-                ((crc << 1) ^ 0x1021) & 0xFFFF if crc & 0x8000 else (crc << 1) & 0xFFFF
-            )
+            if crc & 0x8000:
+                crc = ((crc << 1) ^ 0x1021) & 0xFFFF
+            else:
+                crc = (crc << 1) & 0xFFFF
     return crc
 
 
-def build_frame(words: Iterable[int]) -> bytes:
-    """Build a complete UART frame: len_lo, len_hi, words (each LE),
-    crc_lo, crc_hi. CRC covers everything except itself.
-    Per WIRE_FORMAT.md the engine accepts 1..2048 words per frame
-    (matches the 11-bit JMP addr / program-memory budget).
+# ---------------------------------------------------------------------------
+# Wire packing
+# ---------------------------------------------------------------------------
+
+def pack_bytecode(words: List[int]) -> bytes:
+    """Pack a list of 32-bit words to little-endian bytes (4 bytes each)."""
+    return b"".join(struct.pack("<I", w) for w in words)
+
+
+def build_frame(words: List[int]) -> bytes:
+    """Build a UART frame: len_words(LE u16) + bytecode + CRC-16/XMODEM(LE u16).
+
+    ``words`` must include the 2-word preamble.  Length covers the WHOLE
+    program (preamble + body) in 32-bit words.  The CRC is computed over
+    the length field AND the bytecode (all bytes before the CRC trailer).
+
+    Rejects programs with no body (preamble-only) and programs larger than
+    MAX_PROGRAM_WORDS + 2 preamble words (= 8194 words total).
     """
-    ws = list(words)
-    if not 1 <= len(ws) <= 2048:
-        raise ValueError(f"frame len {len(ws)} out of 1..2048")
-    payload = bytearray()
-    payload.append(len(ws) & 0xFF)
-    payload.append((len(ws) >> 8) & 0xFF)
-    for w in ws:
-        if not 0 <= w <= 0xFFFF:
-            raise ValueError(f"word {w:#06x} out of 16-bit range")
-        payload.append(w & 0xFF)
-        payload.append((w >> 8) & 0xFF)
-    crc = crc16_xmodem(bytes(payload))
-    payload.append(crc & 0xFF)
-    payload.append((crc >> 8) & 0xFF)
-    return bytes(payload)
+    total_words = len(words)
+    # Rust rejects: len < PREAMBLE_WORDS+1 (no body) or len > MAX_TOTAL_WORDS
+    if total_words < 3:
+        raise AsmError("E-FRM-001",
+                       "build_frame: program must have at least one body word")
+    if total_words > MAX_PROGRAM_WORDS + 2:
+        raise AsmError("E-FRM-001",
+                       f"build_frame: program too large "
+                       f"({total_words} words > {MAX_PROGRAM_WORDS + 2})")
+    program_bytes = pack_bytecode(words)
+    length_field = struct.pack("<H", total_words)
+    # CRC covers the length field bytes AND the program bytes (matching Rust).
+    crc = crc16_xmodem(length_field + program_bytes)
+    crc_field = struct.pack("<H", crc)
+    return length_field + program_bytes + crc_field
 
 
-def pack_bytecode(words: Iterable[int]) -> bytes:
-    """Pack 16-bit instruction words little-endian. This is the raw
-    `.molecode` body: no frame, no CRC --- just the bytes that would
-    land in SPRAM at runtime."""
-    out = bytearray()
-    for w in words:
-        if not 0 <= w <= 0xFFFF:
-            raise ValueError(f"word {w:#06x} out of 16-bit range")
-        out.append(w & 0xFF)
-        out.append((w >> 8) & 0xFF)
-    return bytes(out)
-
-
-# ===========================================================================
-# Lexer
-# ===========================================================================
-
-
-_IDENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_\-]*")
-_LABEL_DEF_RE = re.compile(r"^(?P<label>[A-Za-z_][A-Za-z0-9_]*)\s*:\s*(?P<rest>.*)$")
-
-
-@dataclass
-class Statement:
-    """One source line, post-comment-strip, post-label-peel. Either an
-    instruction, a directive, or label-only (label_on_own_line=True with
-    no mnemonic / directive)."""
-
-    line_no: int
-    label: Optional[str]
-    mnemonic: Optional[str]
-    directive: Optional[str]
-    operands: list[str] = field(default_factory=list)
-
-    @property
-    def where(self) -> str:
-        return f"line {self.line_no}"
-
+# ---------------------------------------------------------------------------
+# Lexer / parser utilities
+# ---------------------------------------------------------------------------
 
 def _strip_comment(line: str) -> str:
-    """Remove from the first `;` to end-of-line. Per AGENTS.md any number
-    of leading `;` is fine --- one `;` starts the comment."""
     idx = line.find(";")
-    return line if idx < 0 else line[:idx]
+    return line[:idx] if idx >= 0 else line
 
 
-def _tokenize_operands(operand_region: str) -> list[str]:
-    """Split the operand region on commas, then on whitespace inside each
-    comma-piece. Yields a flat list of tokens. Empty tokens are filtered."""
-    tokens: list[str] = []
-    for piece in operand_region.split(","):
-        for tok in piece.split():
-            if tok:
-                tokens.append(tok)
-    return tokens
-
-
-def lex(source: str, filename: str) -> list[Statement]:
-    """Convert source text into a list of Statements (one per non-empty,
-    non-comment-only line). Validates label syntax and basic shape; does
-    not validate operand structure (that's pass 1's job).
-    """
-    statements: list[Statement] = []
-    # `splitlines()` handles \n, \r\n, and \r equally --- defensive for
-    # files that get mangled by a Windows editor in transit.
-    for line_no, raw in enumerate(source.splitlines(), start=1):
-        body = _strip_comment(raw).strip()
-        if not body:
-            continue
-
-        label: Optional[str] = None
-        m = _LABEL_DEF_RE.match(body)
-        if m:
-            label = m.group("label")
-            body = m.group("rest").strip()
-
-        if not body:
-            # Label-only line.
-            statements.append(
-                Statement(
-                    line_no=line_no,
-                    label=label,
-                    mnemonic=None,
-                    directive=None,
-                )
-            )
-            continue
-
-        # First whitespace-delimited token is the mnemonic or directive.
-        # Accept any kind and any amount of whitespace between mnemonic and
-        # operands --- `str.split(None, 1)` collapses runs of any whitespace
-        # (space, tab, NBSP, ...) into a single separator.
-        parts = body.split(None, 1)
-        head = parts[0]
-        rest = parts[1].strip() if len(parts) > 1 else ""
-
-        if head.startswith("."):
-            directive = head.lower()
-            statements.append(
-                Statement(
-                    line_no=line_no,
-                    label=label,
-                    mnemonic=None,
-                    directive=directive,
-                    operands=_tokenize_operands(rest),
-                )
-            )
-            continue
-
-        # Mnemonic must be UPPER CASE per moleasm convention.
-        if head != head.upper():
-            raise AsmError(
-                f"{filename}:{line_no}",
-                f"mnemonic must be UPPER CASE: got {head!r}",
-            )
-        if head in RESERVED_V05_MNEMONICS:
-            raise AsmError(
-                f"{filename}:{line_no}",
-                f"{head} is a reserved-v0.5 opcode; use `.dw` to inject "
-                f"the raw word if you really mean it",
-            )
-        if head not in MNEMONICS:
-            raise AsmError(f"{filename}:{line_no}", f"unknown mnemonic: {head!r}")
-
-        statements.append(
-            Statement(
-                line_no=line_no,
-                label=label,
-                mnemonic=head,
-                directive=None,
-                operands=_tokenize_operands(rest),
-            )
-        )
-
-    return statements
-
-
-# ===========================================================================
-# Symbol table
-# ===========================================================================
-
-
-@dataclass
-class Symbol:
-    name: str
-    kind: str  # "label" or "equate"
-    value: int  # PC (label) or constant (equate)
-    line_no: int
-
-
-def _validate_name(name: str, kind: str, where: str) -> None:
-    if not _IDENT_RE.fullmatch(name):
-        raise AsmError(where, f"invalid {kind} name: {name!r}")
-    if name in RESERVED_NAMES:
-        raise AsmError(
-            where,
-            f"{kind} name {name!r} collides with a reserved mnemonic / "
-            f"symbol / alias",
-        )
-
-
-def _resolve_literal_or_equate(tok: str, symbols: dict[str, Symbol], where: str) -> int:
-    """Parse a numeric literal OR look up an `.equ` name. Used by `.dw`
-    arguments and by all operand positions that take a constant."""
-    if tok and tok[0].isalpha() or tok.startswith("_"):
-        # Identifier --- must be a previously-defined `.equ`.
-        sym = symbols.get(tok)
-        if sym is None:
-            raise AsmError(where, f"undefined symbol: {tok!r}")
-        if sym.kind != "equate":
-            raise AsmError(
-                where,
-                f"{tok!r} is a label (PC address), not a constant; "
-                f"expected an .equ value here",
-            )
-        return sym.value
-    return _parse_int(tok, where)
-
-
-def _parse_int(tok: str, where: str) -> int:
-    """Parse a signed numeric literal: decimal (default), `0x` hex,
-    `0b` binary. Leading `-` accepted for signed offsets."""
+def _parse_int(tok: str, line: int = 0,
+               filename: str = "<unknown>") -> int:
+    """Parse decimal, 0x hex, 0b binary int with optional _ separators."""
     if not tok:
-        raise AsmError(where, "empty numeric literal")
-    s = tok
-    negative = False
-    if s.startswith("-"):
-        negative = True
-        s = s[1:]
+        raise AsmError("E-RNG-001", "empty numeric literal",
+                       line=line, filename=filename)
+    negative = tok.startswith("-")
+    body = tok[1:] if negative else tok
+    clean = body.replace("_", "")
     try:
-        if s.startswith("0x") or s.startswith("0X"):
-            val = int(s, 16)
-        elif s.startswith("0b") or s.startswith("0B"):
-            val = int(s, 2)
+        if clean.startswith(("0x", "0X")):
+            val = int(clean[2:], 16)
+        elif clean.startswith(("0b", "0B")):
+            val = int(clean[2:], 2)
         else:
-            val = int(s, 10)
+            val = int(clean, 10)
     except ValueError:
-        raise AsmError(where, f"not a valid integer literal: {tok!r}")
+        raise AsmError("E-RNG-001",
+                       f"not a valid integer literal: '{tok}'",
+                       line=line, filename=filename)
     return -val if negative else val
 
 
-# ===========================================================================
-# Pass 1: collect labels + equates, assign PC slots
-# ===========================================================================
+def _looks_like_ident(tok: str) -> bool:
+    return bool(tok) and (tok[0].isascii() and tok[0].isalpha() or tok[0] == "_")
 
 
-def _pc_advance_for(stmt: Statement) -> int:
-    """Number of 16-bit slots this statement consumes."""
+def _parse_reg(tok: str) -> Optional[int]:
+    """Parse ``R0``..``R7`` (case-insensitive).  Returns None on failure."""
+    lower = tok.lower()
+    if not lower.startswith("r"):
+        return None
+    body = lower[1:]
+    if len(body) != 1:
+        return None
+    try:
+        n = int(body)
+    except ValueError:
+        return None
+    return n if 0 <= n <= 7 else None
+
+
+def _is_valid_ident(s: str) -> bool:
+    """Label pattern: [A-Za-z_][A-Za-z0-9_]* (ASCII-only, no dashes)."""
+    if not s:
+        return False
+    if not (s[0].isascii() and s[0].isalpha() or s[0] == "_"):
+        return False
+    return all((c.isascii() and c.isalnum()) or c == "_" for c in s[1:])
+
+
+def _is_valid_bus_mode_ident(s: str) -> bool:
+    """Bus-mode names allow hyphens: [A-Za-z_][A-Za-z0-9_-]* (ASCII-only)."""
+    if not s:
+        return False
+    if not (s[0].isascii() and s[0].isalpha() or s[0] == "_"):
+        return False
+    return all((c.isascii() and c.isalnum()) or c in "_-" for c in s[1:])
+
+
+def _tokenize_operands(operand_region: str) -> List[str]:
+    """Split operands by comma or whitespace, preserving key=value tokens."""
+    out: List[str] = []
+    for piece in operand_region.split(","):
+        for tok in piece.split():
+            if tok:
+                out.append(tok)
+    return out
+
+
+def _try_split_label(body: str) -> Optional[Tuple[str, str]]:
+    """Try to split 'LABEL:rest'.  Returns None if no valid label prefix."""
+    idx = body.find(":")
+    if idx < 0:
+        return None
+    label = body[:idx].rstrip()
+    rest = body[idx + 1:].lstrip()
+    if not _is_valid_ident(label):
+        return None
+    return label, rest
+
+
+# ---------------------------------------------------------------------------
+# Statement dataclass
+# ---------------------------------------------------------------------------
+
+@dataclass
+class Statement:
+    filename: str
+    line: int
+    label: Optional[str]
+    mnemonic: Optional[str]       # uppercase or None
+    directive: Optional[str]      # lowercase (.equ, .dw) or None
+    operands: List[str]
+
+
+# ---------------------------------------------------------------------------
+# Symbol table
+# ---------------------------------------------------------------------------
+
+class SymbolTable:
+    def __init__(self) -> None:
+        self._map: Dict[str, Tuple[str, int, int]] = {}
+        # key -> (kind, value, line_no)  kind in {"label","equate"}
+
+    def bind_label(self, name: str, pc: int, line: int,
+                   filename: str) -> None:
+        if not _is_valid_ident(name):
+            raise AsmError("E-SYM-001",
+                           f"invalid label name: '{name}'",
+                           line=line, filename=filename)
+        if is_reserved_name(name):
+            raise AsmError("E-SYM-005",
+                           f"label name '{name}' collides with a reserved "
+                           f"mnemonic / symbol",
+                           line=line, filename=filename)
+        if name in self._map:
+            prior_kind, _, prior_line = self._map[name]
+            raise AsmError("E-SYM-001",
+                           f"'{name}' re-defined (prior {prior_kind} "
+                           f"on line {prior_line})",
+                           line=line, filename=filename)
+        self._map[name] = ("label", pc, line)
+
+    def bind_equate(self, name: str, value: int, line: int,
+                    filename: str) -> None:
+        if not _is_valid_ident(name):
+            raise AsmError("E-SYM-002",
+                           f"invalid equate name: '{name}'",
+                           line=line, filename=filename)
+        if is_reserved_name(name):
+            raise AsmError("E-SYM-005",
+                           f"equate name '{name}' collides with a reserved "
+                           f"mnemonic / symbol",
+                           line=line, filename=filename)
+        if name in self._map:
+            prior_kind, _, prior_line = self._map[name]
+            code = "E-SYM-001" if prior_kind == "label" else "E-SYM-002"
+            raise AsmError(code,
+                           f"'{name}' re-defined (prior {prior_kind} "
+                           f"on line {prior_line})",
+                           line=line, filename=filename)
+        self._map[name] = ("equate", value, line)
+
+    def get_label(self, name: str, line: int,
+                  filename: str) -> int:
+        if name not in self._map:
+            raise AsmError("E-SYM-003",
+                           f"undefined branch target: '{name}'",
+                           line=line, filename=filename)
+        kind, val, _ = self._map[name]
+        if kind != "label":
+            raise AsmError("E-SYM-003",
+                           f"BRANCH_ON target '{name}' is an .equ "
+                           f"constant, not a label",
+                           line=line, filename=filename)
+        return val
+
+    def get_equate(self, name: str, line: int,
+                   filename: str) -> int:
+        if name not in self._map:
+            raise AsmError("E-SYM-004",
+                           f"undefined symbol: '{name}'",
+                           line=line, filename=filename)
+        kind, val, _ = self._map[name]
+        if kind != "equate":
+            raise AsmError("E-SYM-004",
+                           f"'{name}' is a label (PC address), not a "
+                           f"constant; expected an .equ value here",
+                           line=line, filename=filename)
+        return val
+
+    def get_any(self, name: str, line: int, filename: str) -> int:
+        """Resolve label or equate (for operand contexts)."""
+        if name not in self._map:
+            raise AsmError("E-SYM-004",
+                           f"undefined symbol: '{name}'",
+                           line=line, filename=filename)
+        kind, val, _ = self._map[name]
+        if kind == "equate":
+            return val
+        raise AsmError("E-SYM-004",
+                        f"'{name}' is a label (PC address), not a "
+                        f"constant; expected an .equ value here",
+                        line=line, filename=filename)
+
+
+def _resolve_literal_or_equate(tok: str, syms: SymbolTable,
+                                line: int,
+                                filename: str) -> int:
+    if _looks_like_ident(tok):
+        return syms.get_any(tok, line, filename)
+    return _parse_int(tok, line, filename)
+
+
+def _parse_int_raw(tok: str) -> Optional[int]:
+    """Parse integer without raising (for pairing check)."""
+    try:
+        return _parse_int(tok)
+    except (AsmError, ValueError):
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Lexer (pass 0)
+# ---------------------------------------------------------------------------
+
+RAW_PRAGMA = "(use-raw-primitives)"
+ALLOWED_DIRECTIVES = frozenset([".equ", ".dw"])
+
+
+def lex(source: str, filename: str) -> Tuple[List[Statement], bool]:
+    """Tokenise source into Statements.  Returns (statements, raw_mode)."""
+    statements: List[Statement] = []
+    raw_mode = False
+    first_instruction_seen = False
+
+    for idx, raw_line in enumerate(source.splitlines()):
+        line_no = idx + 1
+        # Strip trailing CR (CRLF tolerance per §12.1).
+        trimmed = raw_line.rstrip("\r")
+        body = _strip_comment(trimmed).strip()
+
+        if not body:
+            continue
+
+        # Raw-primitives pragma (§12.1).
+        if body == RAW_PRAGMA:
+            if first_instruction_seen:
+                raise AsmError("E-RAW-002",
+                               "raw pragma must be the first non-comment line",
+                               line=line_no, filename=filename)
+            raw_mode = True
+            continue
+
+        # Malformed pragma attempt.
+        if body.startswith("("):
+            raise AsmError("E-RAW-003",
+                           f"pragma must read exactly '{RAW_PRAGMA}'; "
+                           f"got '{body}'",
+                           line=line_no, filename=filename)
+
+        # Try to peel a label prefix.
+        result = _try_split_label(body)
+        if result is not None:
+            label, body = result
+        else:
+            label = None
+
+        if not body:
+            # Label-only line.
+            statements.append(Statement(
+                filename=filename, line=line_no,
+                label=label, mnemonic=None, directive=None, operands=[],
+            ))
+            continue
+
+        # Split into head token + rest.
+        parts = body.split(None, 1)
+        head = parts[0]
+        rest = parts[1] if len(parts) > 1 else ""
+
+        # Directive?
+        if head.startswith("."):
+            directive = head.lower()
+            if directive not in ALLOWED_DIRECTIVES:
+                raise AsmError("E-LEX-005",
+                               f"unknown directive '{directive}' "
+                               f"(allowed: .equ, .dw)",
+                               line=line_no, filename=filename)
+            first_instruction_seen = True
+            statements.append(Statement(
+                filename=filename, line=line_no,
+                label=label, mnemonic=None,
+                directive=directive,
+                operands=_tokenize_operands(rest),
+            ))
+            continue
+
+        # Mnemonic: case-insensitive; normalise to UPPER.
+        upper = head.upper()
+        if upper not in MNEMONICS:
+            raise AsmError("E-LEX-001",
+                           f"unknown mnemonic: '{upper}' "
+                           f"(note: in v0.2 mnemonics are case-insensitive)",
+                           line=line_no, filename=filename)
+
+        first_instruction_seen = True
+        statements.append(Statement(
+            filename=filename, line=line_no,
+            label=label, mnemonic=upper, directive=None,
+            operands=_tokenize_operands(rest),
+        ))
+
+    return statements, raw_mode
+
+
+# ---------------------------------------------------------------------------
+# Pass 1: build symbol table + assign PCs
+# ---------------------------------------------------------------------------
+
+def _pc_advance(stmt: Statement) -> int:
     if stmt.directive == ".equ":
         return 0
     if stmt.directive == ".dw":
-        return len(stmt.operands)
-    if stmt.directive is not None:
-        # Should have been caught by directive validation, but be defensive.
-        return 0
+        n = len(stmt.operands)
+        if n > MAX_PROGRAM_WORDS:
+            raise AsmError("E-FRM-001",
+                           f".dw operand count {n} exceeds "
+                           f"program-memory budget of {MAX_PROGRAM_WORDS} words",
+                           line=stmt.line, filename=stmt.filename)
+        return n
     if stmt.mnemonic is not None:
         return 1
-    return 0  # label-only
+    return 0
 
 
-def pass1(
-    statements: list[Statement], filename: str
-) -> tuple[dict[str, Symbol], list[tuple[int, Statement]]]:
-    """Walk all statements once. Assign each a PC. Collect labels +
-    `.equ` constants into a single symbol table. Returns the symbol table
-    plus a list of (pc, statement) for pass 2 to encode."""
-    symbols: dict[str, Symbol] = {}
-    pc_stmts: list[tuple[int, Statement]] = []
+def pass1(statements: List[Statement]) -> Tuple[SymbolTable, List[Tuple[int, Statement]]]:
+    """Build symbol table; return (symtab, [(pc, stmt), ...]) for encodeable stmts."""
+    syms = SymbolTable()
+    pc_stmts: List[Tuple[int, Statement]] = []
     pc = 0
-
-    def bind(name: str, sym: Symbol) -> None:
-        where = f"{filename}:{sym.line_no}"
-        _validate_name(name, sym.kind, where)
-        prior = symbols.get(name)
-        if prior is not None:
-            raise AsmError(
-                where,
-                f"{sym.kind} {name!r} re-defined "
-                f"(prior {prior.kind} on line {prior.line_no})",
-            )
-        symbols[name] = sym
 
     for stmt in statements:
         if stmt.label is not None:
-            bind(
-                stmt.label,
-                Symbol(name=stmt.label, kind="label", value=pc, line_no=stmt.line_no),
-            )
+            syms.bind_label(stmt.label, pc, stmt.line, stmt.filename)
 
         if stmt.directive == ".equ":
             if len(stmt.operands) != 2:
-                raise AsmError(
-                    f"{filename}:{stmt.line_no}",
-                    ".equ takes exactly two operands: NAME, VALUE",
-                )
-            name, val_tok = stmt.operands
+                raise AsmError("E-OP-001",
+                               ".equ takes exactly two operands: NAME, VALUE",
+                               line=stmt.line, filename=stmt.filename)
+            name = stmt.operands[0]
             value = _resolve_literal_or_equate(
-                val_tok, symbols, f"{filename}:{stmt.line_no}"
-            )
-            bind(
-                name,
-                Symbol(
-                    name=name,
-                    kind="equate",
-                    value=value,
-                    line_no=stmt.line_no,
-                ),
-            )
-            # `.equ` does not occupy a PC slot.
+                stmt.operands[1], syms, stmt.line, stmt.filename)
+            syms.bind_equate(name, value, stmt.line, stmt.filename)
             continue
 
-        advance = _pc_advance_for(stmt)
+        advance = _pc_advance(stmt)
         if advance > 0:
             pc_stmts.append((pc, stmt))
         pc += advance
+        if pc > MAX_PROGRAM_WORDS:
+            raise AsmError("E-RNG-002",
+                           f"program exceeds {MAX_PROGRAM_WORDS} instruction "
+                           f"slots (PC overflow)",
+                           line=stmt.line, filename=stmt.filename)
 
-        if pc >= (1 << 11):
-            raise AsmError(
-                f"{filename}:{stmt.line_no}",
-                f"program exceeds 2048 instruction slots (PC overflow)",
-            )
-
-    return symbols, pc_stmts
-
-
-# ===========================================================================
-# Per-opcode operand parsers (pass 2 helpers)
-# ===========================================================================
+    return syms, pc_stmts
 
 
-def _parse_kv_operands(stmt: Statement, allowed: set[str]) -> dict[str, str]:
-    """Parse `key=value key=value ...` operands. Reject duplicates, reject
-    keys not in `allowed`, reject positional tokens (must contain `=`)."""
-    out: dict[str, str] = {}
+# ---------------------------------------------------------------------------
+# Pass 2: helpers
+# ---------------------------------------------------------------------------
+
+def _parse_kv_operands(stmt: Statement, allowed: List[str]) -> Dict[str, str]:
+    """Parse key=value operands; raise on unknown key or duplicate."""
+    out: Dict[str, str] = {}
     for tok in stmt.operands:
         if "=" not in tok:
-            raise AsmError(
-                stmt.where,
-                f"expected key=value operand, got positional token {tok!r}",
-            )
-        key, _, val = tok.partition("=")
+            raise AsmError("E-OP-004",
+                           f"expected key=value operand, got positional "
+                           f"token '{tok}'",
+                           line=stmt.line, filename=stmt.filename)
+        key, val = tok.split("=", 1)
         if key not in allowed:
-            raise AsmError(
-                stmt.where,
-                f"unknown operand key {key!r} (allowed: {sorted(allowed)})",
-            )
+            sorted_allowed = sorted(allowed)
+            raise AsmError("E-OP-002",
+                           f"unknown operand key '{key}' "
+                           f"(allowed: {sorted_allowed!r})",
+                           line=stmt.line, filename=stmt.filename)
         if key in out:
-            raise AsmError(stmt.where, f"duplicate operand key {key!r}")
+            raise AsmError("E-OP-003",
+                           f"duplicate operand key '{key}'",
+                           line=stmt.line, filename=stmt.filename)
         out[key] = val
     return out
 
 
-def _resolve_flag_triple(kv: dict[str, str], where: str) -> tuple[bool, bool, bool]:
-    """Decode `expect=` / `mask=` / `capture=` per the moleasm convention.
-    Defaults: expect=X (don't care, bit=0), mask=0, capture=0.
-    `expect=X` combined with `mask=1` is rejected as contradictory."""
+def _resolve_flag_triple(kv: Dict[str, str], stmt: Statement
+                          ) -> Tuple[bool, bool, bool]:
+    """Resolve expect/mask/capture from a kv dict."""
     expect_str = kv.get("expect", "X").upper()
     mask_str = kv.get("mask", "0")
     capture_str = kv.get("capture", "0")
 
-    if expect_str not in {"0", "1", "X"}:
-        raise AsmError(where, f"expect must be 0|1|X, got {expect_str!r}")
-    if mask_str not in {"0", "1"}:
-        raise AsmError(where, f"mask must be 0|1, got {mask_str!r}")
-    if capture_str not in {"0", "1"}:
-        raise AsmError(where, f"capture must be 0|1, got {capture_str!r}")
+    if expect_str not in ("0", "1", "X"):
+        raise AsmError("E-OP-005",
+                       f"expect must be 0|1|X, got '{expect_str}'",
+                       line=stmt.line, filename=stmt.filename)
+    if mask_str not in ("0", "1"):
+        raise AsmError("E-OP-002",
+                       f"mask must be 0|1, got '{mask_str}'",
+                       line=stmt.line, filename=stmt.filename)
+    if capture_str not in ("0", "1"):
+        raise AsmError("E-OP-002",
+                       f"capture must be 0|1, got '{capture_str}'",
+                       line=stmt.line, filename=stmt.filename)
 
     mask = mask_str == "1"
     capture = capture_str == "1"
 
     if expect_str == "X":
         if mask:
-            raise AsmError(
-                where,
-                "expect=X is don't-care and cannot be combined with mask=1; "
-                "set an explicit expect=0|1 if you want to compare",
-            )
+            raise AsmError("E-OP-005",
+                           "expect=X is don't-care and cannot be combined "
+                           "with mask=1; set an explicit expect=0|1",
+                           line=stmt.line, filename=stmt.filename)
         expect = False
     else:
         expect = expect_str == "1"
@@ -761,615 +1142,964 @@ def _resolve_flag_triple(kv: dict[str, str], where: str) -> tuple[bool, bool, bo
     return expect, mask, capture
 
 
-def _resolve_tx(kv: dict[str, str], key: str, where: str) -> int:
+def _resolve_tx_key(kv: Dict[str, str], key: str, stmt: Statement,
+                    raw_mode: bool) -> int:
+    """Resolve a tx=<sym> key.  Case-insensitive; raw_mode enables reserved."""
     if key not in kv:
-        raise AsmError(where, f"missing required operand: {key}=<symbol>")
+        raise AsmError("E-OP-001",
+                       f"missing required operand: {key}=<tx-symbol>",
+                       line=stmt.line, filename=stmt.filename)
     sym = kv[key]
-    if sym not in TX_SYMBOLS:
-        raise AsmError(
-            where,
-            f"{key}={sym!r} is not a named tx symbol "
-            f"(allowed: {sorted(set(TX_SYMBOLS))})",
+    lower = sym.lower()
+    if lower in TX_SYMBOLS:
+        return TX_SYMBOLS[lower]
+    # raw/ mode: accept "reserved", "0b11", or "3".
+    if raw_mode and lower in ("reserved", "0b11", "3"):
+        return 0b11
+    # Numeric literals 0..2 also accepted.
+    try:
+        n = int(sym)
+        if 0 <= n <= 2:
+            return n
+        if n == 3:
+            if raw_mode:
+                return 3
+            raise AsmError("E-WIRE-001",
+                           "tx=reserved (0b11) requires '(use-raw-primitives)' "
+                           "pragma",
+                           line=stmt.line, filename=stmt.filename)
+    except ValueError:
+        pass
+    raise AsmError("E-OP-002",
+                   f"{key}='{sym}' is not a named tx symbol "
+                   f"(allowed: {sorted(TX_SYMBOLS)!r})",
+                   line=stmt.line, filename=stmt.filename)
+
+
+def _resolve_cond(tok: str, stmt: Statement) -> int:
+    upper = tok.upper()
+    if upper not in COND_CODES:
+        raise AsmError("E-LEX-004",
+                       f"cond code '{tok}' is not named "
+                       f"(allowed: {sorted(COND_CODES)!r})",
+                       line=stmt.line, filename=stmt.filename)
+    return COND_CODES[upper]
+
+
+def _resolve_register(tok: str, stmt: Statement) -> int:
+    n = _parse_reg(tok)
+    if n is None:
+        raise AsmError("E-OP-007",
+                       f"register '{tok}' is not valid; use R0..R7",
+                       line=stmt.line, filename=stmt.filename)
+    return n
+
+
+def _resolve_branch_target(tok: str, branch_pc: int,
+                            syms: SymbolTable, stmt: Statement) -> int:
+    if _looks_like_ident(tok):
+        label_pc = syms.get_label(tok, stmt.line, stmt.filename)
+        offset = label_pc - branch_pc - 1
+    else:
+        offset = _parse_int(tok, stmt.line, stmt.filename)
+    if not (-512 <= offset <= 511):
+        raise AsmError("E-RNG-003",
+                       f"BRANCH_ON offset {offset} out of signed 10-bit "
+                       f"range (branch_pc={branch_pc})",
+                       line=stmt.line, filename=stmt.filename)
+    return offset
+
+
+def _bus_mode_is_pp(wire: int) -> bool:
+    """True iff mode wire value is a push-pull class (§9, AGENTS §3.13)."""
+    return wire in (2, 3)
+
+
+# ---------------------------------------------------------------------------
+# EMIT_BYTE pairing check  (§5.5, E-WIRE-003)
+# ---------------------------------------------------------------------------
+
+def _find_emit_byte_pair(pc_stmts: List[Tuple[int, Statement]],
+                          start: int,
+                          syms: SymbolTable) -> bool:
+    """Return True if a valid pairing instruction follows EMIT_BYTE mask=1."""
+    for _, stmt in pc_stmts[start:]:
+        mne = stmt.mnemonic
+        if mne is None:
+            # .dw directive: skip.
+            continue
+        # BRANCH_ON MISMATCH, <target> — case-insensitive.
+        if mne == "BRANCH_ON":
+            if (stmt.operands
+                    and stmt.operands[0].upper() == "MISMATCH"):
+                return True
+        # FLAG_CLEAR with bit 0 set in the mask operand.
+        if mne == "FLAG_CLEAR":
+            if stmt.operands:
+                mask_tok = stmt.operands[0]
+                if _looks_like_ident(mask_tok):
+                    try:
+                        m = syms.get_any(mask_tok, stmt.line,
+                                         stmt.filename)
+                        if m & 1:
+                            return True
+                    except AsmError:
+                        pass
+                else:
+                    m = _parse_int_raw(mask_tok)
+                    if m is not None and m & 1:
+                        return True
+        # Any other instruction: unpaired.
+        return False
+    return False
+
+
+# ---------------------------------------------------------------------------
+# Pass 2: encode instructions
+# ---------------------------------------------------------------------------
+
+def _try_parse_kv_or_positional(stmt: Statement, keys: List[str],
+                                  expected_count: int) -> Dict[str, str]:
+    """Parse key=value or positional operands (for LOAD_TIMING)."""
+    any_kv = any("=" in o for o in stmt.operands)
+    if any_kv:
+        return _parse_kv_operands(stmt, keys)
+    if len(stmt.operands) != expected_count:
+        raise AsmError("E-OP-001",
+                       f"expected {expected_count} positional operands, "
+                       f"got {len(stmt.operands)}",
+                       line=stmt.line, filename=stmt.filename)
+    return dict(zip(keys, stmt.operands))
+
+
+def _encode_mnemonic(mne: str, stmt: Statement, pc: int,
+                     syms: SymbolTable,
+                     active_role: Optional[bool],
+                     active_bus_mode: Optional[int],
+                     raw_mode: bool,
+                     pc_stmts: List[Tuple[int, Statement]],
+                     stmt_idx: int) -> int:
+    ln = stmt.line
+    fn = stmt.filename
+
+    # ------------------------------------------------------------------
+    if mne == "HALT":
+        kv = _parse_kv_operands(stmt, ["status"])
+        status_tok = kv.get("status", "0")
+        status = _resolve_literal_or_equate(status_tok, syms, ln, fn)
+        return enc_halt(int(status), ln, fn)
+
+    # ------------------------------------------------------------------
+    if mne == "EMIT_BIT_IMM":
+        kv = _parse_kv_operands(stmt, ["tx", "expect", "mask", "capture"])
+        tx = _resolve_tx_key(kv, "tx", stmt, raw_mode)
+        e, mk, c = _resolve_flag_triple(kv, stmt)
+        return enc_emit_bit_imm(tx, e, mk, c, raw_mode, ln, fn)
+
+    # ------------------------------------------------------------------
+    if mne == "EMIT_BIT_REG":
+        kv = _parse_kv_operands(stmt, ["src", "expect", "mask", "capture"])
+        if "src" not in kv:
+            raise AsmError("E-OP-001",
+                           "EMIT_BIT_REG requires src=<reg>", ln, fn)
+        src = _resolve_register(kv["src"], stmt)
+        e, mk, c = _resolve_flag_triple(kv, stmt)
+        return enc_emit_bit_reg(src, e, mk, c, ln, fn)
+
+    # ------------------------------------------------------------------
+    if mne == "EMIT_QUARTER_IMM":
+        kv = _parse_kv_operands(stmt,
+                                 ["sda", "scl", "expect", "mask", "capture"])
+        sda = _resolve_tx_key(kv, "sda", stmt, raw_mode)
+        scl = _resolve_tx_key(kv, "scl", stmt, raw_mode)
+        e, mk, c = _resolve_flag_triple(kv, stmt)
+        # §3.13 / §5.3: target role under PP-class: scl=recessive illegal.
+        if (not raw_mode
+                and active_role is True
+                and active_bus_mode is not None
+                and _bus_mode_is_pp(active_bus_mode)
+                and scl == 0b01):
+            mode_name = {2: "i3c-PP", 3: "hdr-ddr"}.get(
+                active_bus_mode, "<pp>")
+            raise AsmError("E-WIRE-002",
+                           f"EMIT_QUARTER scl=recessive is illegal in "
+                           f"target role under PP-class BUS_MODE "
+                           f"({mode_name})",
+                           ln, fn)
+        return enc_emit_quarter_imm(sda, scl, e, mk, c, raw_mode, ln, fn)
+
+    # ------------------------------------------------------------------
+    if mne == "EMIT_QUARTER_REG":
+        kv = _parse_kv_operands(stmt, ["src", "expect", "mask", "capture"])
+        if "src" not in kv:
+            raise AsmError("E-OP-001",
+                           "EMIT_QUARTER_REG requires src=<reg>", ln, fn)
+        src = _resolve_register(kv["src"], stmt)
+        e, mk, c = _resolve_flag_triple(kv, stmt)
+        return enc_emit_quarter_reg(src, e, mk, c, ln, fn)
+
+    # ------------------------------------------------------------------
+    if mne == "EMIT_BYTE":
+        kv = _parse_kv_operands(stmt, ["expect", "mask", "capture"])
+        e, mk, c = _resolve_flag_triple(kv, stmt)
+        # §5.5 E-WIRE-003: mask=1 must be followed by pairing instruction.
+        if mk and not raw_mode:
+            if not _find_emit_byte_pair(pc_stmts, stmt_idx + 1, syms):
+                raise AsmError("E-WIRE-003",
+                               f"EMIT_BYTE mask=1 at line {ln} must be "
+                               f"followed by BRANCH_ON MISMATCH or "
+                               f"FLAG_CLEAR with bit 0 set; declare "
+                               f"'(use-raw-primitives)' to suppress",
+                               ln, fn)
+        return enc_emit_byte(e, mk, c)
+
+    # ------------------------------------------------------------------
+    if mne == "SAMPLE_BIT_ON_SCL":
+        allowed = (["dst", "expect", "mask", "capture"] if raw_mode
+                   else ["expect", "mask", "capture"])
+        kv = _parse_kv_operands(stmt, allowed)
+        e, mk, c = _resolve_flag_triple(kv, stmt)
+        if "dst" in kv:
+            dst = _resolve_register(kv["dst"], stmt)
+            if dst != 7 and not raw_mode:
+                raise AsmError("E-REG-001",
+                               "capture must write to R7; use raw/ pragma "
+                               "to override", ln, fn)
+        else:
+            dst = 7   # canonical
+        return enc_sample_bit_on_scl(dst, e, mk, c, raw_mode, ln, fn)
+
+    # ------------------------------------------------------------------
+    if mne == "DRIVE_BIT_ON_SCL":
+        allowed = (["tx", "dst", "expect", "mask", "capture"] if raw_mode
+                   else ["tx", "expect", "mask", "capture"])
+        kv = _parse_kv_operands(stmt, allowed)
+        tx = _resolve_tx_key(kv, "tx", stmt, raw_mode)
+        e, mk, c = _resolve_flag_triple(kv, stmt)
+        if "dst" in kv:
+            if not raw_mode:
+                raise AsmError("E-RAW-001",
+                               "dst override on DRIVE_BIT_ON_SCL requires "
+                               "'(use-raw-primitives)'", ln, fn)
+            dst = _resolve_register(kv["dst"], stmt)
+            return enc_drive_bit_on_scl_raw(dst, tx, e, mk, c, ln, fn)
+        return enc_drive_bit_on_scl(tx, e, mk, c, raw_mode, ln, fn)
+
+    # ------------------------------------------------------------------
+    if mne == "STRETCH_SCL_IMM":
+        if len(stmt.operands) != 1:
+            raise AsmError("E-OP-001",
+                           "STRETCH_SCL_IMM takes one positional operand: "
+                           "n_quarters", ln, fn)
+        n = _resolve_literal_or_equate(stmt.operands[0], syms, ln, fn)
+        return enc_stretch_scl_imm(int(n), ln, fn)
+
+    # ------------------------------------------------------------------
+    if mne == "STRETCH_SCL_REG":
+        kv = _parse_kv_operands(stmt, ["src"])
+        if "src" not in kv:
+            raise AsmError("E-OP-001",
+                           "STRETCH_SCL_REG requires src=<reg>", ln, fn)
+        src = _resolve_register(kv["src"], stmt)
+        return enc_stretch_scl_reg(src, ln, fn)
+
+    # ------------------------------------------------------------------
+    if mne == "BRANCH_ON":
+        if len(stmt.operands) != 2:
+            raise AsmError("E-OP-001",
+                           "BRANCH_ON takes two operands: cond, target",
+                           ln, fn)
+        cond = _resolve_cond(stmt.operands[0], stmt)
+        if cond >= 12 and not raw_mode:
+            raise AsmError("E-CTRL-001",
+                           f"cond code {cond} is reserved; values 12..15 "
+                           f"require raw/ pragma", ln, fn)
+        offset = _resolve_branch_target(stmt.operands[1], pc, syms, stmt)
+        return enc_branch_on(cond, int(offset), ln, fn)
+
+    # ------------------------------------------------------------------
+    if mne == "WAIT_ON":
+        if len(stmt.operands) != 2:
+            raise AsmError("E-OP-001",
+                           "WAIT_ON takes two operands: cond, timeout",
+                           ln, fn)
+        cond = _resolve_cond(stmt.operands[0], stmt)
+        if cond >= 12 and not raw_mode:
+            raise AsmError("E-CTRL-001",
+                           f"cond code {cond} is reserved; values 12..15 "
+                           f"require raw/ pragma", ln, fn)
+        timeout = _resolve_literal_or_equate(stmt.operands[1], syms, ln, fn)
+        return enc_wait_on(cond, int(timeout), ln, fn)
+
+    # ------------------------------------------------------------------
+    if mne == "SET_BUS_MODE":
+        if len(stmt.operands) != 1:
+            raise AsmError("E-OP-001",
+                           "SET_BUS_MODE takes one operand: <bus-mode>",
+                           ln, fn)
+        raw_tok = stmt.operands[0]
+        lower = raw_tok.lower()
+        if not raw_mode:
+            if raw_tok[0].isdigit():
+                raise AsmError("E-OP-006",
+                               f"bus mode '{raw_tok}' is not named; "
+                               f"use i2c, i3c-OD, i3c-PP, or hdr-ddr",
+                               ln, fn)
+            if not _is_valid_bus_mode_ident(lower):
+                raise AsmError("E-OP-006",
+                               f"bus mode '{raw_tok}' is not named "
+                               f"(allowed: i2c, i3c-OD, i3c-PP, hdr-ddr)",
+                               ln, fn)
+            if lower not in BUS_MODES:
+                raise AsmError("E-OP-006",
+                               f"bus mode '{raw_tok}' is not named "
+                               f"(allowed: {sorted(BUS_MODES)!r})",
+                               ln, fn)
+            return enc_set_bus_mode(BUS_MODES[lower], ln, fn)
+        # raw/ mode: named or numeric.
+        if lower in BUS_MODES:
+            return enc_set_bus_mode(BUS_MODES[lower], ln, fn)
+        n = _resolve_literal_or_equate(raw_tok, syms, ln, fn)
+        if not (0 <= n < 16):
+            raise AsmError("E-RNG-001",
+                           f"SET_BUS_MODE mode must be 0..15, got {n}",
+                           ln, fn)
+        return enc_set_bus_mode(int(n), ln, fn)
+
+    # ------------------------------------------------------------------
+    if mne == "SET_ROLE":
+        if len(stmt.operands) != 1:
+            raise AsmError("E-OP-001",
+                           "SET_ROLE takes one operand: controller|target",
+                           ln, fn)
+        tok = stmt.operands[0].lower()
+        if tok not in ROLE_NAMES:
+            raise AsmError("E-OP-008",
+                           f"SET_ROLE operand must be 'controller' or "
+                           f"'target', got '{stmt.operands[0]}'",
+                           ln, fn)
+        return enc_set_role(ROLE_NAMES[tok] != 0)
+
+    # ------------------------------------------------------------------
+    if mne == "FLAG_CLEAR":
+        if len(stmt.operands) != 1:
+            raise AsmError("E-OP-001",
+                           "FLAG_CLEAR takes one operand: <5-bit mask>",
+                           ln, fn)
+        mask_val = _resolve_literal_or_equate(stmt.operands[0], syms, ln, fn)
+        if not (0 <= mask_val <= 31):
+            raise AsmError("E-OP-009",
+                           f"FLAG_CLEAR mask must be a 5-bit value "
+                           f"(0..31), got {mask_val}",
+                           ln, fn)
+        return enc_flag_clear(int(mask_val), ln, fn)
+
+    # ------------------------------------------------------------------
+    if mne == "MARK":
+        kv = _parse_kv_operands(stmt, ["label"])
+        if "label" not in kv:
+            raise AsmError("E-OP-001",
+                           "MARK requires label=<0..16383>", ln, fn)
+        label_val = _resolve_literal_or_equate(kv["label"], syms, ln, fn)
+        return enc_mark(int(label_val), ln, fn)
+
+    # ------------------------------------------------------------------
+    if mne == "LOAD_TIMING":
+        kv = _try_parse_kv_or_positional(stmt, ["reg", "divider"], 2)
+        if "reg" not in kv:
+            raise AsmError("E-OP-001",
+                           "LOAD_TIMING requires reg=<0..7>", ln, fn)
+        if "divider" not in kv:
+            raise AsmError("E-OP-001",
+                           "LOAD_TIMING requires divider=<0..16383>", ln, fn)
+        reg = _resolve_literal_or_equate(kv["reg"], syms, ln, fn)
+        divider = _resolve_literal_or_equate(kv["divider"], syms, ln, fn)
+        return enc_load_timing(int(reg), int(divider), ln, fn)
+
+    # ------------------------------------------------------------------
+    if mne == "LOAD_IMM":
+        if len(stmt.operands) != 2:
+            raise AsmError("E-OP-001",
+                           "LOAD_IMM takes two operands: Rn, imm",
+                           ln, fn)
+        dst = _resolve_register(stmt.operands[0], stmt)
+        imm = _resolve_literal_or_equate(stmt.operands[1], syms, ln, fn)
+        return enc_load_imm(dst, int(imm), ln, fn)
+
+    # ------------------------------------------------------------------
+    if mne == "MOV":
+        if len(stmt.operands) != 2:
+            raise AsmError("E-OP-001",
+                           "MOV takes two operands: Rdst, Rsrc", ln, fn)
+        dst = _resolve_register(stmt.operands[0], stmt)
+        src = _resolve_register(stmt.operands[1], stmt)
+        return enc_mov(dst, src, ln, fn)
+
+    # ------------------------------------------------------------------
+    if mne == "ADD_IMM":
+        if len(stmt.operands) != 3:
+            raise AsmError("E-OP-001",
+                           "ADD_IMM takes three operands: Rdst, Rsrc, imm",
+                           ln, fn)
+        dst = _resolve_register(stmt.operands[0], stmt)
+        src = _resolve_register(stmt.operands[1], stmt)
+        imm = _resolve_literal_or_equate(stmt.operands[2], syms, ln, fn)
+        return enc_add_imm(dst, src, int(imm), ln, fn)
+
+    # ------------------------------------------------------------------
+    if mne == "DEC":
+        if len(stmt.operands) != 1:
+            raise AsmError("E-OP-001",
+                           "DEC takes one operand: Rn", ln, fn)
+        reg = _resolve_register(stmt.operands[0], stmt)
+        return enc_dec(reg, ln, fn)
+
+    # ------------------------------------------------------------------
+    if mne == "AND_IMM":
+        if len(stmt.operands) != 3:
+            raise AsmError("E-OP-001",
+                           "AND_IMM takes three operands: Rdst, Rsrc, imm",
+                           ln, fn)
+        dst = _resolve_register(stmt.operands[0], stmt)
+        src = _resolve_register(stmt.operands[1], stmt)
+        imm = _resolve_literal_or_equate(stmt.operands[2], syms, ln, fn)
+        return enc_and_imm(dst, src, int(imm), ln, fn)
+
+    # ------------------------------------------------------------------
+    if mne == "OR_IMM":
+        if len(stmt.operands) != 3:
+            raise AsmError("E-OP-001",
+                           "OR_IMM takes three operands: Rdst, Rsrc, imm",
+                           ln, fn)
+        dst = _resolve_register(stmt.operands[0], stmt)
+        src = _resolve_register(stmt.operands[1], stmt)
+        imm = _resolve_literal_or_equate(stmt.operands[2], syms, ln, fn)
+        return enc_or_imm(dst, src, int(imm), ln, fn)
+
+    # ------------------------------------------------------------------
+    if mne == "XOR_IMM":
+        if len(stmt.operands) != 3:
+            raise AsmError("E-OP-001",
+                           "XOR_IMM takes three operands: Rdst, Rsrc, imm",
+                           ln, fn)
+        dst = _resolve_register(stmt.operands[0], stmt)
+        src = _resolve_register(stmt.operands[1], stmt)
+        imm = _resolve_literal_or_equate(stmt.operands[2], syms, ln, fn)
+        return enc_xor_imm(dst, src, int(imm), ln, fn)
+
+    # ------------------------------------------------------------------
+    if mne == "SHIFT":
+        if len(stmt.operands) != 4:
+            raise AsmError("E-OP-001",
+                           "SHIFT takes four operands: Rdst, Rsrc, "
+                           "direction, shamt (direction: left|right|aright)",
+                           ln, fn)
+        dst = _resolve_register(stmt.operands[0], stmt)
+        src = _resolve_register(stmt.operands[1], stmt)
+        dir_tok = stmt.operands[2].lower()
+        if dir_tok not in SHIFT_DIRS:
+            raise AsmError("E-OP-002",
+                           f"unknown shift direction '{stmt.operands[2]}'; "
+                           f"use left, right, or aright (not aleft)",
+                           ln, fn)
+        shift_kind = SHIFT_DIRS[dir_tok]
+        shamt = _resolve_literal_or_equate(stmt.operands[3], syms, ln, fn)
+        return enc_shift(dst, src, shift_kind, int(shamt), ln, fn)
+
+    # ------------------------------------------------------------------
+    # Sugar: JMP <label>  →  BRANCH_ON ALWAYS, <label>
+    if mne == "JMP":
+        if len(stmt.operands) != 1:
+            raise AsmError("E-OP-001",
+                           "JMP takes one operand: <label>", ln, fn)
+        offset = _resolve_branch_target(stmt.operands[0], pc, syms, stmt)
+        return enc_branch_on(COND_CODES["ALWAYS"], int(offset), ln, fn)
+
+    # ------------------------------------------------------------------
+    # Sugar: LOAD_LOOP n  →  LOAD_IMM R6, n
+    if mne == "LOAD_LOOP":
+        if len(stmt.operands) != 1:
+            raise AsmError("E-OP-001",
+                           "LOAD_LOOP takes one operand: n "
+                           "(sugar for LOAD_IMM R6, n)", ln, fn)
+        imm = _resolve_literal_or_equate(stmt.operands[0], syms, ln, fn)
+        return enc_load_imm(6, int(imm), ln, fn)
+
+    # Unreachable (lex already validated the mnemonic).
+    raise AsmError("E-LEX-001", f"unhandled mnemonic: '{mne}'", ln, fn)
+
+
+def pass2(syms: SymbolTable, pc_stmts: List[Tuple[int, Statement]],
+          raw_mode: bool) -> List[int]:
+    """Encode statements to 32-bit words."""
+    out: List[int] = []
+    active_role: Optional[bool] = None      # False=ctrl, True=target
+    active_bus_mode: Optional[int] = None
+
+    for i, (pc, stmt) in enumerate(pc_stmts):
+        # .dw directive
+        if stmt.directive == ".dw":
+            for tok in stmt.operands:
+                val = _resolve_literal_or_equate(
+                    tok, syms, stmt.line, stmt.filename)
+                if not (0 <= val <= 0xFFFF_FFFF):
+                    raise AsmError("E-FRM-002",
+                                   f".dw value {val:#x} out of 32-bit range",
+                                   stmt.line, stmt.filename)
+                out.append(val)
+            continue
+
+        mne = stmt.mnemonic
+        assert mne is not None, "pc_stmts only contains directives or mnemonics"
+
+        word = _encode_mnemonic(
+            mne, stmt, pc, syms,
+            active_role, active_bus_mode, raw_mode,
+            pc_stmts, i,
         )
-    return TX_SYMBOLS[sym]
 
+        # Update linear role/bus-mode tracker.
+        if mne == "SET_ROLE":
+            active_role = bool(word & (1 << 3))
+        elif mne == "SET_BUS_MODE":
+            active_bus_mode = (word >> 3) & 0xF
 
-# ===========================================================================
-# Pass 2: encode each (pc, statement) into a 16-bit word
-# ===========================================================================
-
-
-def pass2(
-    symbols: dict[str, Symbol],
-    pc_stmts: list[tuple[int, Statement]],
-    filename: str,
-) -> list[int]:
-    """Encode each statement. Resolves label references for BRANCH_ON and
-    JMP. Returns the bytecode word stream in PC order."""
-    out: list[int] = []
-    for pc, stmt in pc_stmts:
-        where = f"{filename}:{stmt.line_no}"
-        try:
-            if stmt.directive == ".dw":
-                for tok in stmt.operands:
-                    val = _resolve_literal_or_equate(tok, symbols, where)
-                    if not 0 <= val <= 0xFFFF:
-                        raise AsmError(
-                            where,
-                            f".dw value {val:#x} out of 16-bit range",
-                        )
-                    out.append(val & 0xFFFF)
-                continue
-
-            assert stmt.mnemonic is not None
-            word = _encode_mnemonic(stmt, pc, symbols, where)
-            out.append(word & 0xFFFF)
-
-        except AsmError:
-            raise
-        except (ValueError, AssertionError) as e:
-            raise AsmError(where, str(e))
+        out.append(word)
 
     return out
 
 
-def _encode_mnemonic(
-    stmt: Statement, pc: int, symbols: dict[str, Symbol], where: str
-) -> int:
-    """Dispatch on stmt.mnemonic and produce the encoded 16-bit word."""
-    m = stmt.mnemonic
-    assert m is not None
+# ---------------------------------------------------------------------------
+# Top-level assemble()
+# ---------------------------------------------------------------------------
 
-    if m == "HALT":
-        kv = _parse_kv_operands(stmt, {"status"})
-        status_tok = kv.get("status", "0")
-        status = _resolve_literal_or_equate(status_tok, symbols, where)
-        return enc_halt(status)
+def assemble(source: str, filename: str) -> List[int]:
+    """Assemble moleasm source into a list of 32-bit words.
 
-    if m == "EMIT_BIT":
-        kv = _parse_kv_operands(stmt, {"tx", "expect", "mask", "capture"})
-        tx = _resolve_tx(kv, "tx", where)
-        e, mk, c = _resolve_flag_triple(kv, where)
-        return enc_emit_bit(tx, e, mk, c)
+    Returns the 2-word preamble followed by the instruction stream.
 
-    if m == "EMIT_QUARTER":
-        kv = _parse_kv_operands(stmt, {"sda", "scl", "expect", "mask", "capture"})
-        sda = _resolve_tx(kv, "sda", where)
-        scl = _resolve_tx(kv, "scl", where)
-        e, mk, c = _resolve_flag_triple(kv, where)
-        return enc_emit_quarter(sda, scl, e, mk, c)
-
-    if m == "SAMPLE_BIT_ON_SCL":
-        kv = _parse_kv_operands(stmt, {"expect", "mask", "capture"})
-        e, mk, c = _resolve_flag_triple(kv, where)
-        return enc_sample_bit(e, mk, c)
-
-    if m == "DRIVE_BIT_ON_SCL":
-        kv = _parse_kv_operands(stmt, {"tx", "expect", "mask", "capture"})
-        tx = _resolve_tx(kv, "tx", where)
-        e, mk, c = _resolve_flag_triple(kv, where)
-        return enc_drive_bit(tx, e, mk, c)
-
-    if m == "MARK":
-        kv = _parse_kv_operands(stmt, {"label"})
-        if "label" not in kv:
-            raise AsmError(where, "MARK requires label=<0..255>")
-        label_val = _resolve_literal_or_equate(kv["label"], symbols, where)
-        return enc_mark(label_val)
-
-    if m == "STRETCH_SCL":
-        if len(stmt.operands) != 1:
-            raise AsmError(
-                where, "STRETCH_SCL takes one positional operand: n_quarters"
-            )
-        n = _resolve_literal_or_equate(stmt.operands[0], symbols, where)
-        return enc_stretch_scl(n)
-
-    if m == "SET_BUS_MODE":
-        if len(stmt.operands) != 1:
-            raise AsmError(
-                where, "SET_BUS_MODE takes one positional operand: <bus-mode>"
-            )
-        mode_name = stmt.operands[0].lower()
-        if mode_name not in BUS_MODES:
-            raise AsmError(
-                where,
-                f"bus mode {stmt.operands[0]!r} is not named "
-                f"(allowed: {sorted(BUS_MODES)})",
-            )
-        return enc_set_bus_mode(BUS_MODES[mode_name])
-
-    if m == "LOAD_TIMING":
-        if len(stmt.operands) != 2:
-            raise AsmError(
-                where,
-                "LOAD_TIMING takes two positional operands: reg, divider_word",
-            )
-        reg_tok, word_tok = stmt.operands
-        if reg_tok in TIMING_REG_ALIASES:
-            reg = TIMING_REG_ALIASES[reg_tok]
-        else:
-            reg = _resolve_literal_or_equate(reg_tok, symbols, where)
-        word_val = _resolve_literal_or_equate(word_tok, symbols, where)
-        return enc_load_timing(reg, word_val)
-
-    if m == "WAIT_ON":
-        if len(stmt.operands) != 2:
-            raise AsmError(
-                where, "WAIT_ON takes two positional operands: cond, timeout"
-            )
-        cond_tok, timeout_tok = stmt.operands
-        cond = _resolve_cond(cond_tok, where)
-        timeout = _resolve_literal_or_equate(timeout_tok, symbols, where)
-        return enc_wait_on(cond, timeout)
-
-    if m == "BRANCH_ON":
-        if len(stmt.operands) != 2:
-            raise AsmError(
-                where,
-                "BRANCH_ON takes two positional operands: cond, target",
-            )
-        cond_tok, target_tok = stmt.operands
-        cond = _resolve_cond(cond_tok, where)
-        offset = _resolve_branch_target(target_tok, pc, symbols, where)
-        return enc_branch_on(cond, offset)
-
-    if m == "JMP":
-        if len(stmt.operands) != 1:
-            raise AsmError(where, "JMP takes one positional operand: <addr-or-label>")
-        target_tok = stmt.operands[0]
-        addr = _resolve_jmp_target(target_tok, symbols, where)
-        return enc_jmp(addr)
-
-    if m == "LOAD_LOOP":
-        if len(stmt.operands) != 2:
-            raise AsmError(
-                where, "LOAD_LOOP takes two positional operands: reg, imm8"
-            )
-        reg_tok, imm_tok = stmt.operands
-        reg = _resolve_loop_reg(reg_tok, where)
-        imm = _resolve_literal_or_equate(imm_tok, symbols, where)
-        return enc_load_loop(reg, imm)
-
-    if m == "DEC_BRANCH":
-        if len(stmt.operands) != 2:
-            raise AsmError(
-                where, "DEC_BRANCH takes two positional operands: reg, target"
-            )
-        reg_tok, target_tok = stmt.operands
-        reg = _resolve_loop_reg(reg_tok, where)
-        offset = _resolve_dec_branch_target(target_tok, pc, symbols, where)
-        return enc_dec_branch(reg, offset)
-
-    if m == "SET_ROLE":
-        if len(stmt.operands) != 1:
-            raise AsmError(
-                where, "SET_ROLE takes one positional operand: <controller|target>"
-            )
-        role = _resolve_role(stmt.operands[0], where)
-        return enc_set_role(role)
-
-    raise AsmError(where, f"unhandled mnemonic in encoder: {m!r}")
-
-
-def _resolve_cond(tok: str, where: str) -> int:
-    if tok not in COND_CODES:
-        raise AsmError(
-            where,
-            f"cond code {tok!r} is not named " f"(allowed: {sorted(COND_CODES)})",
-        )
-    return COND_CODES[tok]
-
-
-def _resolve_branch_target(
-    tok: str, branch_pc: int, symbols: dict[str, Symbol], where: str
-) -> int:
-    """BRANCH_ON target: either a label name (compute signed offset) or a
-    raw signed numeric offset. PC math: next_pc = branch_pc + 1 + offset.
-    The 7-bit signed field caps reach at -64..63 instructions.
+    Word 0: PREAMBLE_MAGIC = 0x0002_4D4C (bytes on wire: 4C 4D 02 00).
+    Word 1: body length in 32-bit words (body only, preamble excluded).
     """
-    if tok and tok[0].isalpha() or tok.startswith("_"):
-        sym = symbols.get(tok)
-        if sym is None:
-            raise AsmError(where, f"undefined branch target: {tok!r}")
-        if sym.kind != "label":
-            raise AsmError(
-                where,
-                f"BRANCH_ON target {tok!r} is an .equ constant, not a label",
-            )
-        offset = sym.value - branch_pc - 1
-    else:
-        offset = _parse_int(tok, where)
-    if not -64 <= offset <= 63:
-        raise AsmError(
-            where,
-            f"BRANCH_ON offset {offset} out of signed 7-bit range "
-            f"(branch_pc={branch_pc})",
-        )
-    return offset
+    statements, raw_mode = lex(source, filename)
+    syms, pc_stmts = pass1(statements)
+    body = pass2(syms, pc_stmts, raw_mode)
+    program = [PREAMBLE_MAGIC, len(body)] + body
+    return program
 
 
-def _resolve_jmp_target(tok: str, symbols: dict[str, Symbol], where: str) -> int:
-    """JMP target: either a label name (use absolute PC) or a raw 11-bit
-    address literal."""
-    if tok and tok[0].isalpha() or tok.startswith("_"):
-        sym = symbols.get(tok)
-        if sym is None:
-            raise AsmError(where, f"undefined jump target: {tok!r}")
-        if sym.kind != "label":
-            raise AsmError(
-                where,
-                f"JMP target {tok!r} is an .equ constant, not a label "
-                f"(use a numeric literal if you really want an .equ as addr)",
-            )
-        return sym.value
-    return _parse_int(tok, where)
-
-
-def _resolve_loop_reg(tok: str, where: str) -> int:
-    """LOAD_LOOP / DEC_BRANCH reg: `lcr0` / `lcr1` or a literal 0 / 1."""
-    if tok in LOOP_REG_ALIASES:
-        return LOOP_REG_ALIASES[tok]
-    n = _parse_int(tok, where)
-    if not 0 <= n < 2:
-        raise AsmError(
-            where,
-            f"loop reg {tok!r} must be lcr0|lcr1 or a literal 0|1 "
-            f"(allowed names: {sorted(LOOP_REG_ALIASES)})",
-        )
-    return n
-
-
-def _resolve_role(tok: str, where: str) -> int:
-    """SET_ROLE role: `controller` / `target` (case-insensitive) or a
-    literal 0 / 1."""
-    lowered = tok.lower()
-    if lowered in ROLE_ALIASES:
-        return ROLE_ALIASES[lowered]
-    n = _parse_int(tok, where)
-    if n not in (0, 1):
-        raise AsmError(
-            where,
-            f"SET_ROLE operand {tok!r} must be controller|target or a literal 0|1 "
-            f"(allowed names: {sorted(ROLE_ALIASES)})",
-        )
-    return n
-
-
-def _resolve_dec_branch_target(
-    tok: str, branch_pc: int, symbols: dict[str, Symbol], where: str
-) -> int:
-    """DEC_BRANCH target: same shape and PC math as BRANCH_ON; distinct
-    error labels so debug output points at the right opcode.
-    """
-    if tok and tok[0].isalpha() or tok.startswith("_"):
-        sym = symbols.get(tok)
-        if sym is None:
-            raise AsmError(where, f"undefined DEC_BRANCH target: {tok!r}")
-        if sym.kind != "label":
-            raise AsmError(
-                where,
-                f"DEC_BRANCH target {tok!r} is an .equ constant, not a label",
-            )
-        offset = sym.value - branch_pc - 1
-    else:
-        offset = _parse_int(tok, where)
-    if not -128 <= offset <= 127:
-        raise AsmError(
-            where,
-            f"DEC_BRANCH offset {offset} out of signed 8-bit range "
-            f"(branch_pc={branch_pc})",
-        )
-    return offset
-
-
-# ===========================================================================
-# Top-level assemble entry point
-# ===========================================================================
-
-
-def assemble(source: str, *, filename: str = "<input>") -> list[int]:
-    """Source-text → list of encoded 16-bit instruction words."""
-    statements = lex(source, filename)
-    symbols, pc_stmts = pass1(statements, filename)
-    return pass2(symbols, pc_stmts, filename)
-
-
-# ===========================================================================
-# Self-checks
-# ===========================================================================
-
-
-def _selfcheck_crc_and_frame() -> None:
-    """CRC catalog check + WIRE_FORMAT.md §6 worked example."""
-    assert crc16_xmodem(b"123456789") == 0x31C3, "CRC-16/XMODEM catalog check failed"
-    expected = bytes.fromhex("020000900060DF9F")
-    got = build_frame([0x9000, 0x6000])
-    assert got == expected, (
-        f"WIRE_FORMAT.md §6 frame check failed\n  got: {got.hex(' ')}\n"
-        f"  exp: {expected.hex(' ')}"
-    )
-
-
-_ROADMAP_EXAMPLE_SRC = """
-; ROADMAP §"Example: I2C write-one-byte in moleasm" --- ported.
-;
-; The ROADMAP source uses `label=ok` and `label=nak` on MARK lines
-; (symbolic names); we use numeric tags here because MARK takes an
-; 8-bit numeric label and the assembler doesn't auto-allocate IDs.
-; Encoded bytes are byte-for-byte verifiable.
-
-        LOAD_TIMING   i2c_freq, 60          ; ~100 kHz @ 24 MHz Verde fabric
-        SET_BUS_MODE  i2c
-
-        ; -- Start condition --
-        EMIT_QUARTER  sda=recessive scl=recessive
-        EMIT_QUARTER  sda=dominant  scl=recessive
-        EMIT_QUARTER  sda=dominant  scl=dominant
-
-        ; -- Address byte 0xA0 = 1010_0000 (MSB first) + R/W=0 --
-        EMIT_BIT      tx=recessive
-        EMIT_BIT      tx=dominant
-        EMIT_BIT      tx=recessive
-        EMIT_BIT      tx=dominant
-        EMIT_BIT      tx=dominant
-        EMIT_BIT      tx=dominant
-        EMIT_BIT      tx=dominant
-        EMIT_BIT      tx=dominant
-
-        ; -- ACK slot --
-        EMIT_BIT      tx=hiz expect=0 mask=1 capture=1
-        BRANCH_ON     MISMATCH, nak
-
-        ; -- Data byte 0xAB = 1010_1011 --
-        EMIT_BIT      tx=recessive
-        EMIT_BIT      tx=dominant
-        EMIT_BIT      tx=recessive
-        EMIT_BIT      tx=dominant
-        EMIT_BIT      tx=recessive
-        EMIT_BIT      tx=dominant
-        EMIT_BIT      tx=recessive
-        EMIT_BIT      tx=recessive
-
-        ; -- ACK slot --
-        EMIT_BIT      tx=hiz expect=0 mask=1 capture=1
-        BRANCH_ON     MISMATCH, nak
-
-        ; -- Stop condition --
-        EMIT_QUARTER  sda=dominant  scl=dominant
-        EMIT_QUARTER  sda=dominant  scl=recessive
-        EMIT_QUARTER  sda=recessive scl=recessive
-
-        MARK          label=1               ; ok
-        HALT          status=0
-
-nak:
-        MARK          label=2               ; nak
-        HALT          status=1
-"""
-
-
-def _selfcheck_roadmap_example() -> None:
-    """ROADMAP §"I2C write-one-byte" hand-computed reference. 32 words.
-
-    Note: ROADMAP says "31 instructions = 62 bytes" but the example
-    actually has 32 instructions = 64 bytes (counted line-by-line in
-    §1118). Doc fix needed; the assembler emits the literal count."""
-    words = assemble(_ROADMAP_EXAMPLE_SRC, filename="roadmap-example")
-    expected = [
-        0x403C,  # LOAD_TIMING i2c_freq=0, 60     -> (8<<11) | 60
-        0x3800,  # SET_BUS_MODE i2c               -> (7<<11) | (0<<8)
-        0x1280,  # Q0: sda=rec scl=rec            -> (2<<11) | (1<<9) | (1<<7)
-        0x1080,  # Q1: sda=dom scl=rec            -> (2<<11) | (0<<9) | (1<<7)
-        0x1000,  # Q2: sda=dom scl=dom            -> (2<<11)
-        # addr 0xA0 = 1010_0000 (rec, dom, rec, dom, dom, dom, dom, dom)
-        0x0A00,
-        0x0800,
-        0x0A00,
-        0x0800,
-        0x0800,
-        0x0800,
-        0x0800,
-        0x0800,
-        # ACK slot: tx=hiz expect=0 mask=1 capture=1 -> (1<<11) | (2<<9) | 0b011
-        0x0C03,
-        # BRANCH_ON MISMATCH, nak (nak at PC 30; branch at PC 14;
-        # offset = 30 - 14 - 1 = 15 = 0x0F) -> (5<<11) | (1<<7) | 0x0F
-        0x288F,
-        # data 0xAB = 1010_1011 (rec, dom, rec, dom, rec, dom, rec, rec)
-        0x0A00,
-        0x0800,
-        0x0A00,
-        0x0800,
-        0x0A00,
-        0x0800,
-        0x0A00,
-        0x0A00,
-        # ACK slot
-        0x0C03,
-        # BRANCH_ON MISMATCH, nak (branch at PC 24; offset = 30-25 = 5)
-        0x2885,
-        # STOP: dom/dom, dom/rec, rec/rec
-        0x1000,
-        0x1080,
-        0x1280,
-        # MARK label=1                  -> (9<<11) | (1<<3)
-        0x4808,
-        # HALT status=0
-        0x0000,
-        # nak: MARK label=2             -> (9<<11) | (2<<3)
-        0x4810,
-        # HALT status=1                 -> (0<<11) | (1<<7)
-        0x0080,
-    ]
-    assert (
-        len(words) == len(expected) == 32
-    ), f"ROADMAP example word count: got {len(words)}, expected 32"
-    for i, (got, exp) in enumerate(zip(words, expected)):
-        assert (
-            got == exp
-        ), f"ROADMAP example word {i}: got {got:#06x}, expected {exp:#06x}"
-
-
-def _selfcheck_dw_equ() -> None:
-    """`.equ x, 0x1234` + `.dw x, 0xC000` → [0x1234, 0xC000]."""
-    src = """
-        .equ x, 0x1234
-        .dw  x, 0xC000
-    """
-    words = assemble(src, filename="dw-equ-check")
-    assert words == [
-        0x1234,
-        0xC000,
-    ], f".equ/.dw round-trip failed: got {[hex(w) for w in words]}"
-
-
-def _selfcheck_whitespace_tolerance() -> None:
-    """Mnemonic / operand separator must accept any whitespace, any amount:
-    tabs, multiple spaces, mixed runs. Regression: the lexer used to call
-    `body.partition(" ")` which only recognised a single space character and
-    rejected tab-indented operand blocks."""
-    src = (
-        ".equ\tslow_div,\t59\n"
-        "start:\n"
-        "\tLOAD_TIMING\t\t i2c_freq,  slow_div\n"
-        "\tSET_BUS_MODE   \ti2c\n"
-        "\tHALT\tstatus=0\n"
-    )
-    words = assemble(src, filename="whitespace-check")
-    # LOAD_TIMING i2c_freq=0, 59 -> (8<<11) | 59 = 0x403B
-    # SET_BUS_MODE i2c           -> (7<<11)      = 0x3800
-    # HALT status=0              ->                0x0000
-    assert words == [
-        0x403B,
-        0x3800,
-        0x0000,
-    ], f"whitespace tolerance failed: got {[hex(w) for w in words]}"
-
-
-def _selfcheck() -> None:
-    _selfcheck_crc_and_frame()
-    _selfcheck_roadmap_example()
-    _selfcheck_dw_equ()
-    _selfcheck_whitespace_tolerance()
-
-
-# ===========================================================================
+# ---------------------------------------------------------------------------
 # CLI
-# ===========================================================================
+# ---------------------------------------------------------------------------
 
-
-def main(argv: Optional[list[str]] = None) -> int:
+def _cli_main(argv: List[str]) -> int:
     parser = argparse.ArgumentParser(
-        prog="mole-asm",
-        description="Assemble a .moleasm source file into a .molecode "
-        "binary. With --frame, also emit a UART-ready .mole.bin alongside.",
+        prog="mole-asm.py",
+        description="Mole v0.2 moleasm assembler (golden Python oracle).",
     )
-    parser.add_argument(
-        "input",
-        nargs="?",
-        help="path to the .moleasm source file. If omitted, runs the "
-        "bundled batch (regenerates first-light / tmp108 / "
-        "i2c-write-one-byte / loop-counter-demo / i2c-soak / "
-        "i3c-write-byte next to this script) plus the self-check suite.",
-    )
-    parser.add_argument(
-        "-o",
-        "--output",
-        help="output .molecode path. Defaults to "
-        "INPUT_with_suffix_replaced.molecode next to the input.",
-    )
-    parser.add_argument(
-        "--frame",
-        nargs="?",
-        const=True,
-        default=None,
-        metavar="PATH",
-        help="also emit a framed .mole.bin (len + CRC) ready to drop onto "
-        "the iCEbreaker UART. With no value, writes alongside the .molecode "
-        "output; with PATH, writes to that exact path (matches the Rust "
-        "CLI's --frame-output for cross-implementation parity tests).",
-    )
+    parser.add_argument("input", nargs="?",
+                        help=".moleasm source file (omit to run self-check)")
+    parser.add_argument("-o", "--output", metavar="OUT",
+                        help="output .molecode path (default: <input>.molecode)")
+    parser.add_argument("--frame", action="store_true",
+                        help="also write framed .mole.bin")
     args = parser.parse_args(argv)
 
-    _selfcheck()
-
     if args.input is None:
-        return _run_bundled_batch()
+        return _self_check()
 
-    inp = Path(args.input)
-    if args.output:
-        out_molecode = Path(args.output)
-    else:
-        out_molecode = inp.with_suffix(".molecode")
+    src_path = Path(args.input)
+    if not src_path.exists():
+        print(f"error: input file not found: {src_path}", file=sys.stderr)
+        return 1
 
+    source = src_path.read_text(encoding="utf-8")
     try:
-        source = inp.read_text(encoding="utf-8")
-        words = assemble(source, filename=str(inp))
+        words = assemble(source, str(src_path))
     except AsmError as e:
         print(f"error: {e}", file=sys.stderr)
         return 1
 
-    out_molecode.write_bytes(pack_bytecode(words))
-    print(
-        f"assembled {len(words)} words ({len(words) * 2} bytes) " f"-> {out_molecode}"
-    )
+    # Default output: INPUT.molecode
+    out_path = Path(args.output) if args.output else src_path.with_suffix(".molecode")
+    out_path.write_bytes(pack_bytecode(words))
+    print(f"wrote {out_path}  ({len(words)} words, "
+          f"{len(words) - 2} body words)")
 
-    if args.frame is not None:
-        if args.frame is True:
-            out_frame = out_molecode.with_suffix(".mole.bin")
-        else:
-            out_frame = Path(args.frame)
-        frame = build_frame(words)
-        out_frame.write_bytes(frame)
-        crc = crc16_xmodem(frame[:-2])
-        print(
-            f"framed {len(frame)} bytes (CRC-16/XMODEM={crc:#06x}) " f"-> {out_frame}"
-        )
+    if args.frame:
+        frame_path = src_path.with_suffix(".mole.bin")
+        frame_path.write_bytes(build_frame(words))
+        print(f"wrote {frame_path}  (framed)")
 
     return 0
 
 
-_BUNDLED_PROGRAMS = (
-    "first-light",
-    "tmp108",
-    "i2c-write-one-byte",
-    "loop-counter-demo",
-    "i2c-soak",
-    "i3c-write-byte",
-)
+# ---------------------------------------------------------------------------
+# Self-check suite
+# ---------------------------------------------------------------------------
 
+def _self_check() -> int:
+    """Run the self-check suite.  Returns 0 on success, 1 on failure."""
+    failures: List[str] = []
+    checks = 0
 
-def _run_bundled_batch() -> int:
-    """Default __main__ behaviour: assemble every .moleasm source in
-    the script's directory, write .molecode + .mole.bin (framed) for each."""
-    here = Path(__file__).resolve().parent
-    rc = 0
-    for name in _BUNDLED_PROGRAMS:
-        src = here / f"{name}.moleasm"
-        if not src.is_file():
-            print(f"skip {name}: source {src} not found")
-            continue
+    def ok(desc: str) -> None:
+        nonlocal checks
+        checks += 1
+
+    def fail(desc: str, detail: str) -> None:
+        failures.append(f"FAIL [{desc}]: {detail}")
+
+    def check(desc: str, condition: bool, detail: str = "") -> None:
+        if condition:
+            ok(desc)
+        else:
+            fail(desc, detail)
+
+    # ------------------------------------------------------------------
+    # 1. CRC catalog
+    check("CRC catalog: 0x31C3",
+          crc16_xmodem(b"123456789") == 0x31C3,
+          f"got {crc16_xmodem(b'123456789'):#06x}")
+
+    # 2. CRC empty
+    check("CRC empty: 0x0000",
+          crc16_xmodem(b"") == 0x0000,
+          f"got {crc16_xmodem(b''):#06x}")
+
+    # ------------------------------------------------------------------
+    # 3. §12.4 worked examples (25 total)
+    #
+    # §5.11: the example uses a label "loop_top" that is 4 words before
+    # the BRANCH_ON.  We lay out the source to produce exactly offset=-4.
+    # For each example we record (source, expected_first_body_word, section).
+    # For single-instruction sources words[2] IS the target opcode.
+    # §5.5 needs a pairing suffix (BRANCH_ON MISMATCH); words[2] is EMIT_BYTE.
+    # §5.11 encodes a numeric offset directly so the source is single-insn.
+    SPEC_12_4_EXAMPLES = [
+        # (source, expected_first_body_word, spec_section)
+        # §5.1
+        ("EMIT_BIT_IMM tx=recessive\n",
+         0x0000_0008, "§5.1"),
+        # §5.2
+        ("EMIT_BIT_REG src=R2 capture=1\n",
+         0x0420_0001, "§5.2"),
+        # §5.3
+        ("EMIT_QUARTER_IMM sda=dominant scl=hiz\n",
+         0x0800_0040, "§5.3"),
+        # §5.4
+        ("EMIT_QUARTER_REG src=R1\n",
+         0x0C10_0000, "§5.4"),
+        # §5.5 - EMIT_BYTE needs pairing; suffix with BRANCH_ON MISMATCH.
+        # words[2] is the EMIT_BYTE (the opcode under test).
+        ("EMIT_BYTE expect=0 mask=1 capture=1\nBRANCH_ON MISMATCH, done\ndone: HALT\n",
+         0x1000_0003, "§5.5"),
+        # §5.6
+        ("SAMPLE_BIT_ON_SCL capture=1\n",
+         0x1780_0001, "§5.6"),
+        # §5.7
+        ("DRIVE_BIT_ON_SCL tx=dominant\n",
+         0x1800_0000, "§5.7"),
+        # §5.8
+        ("STRETCH_SCL_IMM 400\n",
+         0x1C00_0C80, "§5.8"),
+        # §5.9
+        ("STRETCH_SCL_REG src=R0\n",
+         0x2000_0000, "§5.9"),
+        # §5.10
+        ("HALT status=2\n",
+         0x4000_0010, "§5.10"),
+        # §5.11 BRANCH_ON MISMATCH, offset=-4.
+        # The spec says "(assume loop_top is 4 words back: offset=-4)".
+        # We encode the offset as a raw literal to keep this single-insn.
+        ("BRANCH_ON MISMATCH, -4\n",
+         0x4400_3FE0, "§5.11"),
+        # §5.12 WAIT_ON SDA_LOW, 64
+        ("WAIT_ON SDA_LOW, 64\n",
+         0x4800_A200, "§5.12"),
+        # §5.13 SET_BUS_MODE i3c-PP
+        ("SET_BUS_MODE i3c-PP\n",
+         0x4C00_0010, "§5.13"),
+        # §5.14 SET_ROLE target
+        ("SET_ROLE target\n",
+         0x5000_0008, "§5.14"),
+        # §5.15 FLAG_CLEAR 0b00001
+        ("FLAG_CLEAR 0b00001\n",
+         0x5400_0008, "§5.15"),
+        # §5.16 MARK label=42
+        ("MARK label=42\n",
+         0x5800_0150, "§5.16"),
+        # §5.17 LOAD_TIMING reg=0, divider=480
+        ("LOAD_TIMING reg=0, divider=480\n",
+         0x5C00_0F00, "§5.17"),
+        # §5.18 LOAD_IMM R3, 100
+        ("LOAD_IMM R3, 100\n",
+         0x8180_0320, "§5.18"),
+        # §5.19 MOV R1, R0
+        ("MOV R1, R0\n",
+         0x8480_0000, "§5.19"),
+        # §5.20 ADD_IMM R0, R0, 4
+        ("ADD_IMM R0, R0, 4\n",
+         0x8800_0020, "§5.20"),
+        # §5.21 DEC R6
+        ("DEC R6\n",
+         0x8F60_0000, "§5.21"),
+        # §5.22 AND_IMM R0, R0, 0xFF
+        ("AND_IMM R0, R0, 0xFF\n",
+         0x9000_07F8, "§5.22"),
+        # §5.23 OR_IMM R0, R0, 0x01
+        ("OR_IMM R0, R0, 0x01\n",
+         0x9400_0008, "§5.23"),
+        # §5.24 XOR_IMM R0, R0, 0xFF
+        ("XOR_IMM R0, R0, 0xFF\n",
+         0x9800_07F8, "§5.24"),
+        # §5.25 SHIFT R0, R0, left, 1
+        ("SHIFT R0, R0, left, 1\n",
+         0x9C00_0008, "§5.25"),
+    ]
+
+    for src, expected_hex, where in SPEC_12_4_EXAMPLES:
         try:
-            source = src.read_text(encoding="utf-8")
-            words = assemble(source, filename=str(src))
+            words = assemble(src, "<inline>")
+            # words[0] = preamble magic, words[1] = body length,
+            # words[2] = first body word (the opcode under test in all cases).
+            if len(words) < 3:
+                fail(f"§12.4 {where}",
+                     f"assembled to empty body; src={src!r}")
+                continue
+            got = words[2]
+            if got != expected_hex:
+                fail(f"§12.4 {where}",
+                     f"assembled {got:#010x}, want {expected_hex:#010x}, "
+                     f"src={src!r}")
+            else:
+                ok(f"§12.4 {where}")
         except AsmError as e:
-            print(f"error in {name}: {e}", file=sys.stderr)
-            rc = 1
-            continue
-        code_path = src.with_suffix(".molecode")
-        code_path.write_bytes(pack_bytecode(words))
-        frame_path = src.with_suffix(".mole.bin")
-        frame = build_frame(words)
-        frame_path.write_bytes(frame)
-        crc = crc16_xmodem(frame[:-2])
-        print(
-            f"{name:24s}  {len(words):3d} words  "
-            f"{len(frame):4d} frame bytes  CRC={crc:#06x}"
-        )
-    print("\nselfcheck: OK")
-    return rc
+            fail(f"§12.4 {where}", f"raised {e!r}; src={src!r}")
 
+    # ------------------------------------------------------------------
+    # 4. BUS_MODE renumbering: i3c-PP → wire value 2 (NOT 6 as in v0)
+    try:
+        words = assemble("SET_BUS_MODE i3c-PP\n", "<inline>")
+        got_mode = (words[2] >> 3) & 0xF
+        check("BUS_MODE renumbering i3c-PP=2",
+              got_mode == 2,
+              f"extracted mode field = {got_mode}, want 2")
+    except AsmError as e:
+        fail("BUS_MODE renumbering", str(e))
+
+    # 4b. hdr-ddr → wire value 3
+    try:
+        words = assemble("SET_BUS_MODE hdr-ddr\n", "<inline>")
+        got_mode = (words[2] >> 3) & 0xF
+        check("BUS_MODE renumbering hdr-ddr=3",
+              got_mode == 3,
+              f"extracted mode field = {got_mode}, want 3")
+    except AsmError as e:
+        fail("BUS_MODE renumbering hdr-ddr", str(e))
+
+    # 4c. i3c-OD → wire value 1
+    try:
+        words = assemble("SET_BUS_MODE i3c-OD\n", "<inline>")
+        got_mode = (words[2] >> 3) & 0xF
+        check("BUS_MODE renumbering i3c-OD=1",
+              got_mode == 1,
+              f"extracted mode field = {got_mode}, want 1")
+    except AsmError as e:
+        fail("BUS_MODE renumbering i3c-OD", str(e))
+
+    # ------------------------------------------------------------------
+    # 5. JMP sugar: JMP loop → BRANCH_ON ALWAYS, -1
+    try:
+        words = assemble("loop: JMP loop\n", "<inline>")
+        # PC=0, JMP loop → BRANCH_ON ALWAYS, (0-0-1)=-1
+        expected = enc_branch_on(COND_CODES["ALWAYS"], -1)
+        check("JMP sugar",
+              words[2] == expected,
+              f"got {words[2]:#010x}, want {expected:#010x}")
+    except AsmError as e:
+        fail("JMP sugar", str(e))
+
+    # ------------------------------------------------------------------
+    # 6. LOAD_LOOP sugar: LOAD_LOOP 42 → LOAD_IMM R6, 42
+    try:
+        words = assemble("LOAD_LOOP 42\n", "<inline>")
+        expected = enc_load_imm(6, 42)
+        check("LOAD_LOOP sugar",
+              words[2] == expected,
+              f"got {words[2]:#010x}, want {expected:#010x}")
+    except AsmError as e:
+        fail("LOAD_LOOP sugar", str(e))
+
+    # ------------------------------------------------------------------
+    # 7. (use-raw-primitives) .dw directive
+    try:
+        words = assemble("(use-raw-primitives)\n.dw 0xDEADBEEF\n", "<inline>")
+        check("raw .dw 0xDEADBEEF",
+              words[2] == 0xDEAD_BEEF,
+              f"got {words[2]:#010x}")
+    except AsmError as e:
+        fail("raw .dw", str(e))
+
+    # ------------------------------------------------------------------
+    # 8. EMIT_BYTE pairing check error
+    raised_e_wire_003 = False
+    try:
+        assemble("EMIT_BYTE expect=0 mask=1\nHALT\n", "<inline>")
+    except AsmError as e:
+        if "E-WIRE-003" in e.code or "E-WIRE-003" in str(e):
+            raised_e_wire_003 = True
+    check("E-WIRE-003 raised for unpaired EMIT_BYTE mask=1",
+          raised_e_wire_003,
+          "expected AsmError with code E-WIRE-003")
+
+    # ------------------------------------------------------------------
+    # 9. EMIT_BYTE mask=0 exemption (no error)
+    try:
+        words = assemble("EMIT_BYTE expect=0 mask=0\nHALT\n", "<inline>")
+        check("EMIT_BYTE mask=0 exempt from pairing check",
+              len(words) >= 3,
+              "unexpectedly got empty result")
+    except AsmError as e:
+        fail("EMIT_BYTE mask=0 exemption", f"raised {e!r}")
+
+    # ------------------------------------------------------------------
+    # 10. Case-insensitive MISMATCH pairing (regression M1)
+    try:
+        words = assemble(
+            "EMIT_BYTE expect=0 mask=1\n"
+            "BRANCH_ON mismatch, nak\n"
+            "nak: HALT\n",
+            "<inline>",
+        )
+        check("Case-insensitive MISMATCH pairing",
+              len(words) >= 3,
+              "unexpectedly got empty result")
+    except AsmError as e:
+        fail("Case-insensitive MISMATCH pairing", f"raised {e!r}")
+
+    # ------------------------------------------------------------------
+    # 11. Preamble magic and version
+    try:
+        words = assemble("HALT\n", "<inline>")
+        check("Preamble magic 0x0002_4D4C",
+              words[0] == PREAMBLE_MAGIC,
+              f"got {words[0]:#010x}")
+        check("Preamble body length = 1",
+              words[1] == 1,
+              f"got {words[1]}")
+    except AsmError as e:
+        fail("Preamble", str(e))
+
+    # 12. Empty source → preamble only, body length = 0
+    try:
+        words = assemble("", "<inline>")
+        check("Empty source: preamble only",
+              len(words) == 2 and words[1] == 0,
+              f"words={words!r}")
+    except AsmError as e:
+        fail("Empty source", str(e))
+
+    # ------------------------------------------------------------------
+    # 13. CRC round-trip: pack + crc ≠ 0 (sanity)
+    try:
+        words = assemble("HALT\n", "<inline>")
+        bs = pack_bytecode(words)
+        frame = build_frame(words)
+        # Frame: 2 bytes length + bytecode + 2 bytes CRC.
+        check("build_frame length",
+              len(frame) == 2 + len(bs) + 2,
+              f"len={len(frame)}")
+    except AsmError as e:
+        fail("CRC round-trip", str(e))
+
+    # ------------------------------------------------------------------
+    # 14. HALT status=0 canonical form
+    try:
+        a = assemble("HALT status=0\n", "<inline>")
+        b = assemble("HALT\n", "<inline>")
+        check("HALT default status=0",
+              a == b,
+              f"a={a!r} b={b!r}")
+    except AsmError as e:
+        fail("HALT default status", str(e))
+
+    # ------------------------------------------------------------------
+    # 15. .equ directive basic usage
+    try:
+        words = assemble(".equ COUNT, 10\nLOAD_IMM R0, COUNT\n", "<inline>")
+        expected = enc_load_imm(0, 10)
+        check(".equ constant resolution",
+              words[2] == expected,
+              f"got {words[2]:#010x}, want {expected:#010x}")
+    except AsmError as e:
+        fail(".equ directive", str(e))
+
+    # ------------------------------------------------------------------
+    # 16. E-RAW-002: pragma after instruction
+    raised_raw002 = False
+    try:
+        assemble("HALT\n(use-raw-primitives)\n", "<inline>")
+    except AsmError as e:
+        if "E-RAW-002" in e.code or "E-RAW-002" in str(e):
+            raised_raw002 = True
+    check("E-RAW-002 raised when pragma after instruction",
+          raised_raw002)
+
+    # 17. E-LEX-001: unknown mnemonic
+    raised_lex001 = False
+    try:
+        assemble("FROBNICATE\n", "<inline>")
+    except AsmError as e:
+        if "E-LEX-001" in e.code or "E-LEX-001" in str(e):
+            raised_lex001 = True
+    check("E-LEX-001 raised for unknown mnemonic", raised_lex001)
+
+    # ------------------------------------------------------------------
+    # 18. E-FRM-001: .dw operand count exceeds program memory.
+    try:
+        big = "(use-raw-primitives)\n.dw " + ", ".join(
+            "0" for _ in range(8193)) + "\n"
+        assemble(big, "<inline>")
+        fail("E-FRM-001 .dw oversize",
+             ".dw 8193 operands must raise E-FRM-001 but did not")
+    except AsmError as e:
+        check("E-FRM-001 raised for .dw operand count > 8192",
+              e.code == "E-FRM-001",
+              f".dw oversize: expected E-FRM-001, got {e.code!r}")
+
+    # 19. n2: ASCII-only identifier: ASCII label accepted, non-ASCII rejected.
+    try:
+        words = assemble("xy: HALT\n", "<inline>")
+        check("ASCII label 'xy' accepted",
+              len(words) >= 2,
+              "unexpectedly failed")
+    except AsmError as e:
+        fail("ASCII label 'xy' accepted", f"raised {e!r}")
+
+    raised_nonascii = False
+    try:
+        assemble("xy\u00e9: HALT\n", "<inline>")
+    except AsmError:
+        raised_nonascii = True
+    check("Non-ASCII label 'xyé' rejected",
+          raised_nonascii,
+          "non-ASCII label should be rejected")
+
+    # ------------------------------------------------------------------
+    print(f"\nResults: {checks} checks, {len(failures)} failures")
+    for f in failures:
+        print(f)
+    if failures:
+        print(f"\nFAIL: {len(failures)} check(s) failed", file=sys.stderr)
+        return 1
+    print(f"OK: {checks} checks passed")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# Entry point
+# ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    sys.exit(_cli_main(sys.argv[1:]))
