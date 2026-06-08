@@ -94,7 +94,8 @@ sim: sim-config sim-opendrain sim-baud-gen sim-rx-sync \
      sim-top-flow-control sim-symbol-decoder-contention \
      sim-engine-jmp-boundary sim-top-cts-violation \
      sim-engine-emit-bit-data-hold \
-     sim-engine-stretch sim-engine-stretch-role ## Run all simulations
+     sim-engine-stretch sim-engine-stretch-role \
+     sim-regfile ## Run all simulations
 
 # Per-block sim / gen targets land here once their hint blocks in
 # TODO.md flip from 🔲 to ✅. The naming contract is fixed:
@@ -119,8 +120,9 @@ sim: sim-config sim-opendrain sim-baud-gen sim-rx-sync \
 #   sim-crc              src/sim/Crc16XmodemSim.scala        (Step 13)
 #   sim-iobuf            src/sim/MoleIoBufUp5kSim.scala      (Step 13)
 #   sim-loader-fsm       src/sim/MoleLoaderFsmSim.scala      (Step 13)
-#   sim-drainer-fsm      src/sim/MoleDrainerFsmSim.scala     (Step 13)
+#   sim-drainer-fsm      src/sim/MoleDrainerFsmSim.scala      (Step 13)
 #   sim-top              src/sim/MoleTopSim.scala            (Step 14)
+#   sim-regfile          src/sim/RegFileSim.scala            (Phase C.5)
 #
 # Declared here in advance so the build contract is visible from
 # `make help` and code review can verify each step lands what it
@@ -213,6 +215,9 @@ sim-engine-stretch: ## Stretch-aware EMIT_BIT timing scenarios (Q1->Q2 guard)
 sim-engine-stretch-role: ## Stretch-aware EMIT_BIT role-gating (Controller vs Target)
 	$(SBT) -batch "runMain $(PACKAGE).BitCycleEngineStretchRoleSim"
 
+sim-regfile: ## 8x32-bit register file: storage, W-to-R bypass, load-use stall (Phase C.5)
+	$(SBT) -batch "runMain $(PACKAGE).RegFileSim"
+
 # gen target -- the canonical Verilog entrypoint is MoleTopVerilog;
 # generated module is MoleTop. The generated file lives at gen/MoleTop.v
 # and is gitignored.
@@ -253,4 +258,5 @@ help: ## Show this help (every target with a ## description)
         sim-engine-jmp-boundary sim-top-cts-violation \
         sim-engine-emit-bit-data-hold \
         sim-engine-stretch sim-engine-stretch-role \
+        sim-regfile \
         gen waves flash clean distclean help

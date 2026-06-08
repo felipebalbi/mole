@@ -6,9 +6,9 @@ import spinal.core._
   *
   * Pure-Scala main, not a SpinalSim DUT. The data record has no hardware state
   * to exercise; what we want to *verify* at the `sim-config` Makefile target is
-  * that the default config can actually represent the bus frequencies Mole's v0.2
-  * controller-role use cases require — I²C standard / fast / fast-plus, I³C
-  * OD-low and OD-mid. The I³C PP-high target (12.5 MHz SCL = 50 MHz quarter
+  * that the default config can actually represent the bus frequencies Mole's
+  * v0.2 controller-role use cases require — I²C standard / fast / fast-plus,
+  * I³C OD-low and OD-mid. The I³C PP-high target (12.5 MHz SCL = 50 MHz quarter
   * rate) is *flagged* with a `println` rather than asserted out — it is NOT
   * supported on Mole Verde's 48 MHz fabric (requires fabric > 50 MHz or a
   * fractional divider); full-rate I3C SDR is Mole Rojo (ECP5) territory per
@@ -46,8 +46,8 @@ object MoleConfigSim extends App {
     * the case where truncation pushes the achieved frequency well above the
     * target. The Phase-0 buses we actually need on Mole Verde (I2C SM/FM/FM+,
     * I3C OD up to 4 MHz) all fall inside the band at 48 MHz; the asserter
-    * catches a future fabric change (or a new bus target) that silently warps
-    * a bus speed. Returns the divider for the `println` log line.
+    * catches a future fabric change (or a new bus target) that silently warps a
+    * bus speed. Returns the divider for the `println` log line.
     */
   def auditBus(
       label: String,
@@ -86,10 +86,16 @@ object MoleConfigSim extends App {
   //   I3C OD 2 MHz: 48_000_000 / (2_000_000 × 4) = 6
   //   I3C OD 4 MHz: 48_000_000 / (4_000_000 × 4) = 3
   val div100k = auditBus("I2C standard 100 kHz", 100 kHz)
-  assert(div100k == 120, s"I2C 100 kHz divider should be 120 at 48 MHz; got $div100k")
+  assert(
+    div100k == 120,
+    s"I2C 100 kHz divider should be 120 at 48 MHz; got $div100k"
+  )
 
   val div400k = auditBus("I2C fast 400 kHz", 400 kHz)
-  assert(div400k == 30, s"I2C 400 kHz divider should be 30 at 48 MHz; got $div400k")
+  assert(
+    div400k == 30,
+    s"I2C 400 kHz divider should be 30 at 48 MHz; got $div400k"
+  )
 
   val div1m = auditBus("I2C fast-plus 1 MHz", 1 MHz)
   assert(div1m == 12, s"I2C 1 MHz divider should be 12 at 48 MHz; got $div1m")

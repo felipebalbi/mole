@@ -5,8 +5,8 @@ import spinal.core.sim._
 
 /** Smoke sim for [[MolePllUp5k]].
   *
-  * The wrapper is a thin BlackBox-vs-bypass selector with registered logic
-  * only in the ÷2 uartClk divider. Three things to verify:
+  * The wrapper is a thin BlackBox-vs-bypass selector with registered logic only
+  * in the ÷2 uartClk divider. Three things to verify:
   *
   *   1. The bypass path elaborates cleanly: `clkOutEngine` tracks `clkIn`
   *      (1:1), `clkOutUart` toggles at half the rate of `clkIn`, and `locked`
