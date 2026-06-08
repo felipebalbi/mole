@@ -1035,6 +1035,12 @@ def _pc_advance(stmt: Statement) -> int:
     if stmt.directive == ".equ":
         return 0
     if stmt.directive == ".dw":
+        if not stmt.operands:
+            raise AsmError("E-FRM-003",
+                           ".dw directive with no operands "
+                           "(would emit zero body words; supply at "
+                           "least one literal or equate)",
+                           line=stmt.line, filename=stmt.filename)
         n = len(stmt.operands)
         if n > MAX_PROGRAM_WORDS:
             raise AsmError("E-FRM-001",
@@ -1047,13 +1053,16 @@ def _pc_advance(stmt: Statement) -> int:
     return 0
 
 
-def pass1(statements: List[Statement]) -> Tuple[SymbolTable, List[Tuple[int, Statement]]]:
+def pass1(statements: List[Statement],
+          filename: str) -> Tuple[SymbolTable, List[Tuple[int, Statement]]]:
     """Build symbol table; return (symtab, [(pc, stmt), ...]) for encodeable stmts."""
     syms = SymbolTable()
     pc_stmts: List[Tuple[int, Statement]] = []
     pc = 0
+    last_stmt: Optional[Statement] = None
 
     for stmt in statements:
+        last_stmt = stmt
         if stmt.label is not None:
             syms.bind_label(stmt.label, pc, stmt.line, stmt.filename)
 
@@ -1077,6 +1086,21 @@ def pass1(statements: List[Statement]) -> Tuple[SymbolTable, List[Tuple[int, Sta
                            f"program exceeds {MAX_PROGRAM_WORDS} instruction "
                            f"slots (PC overflow)",
                            line=stmt.line, filename=stmt.filename)
+
+    # Reject programs with no body words (E-FRM-003).
+    if pc == 0:
+        if last_stmt is not None:
+            loc_line = last_stmt.line
+            loc_file = last_stmt.filename
+        else:
+            # Utterly empty source: use filename + line 1.
+            loc_line = 1
+            loc_file = filename
+        raise AsmError("E-FRM-003",
+                       "program contains no instructions "
+                       "(body would be zero words; the canonical "
+                       "minimum is a single HALT)",
+                       line=loc_line, filename=loc_file)
 
     return syms, pc_stmts
 
@@ -1685,7 +1709,7 @@ def assemble(source: str, filename: str) -> List[int]:
     Word 1: body length in 32-bit words (body only, preamble excluded).
     """
     statements, raw_mode = lex(source, filename)
-    syms, pc_stmts = pass1(statements)
+    syms, pc_stmts = pass1(statements, filename)
     body = pass2(syms, pc_stmts, raw_mode)
     program = [PREAMBLE_MAGIC, len(body)] + body
     return program
@@ -1994,14 +2018,16 @@ def _self_check() -> int:
     except AsmError as e:
         fail("Preamble", str(e))
 
-    # 12. Empty source → preamble only, body length = 0
+    # 12. Empty source → E-FRM-003 (rejected; zero body words)
+    raised_e_frm_003_empty = False
     try:
-        words = assemble("", "<inline>")
-        check("Empty source: preamble only",
-              len(words) == 2 and words[1] == 0,
-              f"words={words!r}")
+        assemble("", "<inline>")
     except AsmError as e:
-        fail("Empty source", str(e))
+        if "E-FRM-003" in e.code or "E-FRM-003" in str(e):
+            raised_e_frm_003_empty = True
+    check("E-FRM-003 raised for empty source",
+          raised_e_frm_003_empty,
+          "expected AsmError with code E-FRM-003")
 
     # ------------------------------------------------------------------
     # 13. CRC round-trip: pack + crc ≠ 0 (sanity)
@@ -2088,6 +2114,29 @@ def _self_check() -> int:
     check("Non-ASCII label 'xyé' rejected",
           raised_nonascii,
           "non-ASCII label should be rejected")
+
+    # ------------------------------------------------------------------
+    # 20. E-FRM-003: empty source is rejected.
+    raised_frm003_empty = False
+    try:
+        assemble("", "<inline>")
+    except AsmError as e:
+        if "E-FRM-003" in e.code or "E-FRM-003" in str(e):
+            raised_frm003_empty = True
+    check("E-FRM-003 raised for empty source",
+          raised_frm003_empty,
+          "expected AsmError with code E-FRM-003")
+
+    # 21. E-FRM-003: .dw with no operands is rejected.
+    raised_frm003_dw = False
+    try:
+        assemble(".dw\n", "<inline>")
+    except AsmError as e:
+        if "E-FRM-003" in e.code or "E-FRM-003" in str(e):
+            raised_frm003_dw = True
+    check("E-FRM-003 raised for .dw with no operands",
+          raised_frm003_dw,
+          "expected AsmError with code E-FRM-003")
 
     # ------------------------------------------------------------------
     print(f"\nResults: {checks} checks, {len(failures)} failures")

@@ -1434,7 +1434,8 @@ field exceeds this limit, before writing any data to SPRAM.
 ### Program body
 
 Words 2 through N+1 (N = length field): N 32-bit instructions,
-each little-endian.
+each little-endian. The body MUST contain at least one instruction
+word; see §13 E-FRM-003.
 
 ### Total wire frame size
 
@@ -1552,6 +1553,11 @@ binary        ::= ["-"] "0b" bindigit+
 register      ::= ( "R" | "r" ) digit     ; digit in 0..7
 comment       ::= ";" text_to_eol
 ```
+
+**Constraint:** `program` must contain at least one instruction
+(see §13 E-FRM-003); the grammar permits empty `program` for
+editor / partial-compilation convenience but the assembler
+rejects it.
 
 ### 12.3 Sugar forms
 
@@ -1757,6 +1763,7 @@ stable contract; gaps may appear when codes are removed (noted below).
 | E-RAW-003  | `(use-raw-primitives)` pragma malformed        | `pragma must read exactly '(use-raw-primitives)'`                             |
 | E-FRM-001  | `.dw` operand count > MAX_PROGRAM_WORDS        | `.dw operand count <N> exceeds program-memory budget of 8192 words`           |
 | E-FRM-002  | `.dw` value out of 32-bit range                | `.dw value <V> out of 32-bit range`                                           |
+| E-FRM-003  | Empty program body                             | `program contains no instructions (body would be zero words; the canonical minimum is a single HALT)`. Raised when the source compiles to zero body words: a fully-empty source, a source containing only comments / blank lines / labels, a source containing only `.equ` directives, or one whose only `.dw` directives have zero operands. A program must contain at least one instruction word; the canonical minimum is `HALT`. |
 | LINT-001   | Intervening ALU op between DEC and BRANCH_ON   | `REG_ZERO_FLAG overwritten by <OP> at line N before BRANCH_ON at line M`      |
 
 **Example inputs:**

@@ -382,6 +382,14 @@ fn pc_advance_for(stmt: &Statement) -> Result<usize> {
     match stmt.directive.as_deref() {
         Some(".equ") => Ok(0),
         Some(".dw") => {
+            if stmt.operands.is_empty() {
+                return Err(AsmError::operand(
+                    &stmt.loc,
+                    "E-FRM-003: .dw directive with no operands \
+                     (would emit zero body words; supply at \
+                     least one literal or equate)",
+                ));
+            }
             if stmt.operands.len() > MAX_PROGRAM_WORDS {
                 return Err(AsmError::range(
                     &stmt.loc,
@@ -405,12 +413,16 @@ pub(crate) struct Pass1Output {
     pub pc_stmts: Vec<(usize, Statement)>,
 }
 
-pub(crate) fn pass1(statements: Vec<Statement>) -> Result<Pass1Output> {
+pub(crate) fn pass1(statements: Vec<Statement>, filename: &str) -> Result<Pass1Output> {
     let mut symbols = SymbolTable::default();
     let mut pc_stmts: Vec<(usize, Statement)> = Vec::new();
     let mut pc: usize = 0;
+    // Track the last statement's location for the empty-body diagnostic.
+    let mut last_loc: Option<SourceLocation> = None;
 
     for stmt in statements {
+        last_loc = Some(stmt.loc.clone());
+
         if let Some(label) = &stmt.label {
             let sym = Symbol {
                 kind: SymbolKind::Label,
@@ -455,6 +467,19 @@ pub(crate) fn pass1(statements: Vec<Statement>) -> Result<Pass1Output> {
                 ),
             ));
         }
+    }
+
+    // Reject programs with no body words.  The loader (§16.4) already
+    // requires at least one HALT; catching it here gives a precise
+    // diagnostic at the assembler level rather than a framer rejection.
+    if pc == 0 {
+        let loc = last_loc.unwrap_or_else(|| SourceLocation::new(filename, 1));
+        return Err(AsmError::operand(
+            &loc,
+            "E-FRM-003: program contains no instructions \
+             (body would be zero words; the canonical \
+             minimum is a single HALT)",
+        ));
     }
 
     Ok(Pass1Output { symbols, pc_stmts })
@@ -1392,7 +1417,7 @@ fn try_parse_kv_or_positional(
 /// `filename` is used only for diagnostics.
 pub(crate) fn assemble(source: &str, filename: &str) -> Result<Vec<u32>> {
     let (statements, raw_mode) = lex(source, filename)?;
-    let Pass1Output { symbols, pc_stmts } = pass1(statements)?;
+    let Pass1Output { symbols, pc_stmts } = pass1(statements, filename)?;
     let body = pass2(&symbols, &pc_stmts, raw_mode)?;
 
     // Build preamble.
@@ -1424,11 +1449,13 @@ mod tests {
     }
 
     #[test]
-    fn empty_source_gives_preamble_only() {
-        let words = assemble("", "<t>").unwrap();
-        assert_eq!(words.len(), 2); // preamble only
-        assert_eq!(words[0], PREAMBLE_MAGIC);
-        assert_eq!(words[1], 0); // body length = 0
+    fn empty_source_rejected_with_e_frm_003() {
+        let err = assemble("", "<t>").unwrap_err();
+        assert_eq!(err_kind(&err), Some(Kind::Operand));
+        assert!(
+            err.to_string().contains("E-FRM-003"),
+            "expected E-FRM-003 in error, got: {err}"
+        );
     }
 
     #[test]
@@ -1646,11 +1673,14 @@ mod tests {
     }
 
     #[test]
-    fn whitespace_only_source_assembles_empty() {
+    fn whitespace_only_source_rejected_with_e_frm_003() {
         let src = "\n\n   \n\t\n;just a comment\n";
-        let words = assemble(src, "<t>").unwrap();
-        // Preamble + 0 body = 2 words.
-        assert_eq!(words.len(), 2);
+        let err = assemble(src, "<t>").unwrap_err();
+        assert_eq!(err_kind(&err), Some(Kind::Operand));
+        assert!(
+            err.to_string().contains("E-FRM-003"),
+            "expected E-FRM-003 in error, got: {err}"
+        );
     }
 
     #[test]

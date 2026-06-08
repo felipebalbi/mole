@@ -1017,8 +1017,10 @@ fn many_commas_in_operands_do_not_panic() {
 
 #[test]
 fn label_only_then_eof_is_empty_program() {
-    let words = assemble("here:\n", "<t>").unwrap();
-    assert_eq!(words.len(), 2); // preamble only
+    // A label-only source compiles to zero body words; E-FRM-003.
+    let err = assemble("here:\n", "<t>").expect_err("label-only must fail");
+    let s = format!("{err}");
+    assert!(s.contains("E-FRM-003"), "expected E-FRM-003, got: {s}");
 }
 
 #[test]
@@ -1431,31 +1433,45 @@ fn flag_clear_neg_hex_raises_e_op_009_not_e_wire_003() {
 }
 
 // ---------------------------------------------------------------------------
-// Regression: proptest shrunk repro from
-// `successful_assemble_always_frames` (fuzz.rs Property 7).
+// E-FRM-003: empty program body rejected at the assembler level.
 //
-// `assemble("")` succeeds with a 2-word preamble-only vector
-// (body-length field = 0). `build_frame` then rejects it because it
-// requires at least PREAMBLE_WORDS + 1 words. The round-trip contract
-// is therefore broken for empty programs: `assemble` should either
-// reject empty source or `build_frame` should accept zero-body frames.
-//
-// TODO: fix in a follow-up `fix(asm)` commit — decide whether
-//       `assemble("")` should return `Err` (no instructions) or whether
-//       the frame builder should accept length-0 bodies as a NOP
-//       program. Track as "empty-source round-trip" issue.
+// Prior to this fix, `assemble("")` returned `Ok` with a 2-word
+// preamble-only vector (body-length = 0). `build_frame` then rejected
+// it because it requires at least PREAMBLE_WORDS + 1 words.
+// The contract gap is now closed: the assembler rejects any source
+// that compiles to zero body words.
 // ---------------------------------------------------------------------------
+
 #[test]
-#[ignore = "known contract gap: empty source round-trip; \
-            see TODO in adversarial.rs near end of file"]
-fn regression_empty_source_does_not_frame() {
-    // Shrunk repro: `lines = []` → src = ""
-    let words = mole_asm::assemble("", "<inline>").expect("assemble(\"\") currently succeeds");
-    // words.len() == 2 (preamble only); build_frame rejects it.
-    let result = mole_asm::frame::build_frame(&words);
+fn empty_source_rejected_with_e_frm_003() {
+    // Regression repro: shrunk input from Property 7 (fuzz.rs).
+    let err = assemble("", "<inline>").expect_err("empty source must fail");
+    let s = format!("{err}");
     assert!(
-        result.is_ok(),
-        "build_frame rejected assembler output for empty source: \
-         words={words:?}"
+        s.contains("E-FRM-003"),
+        "expected E-FRM-003 in diagnostic, got: {s}"
+    );
+}
+
+#[test]
+fn dw_zero_operands_rejected_with_e_frm_003() {
+    let err = assemble(".dw\n", "<t>").expect_err(".dw with no operands must fail");
+    let s = format!("{err}");
+    assert!(
+        s.contains("E-FRM-003"),
+        "expected E-FRM-003 in diagnostic, got: {s}"
+    );
+}
+
+#[test]
+fn only_equ_and_label_rejected_with_e_frm_003() {
+    // A source with a label, an .equ, and a comment but no instructions
+    // still compiles to zero body words and must be rejected.
+    let src = "myequ:\n.equ x, 5\n; just a comment\n";
+    let err = assemble(src, "<t>").expect_err("label+equ only source must fail");
+    let s = format!("{err}");
+    assert!(
+        s.contains("E-FRM-003"),
+        "expected E-FRM-003 in diagnostic, got: {s}"
     );
 }

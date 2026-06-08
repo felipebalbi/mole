@@ -226,14 +226,11 @@ proptest! {
     /// succeed --- the assembler must not produce output the framer
     /// rejects.
     ///
-    /// KNOWN FAILURE: `assemble("")` returns `Ok` with a 2-word
-    /// preamble-only vector; `build_frame` rejects it as having no body.
-    /// See the `regression_empty_source_does_not_frame` test in
-    /// `adversarial.rs` for the pinned repro and a fix TODO.
-    // TODO: remove `#[ignore]` once the empty-source contract is fixed.
+    /// Previously failed with `assemble("")` returning `Ok` with a
+    /// 2-word preamble-only vector that `build_frame` then rejected.
+    /// Fixed: the assembler now raises E-FRM-003 for empty programs,
+    /// so any successful assemble is guaranteed to carry ≥1 body word.
     #[test]
-    #[ignore = "known gap: assemble(\"\") produces a framer-rejected \
-                preamble-only slice; fix tracked in adversarial.rs"]
     fn successful_assemble_always_frames(
         lines in prop::collection::vec(structured_line_strategy(), 0..32)
     ) {
