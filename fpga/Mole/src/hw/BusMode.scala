@@ -131,16 +131,19 @@ object SymbolDecoder {
     * Wire-value contract (per `Instruction.scala` and ROADMAP §"Bus mode
     * register" / §"TX symbol"):
     *
-    *   - `busModeWire`: 0 = `i2c`, 1 = `i3c-OD`, 6 = `i3c-PP`, 7 = `hdr-ddr`
-    *     (other values are illegal at the wire level).
+    *   - `busModeWire` (v0.2 sequential): 0 = `i2c`, 1 = `i3c-OD`, 2 =
+    *     `i3c-PP`, 3 = `hdr-ddr` (other values are illegal).
     *   - `txSymbolWire`: 0 = `dominant`, 1 = `recessive`, 2 = `hiz`, 3 =
-    *     `reserved` (v0.5 `raw_override`; decoded as Hi-Z in v0).
+    *     `reserved` (v0.5 `raw_override`; decoded as Hi-Z in v0.2).
     *
     * An unknown `busModeWire` is treated as OD-class (the safer of the two:
     * `recessive` does not assert `driveHigh`).
+    *
+    * v0.2 BUS_MODE wire values (sequential): 0=i2c, 1=i3c-OD, 2=i3c-PP,
+    * 3=hdr-ddr. (v0 used non-sequential 0,1,6,7; those are retired.)
     */
   def staticDecode(busModeWire: Int, txSymbolWire: Int): SymbolDriveStatic = {
-    val isPp = busModeWire == 6 || busModeWire == 7
+    val isPp = busModeWire == 2 || busModeWire == 3
     txSymbolWire match {
       case 0 => // dominant
         SymbolDriveStatic(driveLow = true, driveHigh = false)

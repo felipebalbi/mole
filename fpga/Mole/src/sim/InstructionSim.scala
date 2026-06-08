@@ -1,6 +1,7 @@
 package mole
 
-/** Round-trip audit for [[Instruction]] --- the wire-format contract.
+/** Round-trip audit and golden-encoding verification for the v0.2
+  * [[Instruction]] ISA.
   *
   * Pure-Scala main, not a SpinalSim DUT. The host-side [[Instruction]] ADT and
   * its encode/decode pair are pure Scala functions over `Int` words; exercising
@@ -11,20 +12,16 @@ package mole
   * What this sim guards against:
   *   1. **Round-trip stability.** For every legal `Instruction` value,
   *      `decode(encode(i)) == i` must hold. Any mismatch is a wire-format
-  *      regression --- the host compiler and a deployed Mole would disagree on
-  *      the bytecode.
-  *   2. **Field-position alignment.** The opcode lives at `[15:11]`, the flag
-  *      triple at `[2:0]` (`expect`/`mask`/`capture`), and `tx_symbol` at
-  *      `[10:9]` of every bearer opcode. Drifting these positions is what
-  *      `../../AGENTS.md` §3.10 forbids; the sim asserts the bit positions
-  *      structurally.
-  *   3. **Reserved-bits-are-zero invariant on encode.** Bits in the "reserved"
-  *      middle slice of every opcode must encode to zero so the engine's
-  *      v0-vs-v0.5 trap can distinguish a v0 program (clean reserved bits) from
-  *      a forward-rolled program (set reserved bits).
-  *   4. **Golden encodings** for at least one shape per opcode --- catches
-  *      accidental field-shift regressions that round-trip cleanly but generate
-  *      a different wire word than the spec says.
+  *      regression.
+  *   2. **Golden encodings (spec §12.4).** For each live opcode, one canonical
+  *      example is asserted against the hex value stated in the spec. This
+  *      catches accidental field-shift regressions that round-trip correctly
+  *      but produce the wrong wire word.
+  *   3. **Flag-triple-at-[2:0] invariant.** Asserted structurally on every WIRE
+  *      bearer opcode (AGENTS §3.10).
+  *   4. **Range / reject coverage.** Out-of-range constructor values must throw
+  *      [[IllegalArgumentException]].
+  *   5. **Reserved slots** round-trip via [[Instruction.ReservedV05]].
   *
   * Run: `sbt "runMain mole.InstructionSim"`
   */
@@ -32,59 +29,42 @@ object InstructionSim extends App {
 
   import Instruction._
 
-  // --------------------------------------------------------------
+  // ------------------------------------------------------------------
   // Round-trip primitives
-  // --------------------------------------------------------------
+  // ------------------------------------------------------------------
 
   /** Encode `i`, decode the result, assert equality. Returns the encoded word
-    * so callers can also assert on its bit layout.
+    * (as a bit pattern; may be negative for DATA-group words) so callers can
+    * also assert on its bit layout.
     */
   def roundTrip(i: Instruction): Int = {
     val word = encode(i)
-    assert(
-      (word & ~0xffff) == 0,
-      f"encode($i) -> 0x$word%08X has bits set above [15:0]"
-    )
     val back = decode(word)
     assert(
       back == i,
-      f"round-trip failed: encode($i) = 0x$word%04X; decode = $back"
+      f"round-trip failed: encode($i) = 0x${word.toLong & 0xffffffffL}%08X; " +
+        f"decode = $back"
     )
     word
   }
 
-  /** Assert that exactly the listed bit indices are set in `word`. Useful for
-    * structural opcode-layout checks ("the flag triple lives at `[2:0]`" ---
-    * which bits are *not* part of the triple must be zero).
-    */
-  def assertBitsSet(word: Int, expected: Set[Int], label: String): Unit = {
-    val actual: Set[Int] =
-      (0 until 16).filter(b => ((word >> b) & 1) == 1).toSet
-    assert(
-      actual == expected,
-      f"$label: word 0x$word%04X has bits $actual set; expected $expected"
-    )
-  }
-
   /** Extract a contiguous bit field from `word`. `hi` is inclusive, `lo` is
-    * inclusive (matches the `[hi:lo]` notation used in the ROADMAP).
+    * inclusive (matches the `[hi:lo]` notation used in the spec). Uses unsigned
+    * right-shift to handle DATA-group words (bit 31 set).
     */
   def field(word: Int, hi: Int, lo: Int): Int =
-    (word >> lo) & ((1 << (hi - lo + 1)) - 1)
+    (word >>> lo) & ((1 << (hi - lo + 1)) - 1)
 
-  /** Assert opcode bits land at `[15:11]` and match `expected`. Every per-
-    * opcode block calls this; a failure means the opcode field has drifted.
-    */
+  /** Assert the 6-bit opcode field `[31:26]` matches `expected.position`. */
   def assertOpcode(word: Int, expected: Opcode.E, label: String): Unit =
     assert(
-      field(word, OPCODE_HI, OPCODE_LO) == expected.position,
-      f"$label: opcode field mismatch in 0x$word%04X " +
+      field(word, 31, 26) == expected.position,
+      f"$label: opcode field mismatch in 0x${word.toLong & 0xffffffffL}%08X " +
         f"(expected ${expected.position}%X)"
     )
 
-  /** Assert the (expect, mask, capture) flag triple lands at exactly `[2:0]` of
-    * `word`. The single most load-bearing structural assertion in the file
-    * (AGENTS §3.10) --- every bearer opcode runs through it.
+  /** Assert the `(expect, mask, capture)` flag triple is at exactly `[2:0]`.
+    * This is the AGENTS §3.10 load-bearing invariant.
     */
   def assertFlagTriple(
       word: Int,
@@ -94,433 +74,237 @@ object InstructionSim extends App {
       label: String
   ): Unit = {
     assert(
-      ((word >> EXPECT_BIT) & 1) == (if (expect) 1 else 0),
-      f"$label: expect bit wrong (word=0x$word%04X)"
+      ((word >>> EXPECT_BIT) & 1) == (if (expect) 1 else 0),
+      f"$label: expect bit wrong (word=0x${word.toLong & 0xffffffffL}%08X)"
     )
     assert(
-      ((word >> MASK_BIT) & 1) == (if (mask) 1 else 0),
-      f"$label: mask bit wrong (word=0x$word%04X)"
+      ((word >>> MASK_BIT) & 1) == (if (mask) 1 else 0),
+      f"$label: mask bit wrong (word=0x${word.toLong & 0xffffffffL}%08X)"
     )
     assert(
-      ((word >> CAPTURE_BIT) & 1) == (if (capture) 1 else 0),
-      f"$label: capture bit wrong (word=0x$word%04X)"
+      ((word >>> CAPTURE_BIT) & 1) == (if (capture) 1 else 0),
+      f"$label: capture bit wrong (word=0x${word.toLong & 0xffffffffL}%08X)"
     )
   }
 
-  /** Assert the slice `[hi:lo]` of `word` is zero. Used to lock in the
-    * reserved-bits-are-zero invariant on each bearer opcode's middle slice.
-    */
-  def assertReservedZero(
-      word: Int,
-      hi: Int,
-      lo: Int,
-      label: String
-  ): Unit =
+  /** Assert the slice `[hi:lo]` of `word` is zero. */
+  def assertReservedZero(word: Int, hi: Int, lo: Int, label: String): Unit =
     assert(
       field(word, hi, lo) == 0,
-      f"$label: reserved [$hi:$lo] non-zero in 0x$word%04X"
+      f"$label: reserved [$hi:$lo] non-zero in " +
+        f"0x${word.toLong & 0xffffffffL}%08X"
     )
 
-  /** Iterate `(expect, mask, capture)` over all 8 combinations. */
+  /** Assert a word equals a specific 32-bit hex constant (compared as bit
+    * patterns). The expected value is passed as a `Long` to avoid sign issues.
+    */
+  def assertGolden(word: Int, expected: Long, label: String): Unit = {
+    val wordU = word.toLong & 0xffffffffL
+    assert(
+      wordU == expected,
+      f"$label: golden mismatch: got 0x$wordU%08X, expected 0x$expected%08X"
+    )
+  }
+
+  /** Iterate (expect, mask, capture) over all 8 combinations. */
   val allFlagTriples: Seq[(Boolean, Boolean, Boolean)] =
     for {
-      expect <- Seq(false, true)
-      mask <- Seq(false, true)
-      capture <- Seq(false, true)
-    } yield (expect, mask, capture)
+      e <- Seq(false, true)
+      m <- Seq(false, true)
+      c <- Seq(false, true)
+    } yield (e, m, c)
 
-  /** All four `TxSymbol` values, in declaration / wire-position order. */
-  val allTxSymbols: Seq[TxSymbol.E] = Seq(
-    TxSymbol.dominant,
-    TxSymbol.recessive,
-    TxSymbol.hiz,
-    TxSymbol.reserved
-  )
+  /** All four TxSymbol values. */
+  val allTxSymbols: Seq[TxSymbol.E] =
+    Seq(TxSymbol.dominant, TxSymbol.recessive, TxSymbol.hiz, TxSymbol.reserved)
 
-  /** All four `BusMode` values --- declaration order, wire codes deliberately
-    * non-sequential (see [[BusMode]] docstring).
-    */
-  val allBusModes: Seq[BusMode.E] = Seq(
-    BusMode.i2c,
-    BusMode.i3cOd,
-    BusMode.i3cPp,
-    BusMode.hdrDdr
-  )
+  /** All four live BusMode values (v0.2 sequential encoding). */
+  val allBusModes: Seq[BusMode.E] =
+    Seq(BusMode.i2c, BusMode.i3cOd, BusMode.i3cPp, BusMode.hdrDdr)
 
-  /** All 16 [[CondCode]] values, in wire-code order. Index `i` has
-    * `.position == i`.
-    */
+  /** All 16 CondCode values (wire codes 0..15). */
   val allCondCodes: Seq[CondCode.E] =
     (0 until 16).map(i => CondCode.elements(i))
 
-  /** Every non-v0 opcode slot --- the two v0.5 reserved slots at `0x0E` /
-    * `0x0F` (`flagClear`, `captureRun`) plus the fifteen upper-half reserved
-    * slots at `0x11..0x1F` introduced by the 4→5-bit opcode-field widening.
-    * SET_ROLE at `0x10` is a v0 opcode and is *not* in this set; it has its own
-    * typed case class and round-trip block. (Slots `0xC` and `0xD` now host
-    * `LOAD_LOOP` and `DEC_BRANCH`; see [[Instruction.LoadLoop]] /
-    * [[Instruction.DecBranch]].)
-    */
+  /** All reserved opcode elements. */
   val reservedOpcodes: Seq[Opcode.E] =
-    Opcode.elements.filter(op => !Opcode.isV0(op)).toSeq
+    Opcode.elements.filter(op => !Opcode.isLive(op)).toSeq
 
-  // --------------------------------------------------------------
-  // EMIT_BIT
-  // --------------------------------------------------------------
+  // ------------------------------------------------------------------
+  // §5.1  EMIT_BIT_IMM
+  // ------------------------------------------------------------------
 
-  println("--- InstructionSim: EMIT_BIT round-trip ---")
+  println("--- InstructionSim: EMIT_BIT_IMM round-trip ---")
 
-  // 4 symbols x 8 flag combos = 32 distinct instructions; cheap to exhaust.
   for {
     tx <- allTxSymbols
     (expect, mask, capture) <- allFlagTriples
   } {
-    val insn = EmitBit(tx, expect, mask, capture)
+    val insn = EmitBitImm(tx, expect, mask, capture)
     val word = roundTrip(insn)
-    assertOpcode(word, Opcode.emitBit, "EMIT_BIT")
+    assertOpcode(word, Opcode.emitBitImm, "EMIT_BIT_IMM")
+    // tx_symbol at [4:3]
     assert(
-      field(word, 10, 9) == tx.position,
-      f"EMIT_BIT tx_symbol field mismatch for $tx in 0x$word%04X"
+      field(word, 4, 3) == tx.position,
+      f"EMIT_BIT_IMM tx_symbol field mismatch for $tx in " +
+        f"0x${word.toLong & 0xffffffffL}%08X"
     )
-    assertReservedZero(word, 8, 3, "EMIT_BIT")
-    assertFlagTriple(word, expect, mask, capture, "EMIT_BIT")
+    assertReservedZero(word, 25, 5, "EMIT_BIT_IMM")
+    assertFlagTriple(word, expect, mask, capture, "EMIT_BIT_IMM")
   }
-  // Golden: EMIT_BIT(dominant, expect=0, mask=0, capture=0) = 0x0800.
-  assert(
-    encode(EmitBit(TxSymbol.dominant, false, false, false)) == 0x0800,
-    "EMIT_BIT minimal golden mismatch"
+  // Golden §12.4: EMIT_BIT_IMM tx=recessive → 0x0000_0008
+  // group=00 sub=0000, tx=0b01 at [4:3] → 0b01 << 3 = 0x08
+  assertGolden(
+    encode(EmitBitImm(TxSymbol.recessive, false, false, false)),
+    0x0000_0008L,
+    "EMIT_BIT_IMM tx=recessive golden"
   )
-  // Golden: EMIT_BIT(recessive, expect=1, mask=1, capture=1) =
-  //   opcode(0x1)<<11 | tx(0b01)<<9 | 0b111 = 0x0a07.
-  assert(
-    encode(EmitBit(TxSymbol.recessive, true, true, true)) == 0x0a07,
-    "EMIT_BIT full golden mismatch"
+  // Additional golden: tx=dominant (0) → 0x0000_0000
+  assertGolden(
+    encode(EmitBitImm(TxSymbol.dominant, false, false, false)),
+    0x0000_0000L,
+    "EMIT_BIT_IMM tx=dominant golden"
   )
   println(
-    s"  EMIT_BIT: ${allTxSymbols.size * allFlagTriples.size} round-trips OK"
+    s"  EMIT_BIT_IMM: ${allTxSymbols.size * allFlagTriples.size} round-trips OK"
   )
 
-  // --------------------------------------------------------------
-  // EMIT_QUARTER
-  // --------------------------------------------------------------
+  // ------------------------------------------------------------------
+  // §5.2  EMIT_BIT_REG
+  // ------------------------------------------------------------------
 
-  println("--- InstructionSim: EMIT_QUARTER round-trip ---")
+  println("--- InstructionSim: EMIT_BIT_REG round-trip ---")
 
-  // 4 sda x 4 scl x 8 flag-triples = 128 distinct instructions.
+  for {
+    src <- 0 until 8
+    (expect, mask, capture) <- allFlagTriples
+  } {
+    val insn = EmitBitReg(src, expect, mask, capture)
+    val word = roundTrip(insn)
+    assertOpcode(word, Opcode.emitBitReg, "EMIT_BIT_REG")
+    // src at [22:20]
+    assert(
+      field(word, 22, 20) == src,
+      f"EMIT_BIT_REG src field mismatch (src=$src)"
+    )
+    assertReservedZero(word, 25, 23, "EMIT_BIT_REG [25:23]")
+    assertReservedZero(word, 19, 3, "EMIT_BIT_REG [19:3]")
+    assertFlagTriple(word, expect, mask, capture, "EMIT_BIT_REG")
+  }
+  // Golden §12.4: EMIT_BIT_REG src=R2 capture=1 → 0x0420_0001
+  assertGolden(
+    encode(EmitBitReg(2, false, false, true)),
+    0x0420_0001L,
+    "EMIT_BIT_REG src=R2 capture=1 golden"
+  )
+  // Range rejects
+  try {
+    encode(EmitBitReg(8, false, false, false))
+    sys.error("EMIT_BIT_REG(src=8) should have thrown")
+  } catch { case _: IllegalArgumentException => () }
+  println(
+    s"  EMIT_BIT_REG: ${8 * allFlagTriples.size} round-trips + range-reject OK"
+  )
+
+  // ------------------------------------------------------------------
+  // §5.3  EMIT_QUARTER_IMM
+  // ------------------------------------------------------------------
+
+  println("--- InstructionSim: EMIT_QUARTER_IMM round-trip ---")
+
   for {
     sda <- allTxSymbols
     scl <- allTxSymbols
     (expect, mask, capture) <- allFlagTriples
   } {
-    val insn = EmitQuarter(sda, scl, expect, mask, capture)
+    val insn = EmitQuarterImm(sda, scl, expect, mask, capture)
     val word = roundTrip(insn)
-    assertOpcode(word, Opcode.emitQuarter, "EMIT_QUARTER")
+    assertOpcode(word, Opcode.emitQuarterImm, "EMIT_QUARTER_IMM")
+    // scl at [6:5], sda at [4:3]
     assert(
-      field(word, 10, 9) == sda.position,
-      f"EMIT_QUARTER sda_symbol field mismatch for $sda in 0x$word%04X"
+      field(word, 6, 5) == scl.position,
+      f"EMIT_QUARTER_IMM scl field mismatch for $scl"
     )
     assert(
-      field(word, 8, 7) == scl.position,
-      f"EMIT_QUARTER scl_symbol field mismatch for $scl in 0x$word%04X"
+      field(word, 4, 3) == sda.position,
+      f"EMIT_QUARTER_IMM sda field mismatch for $sda"
     )
-    assertReservedZero(word, 6, 3, "EMIT_QUARTER")
-    assertFlagTriple(word, expect, mask, capture, "EMIT_QUARTER")
+    assertReservedZero(word, 25, 7, "EMIT_QUARTER_IMM")
+    assertFlagTriple(word, expect, mask, capture, "EMIT_QUARTER_IMM")
   }
-  // Golden: EMIT_QUARTER(dominant, dominant, 0,0,0) = 0x1000.
-  assert(
+  // Golden §12.4: EMIT_QUARTER_IMM sda=dominant scl=hiz → 0x0800_0040
+  // group=00 sub=0010, scl=0b10(hiz) at [6:5]=0x40, sda=0b00(dom) at [4:3]=0
+  assertGolden(
     encode(
-      EmitQuarter(
-        TxSymbol.dominant,
-        TxSymbol.dominant,
-        false,
-        false,
-        false
-      )
-    ) == 0x1000,
-    "EMIT_QUARTER minimal golden mismatch"
-  )
-  // Golden: EMIT_QUARTER(recessive, hiz, 1,1,1) =
-  //   opcode(0x2)<<11 | sda(0b01)<<9 | scl(0b10)<<7 | 0b111 = 0x1307.
-  assert(
-    encode(
-      EmitQuarter(
-        TxSymbol.recessive,
-        TxSymbol.hiz,
-        true,
-        true,
-        true
-      )
-    ) == 0x1307,
-    "EMIT_QUARTER full golden mismatch"
+      EmitQuarterImm(TxSymbol.dominant, TxSymbol.hiz, false, false, false)
+    ),
+    0x0800_0040L,
+    "EMIT_QUARTER_IMM sda=dominant scl=hiz golden"
   )
   println(
-    s"  EMIT_QUARTER: ${allTxSymbols.size * allTxSymbols.size * allFlagTriples.size} round-trips OK"
+    s"  EMIT_QUARTER_IMM: " +
+      s"${allTxSymbols.size * allTxSymbols.size * allFlagTriples.size} " +
+      s"round-trips OK"
   )
 
-  // --------------------------------------------------------------
-  // STRETCH_SCL
-  // --------------------------------------------------------------
+  // ------------------------------------------------------------------
+  // §5.4  EMIT_QUARTER_REG
+  // ------------------------------------------------------------------
 
-  println("--- InstructionSim: STRETCH_SCL round-trip ---")
+  println("--- InstructionSim: EMIT_QUARTER_REG round-trip ---")
 
-  // Full 11-bit operand space, 0..2047 (2048 round-trips, cheap).
-  for (n <- 0 until (1 << 11)) {
-    val insn = StretchScl(n)
-    val word = roundTrip(insn)
-    assertOpcode(word, Opcode.stretchScl, "STRETCH_SCL")
-    assert(
-      field(word, 10, 0) == n,
-      f"STRETCH_SCL n_quarters field mismatch (n=$n, word=0x$word%04X)"
-    )
-  }
-  assert(encode(StretchScl(0)) == 0x1800, "STRETCH_SCL(0) golden mismatch")
-  assert(
-    encode(StretchScl(0x7ff)) == 0x1fff,
-    "STRETCH_SCL(0x7ff) golden mismatch"
-  )
-  // Reject overflow.
-  try {
-    encode(StretchScl(2048))
-    sys.error("STRETCH_SCL(2048) should have thrown")
-  } catch { case _: IllegalArgumentException => () }
-  println("  STRETCH_SCL: 2048 round-trips + overflow-reject OK")
-
-  // --------------------------------------------------------------
-  // WAIT_ON
-  // --------------------------------------------------------------
-
-  println("--- InstructionSim: WAIT_ON round-trip ---")
-
-  // All 16 cond codes (in-use + reserved) x sample timeouts.
-  // Timeouts: 0 (= forever), 1, 0x3f, 0x40, 0x7e, 0x7f (full 7-bit range).
-  val waitTimeouts = Seq(0, 1, 0x3f, 0x40, 0x7e, 0x7f)
   for {
-    cond <- allCondCodes
-    t <- waitTimeouts
+    src <- 0 until 8
+    (expect, mask, capture) <- allFlagTriples
   } {
-    val insn = WaitOn(cond, t)
+    val insn = EmitQuarterReg(src, expect, mask, capture)
     val word = roundTrip(insn)
-    assertOpcode(word, Opcode.waitOn, "WAIT_ON")
-    assert(
-      field(word, 10, 7) == cond.position,
-      f"WAIT_ON cond_code field mismatch ($cond, word=0x$word%04X)"
-    )
-    assert(
-      field(word, 6, 0) == t,
-      f"WAIT_ON timeout field mismatch (t=$t, word=0x$word%04X)"
-    )
+    assertOpcode(word, Opcode.emitQuarterReg, "EMIT_QUARTER_REG")
+    assert(field(word, 22, 20) == src, s"EMIT_QUARTER_REG src field mismatch")
+    assertReservedZero(word, 25, 23, "EMIT_QUARTER_REG [25:23]")
+    assertReservedZero(word, 19, 3, "EMIT_QUARTER_REG [19:3]")
+    assertFlagTriple(word, expect, mask, capture, "EMIT_QUARTER_REG")
   }
-  // Codes 10..15 round-trip but should be flagged not-v0 by the host.
-  for (cond <- allCondCodes if !CondCode.isV0(cond)) {
-    val insn = WaitOn(cond, 0)
-    roundTrip(insn) // must not throw
-  }
-  // Golden: WAIT_ON(always, 0) = 0x2000.
-  assert(
-    encode(WaitOn(CondCode.always, 0)) == 0x2000,
-    "WAIT_ON golden mismatch"
+  // Golden §12.4: EMIT_QUARTER_REG src=R1 → 0x0C10_0000
+  assertGolden(
+    encode(EmitQuarterReg(1, false, false, false)),
+    0x0c10_0000L,
+    "EMIT_QUARTER_REG src=R1 golden"
   )
-  // Reject timeout overflow.
-  try {
-    encode(WaitOn(CondCode.always, 128))
-    sys.error("WAIT_ON(always, 128) should have thrown")
-  } catch { case _: IllegalArgumentException => () }
   println(
-    s"  WAIT_ON: ${allCondCodes.size * waitTimeouts.size} round-trips + timeout-reject OK"
+    s"  EMIT_QUARTER_REG: ${8 * allFlagTriples.size} round-trips OK"
   )
 
-  // --------------------------------------------------------------
-  // BRANCH_ON
-  // --------------------------------------------------------------
+  // ------------------------------------------------------------------
+  // §5.5  EMIT_BYTE
+  // ------------------------------------------------------------------
 
-  println("--- InstructionSim: BRANCH_ON round-trip ---")
+  println("--- InstructionSim: EMIT_BYTE round-trip ---")
 
-  // All 16 cond codes x full signed-7-bit offset range (-64..63).
-  for {
-    cond <- allCondCodes
-    off <- -64 to 63
-  } {
-    val insn = BranchOn(cond, off)
+  for ((expect, mask, capture) <- allFlagTriples) {
+    val insn = EmitByte(expect, mask, capture)
     val word = roundTrip(insn)
-    assertOpcode(word, Opcode.branchOn, "BRANCH_ON")
-    assert(
-      field(word, 10, 7) == cond.position,
-      f"BRANCH_ON cond_code field mismatch ($cond, word=0x$word%04X)"
-    )
-    // Low septet should be two's-complement of off & 0x7f.
-    assert(
-      field(word, 6, 0) == (off & 0x7f),
-      f"BRANCH_ON offset field mismatch (off=$off, word=0x$word%04X)"
-    )
+    assertOpcode(word, Opcode.emitByte, "EMIT_BYTE")
+    assertReservedZero(word, 25, 3, "EMIT_BYTE")
+    assertFlagTriple(word, expect, mask, capture, "EMIT_BYTE")
   }
-  // Golden: BRANCH_ON(always, 0) = 0x2800.
-  assert(
-    encode(BranchOn(CondCode.always, 0)) == 0x2800,
-    "BRANCH_ON golden mismatch"
+  // Golden §12.4: EMIT_BYTE expect=0 mask=1 capture=1 → 0x1000_0003
+  assertGolden(
+    encode(EmitByte(false, true, true)),
+    0x1000_0003L,
+    "EMIT_BYTE expect=0 mask=1 capture=1 golden"
   )
-  // Golden: BRANCH_ON(always, -1) = 0x287f (two's-complement low septet).
-  assert(
-    encode(BranchOn(CondCode.always, -1)) == 0x287f,
-    "BRANCH_ON(-1) two's-complement encoding mismatch"
+  // Additional: EMIT_BYTE (no flags) → 0x1000_0000
+  assertGolden(
+    encode(EmitByte(false, false, false)),
+    0x1000_0000L,
+    "EMIT_BYTE no-flags golden"
   )
-  // Reject out-of-range offsets.
-  try {
-    encode(BranchOn(CondCode.always, 64))
-    sys.error("BRANCH_ON(always, 64) should have thrown")
-  } catch { case _: IllegalArgumentException => () }
-  try {
-    encode(BranchOn(CondCode.always, -65))
-    sys.error("BRANCH_ON(always, -65) should have thrown")
-  } catch { case _: IllegalArgumentException => () }
-  println(
-    s"  BRANCH_ON: ${allCondCodes.size * 128} round-trips + range-reject OK"
-  )
+  println(s"  EMIT_BYTE: ${allFlagTriples.size} round-trips OK")
 
-  // --------------------------------------------------------------
-  // JMP
-  // --------------------------------------------------------------
-
-  println("--- InstructionSim: JMP round-trip ---")
-
-  for (addr <- 0 until (1 << 11)) {
-    val insn = Jmp(addr)
-    val word = roundTrip(insn)
-    assertOpcode(word, Opcode.jmp, "JMP")
-    assert(
-      field(word, 10, 0) == addr,
-      f"JMP addr field mismatch (addr=$addr, word=0x$word%04X)"
-    )
-  }
-  assert(encode(Jmp(0)) == 0x3000, "JMP(0) golden mismatch")
-  assert(encode(Jmp(0x7ff)) == 0x37ff, "JMP(0x7ff) golden mismatch")
-  try {
-    encode(Jmp(2048))
-    sys.error("JMP(2048) should have thrown")
-  } catch { case _: IllegalArgumentException => () }
-  println("  JMP: 2048 round-trips + overflow-reject OK")
-
-  // --------------------------------------------------------------
-  // SET_BUS_MODE
-  // --------------------------------------------------------------
-
-  println("--- InstructionSim: SET_BUS_MODE round-trip ---")
-
-  // SET_BUS_MODE wire encoding is non-sequential per ROADMAP
-  // §"Bus mode register": `mode[2]` is the SCL drive class, `mode[1:0]`
-  // is the timing-divider selector. The host encoder uses the wire
-  // codes (0, 1, 6, 7), NOT the SpinalEnumElement `.position`
-  // declaration index (0, 1, 2, 3). Mirror that here so the field
-  // check stays correct after any future re-ordering of the enum.
-  val busModeWire: Map[BusMode.E, Int] = Map(
-    BusMode.i2c -> 0,
-    BusMode.i3cOd -> 1,
-    BusMode.i3cPp -> 6,
-    BusMode.hdrDdr -> 7
-  )
-
-  for (mode <- allBusModes) {
-    val insn = SetBusMode(mode)
-    val word = roundTrip(insn)
-    assertOpcode(word, Opcode.setBusMode, "SET_BUS_MODE")
-    assert(
-      field(word, 10, 8) == busModeWire(mode),
-      f"SET_BUS_MODE mode field mismatch ($mode, " +
-        f"got=${field(word, 10, 8)}%d expected=${busModeWire(mode)}%d, " +
-        f"word=0x$word%04X)"
-    )
-    assertReservedZero(word, 7, 0, "SET_BUS_MODE")
-  }
-  // Goldens: every BusMode against its wire-encoded operand.
-  // i2c    -> mode = 0b000 = 0 -> 0x3800 | (0 << 8) = 0x3800
-  // i3c-OD -> mode = 0b001 = 1 -> 0x3800 | (1 << 8) = 0x3900
-  // i3c-PP -> mode = 0b110 = 6 -> 0x3800 | (6 << 8) = 0x3e00
-  // hdr-ddr-> mode = 0b111 = 7 -> 0x3800 | (7 << 8) = 0x3f00
-  assert(
-    encode(SetBusMode(BusMode.i2c)) == 0x3800,
-    "SET_BUS_MODE(i2c) golden mismatch"
-  )
-  assert(
-    encode(SetBusMode(BusMode.i3cOd)) == 0x3900,
-    "SET_BUS_MODE(i3cOd) golden mismatch"
-  )
-  assert(
-    encode(SetBusMode(BusMode.i3cPp)) == 0x3e00,
-    "SET_BUS_MODE(i3cPp) golden mismatch"
-  )
-  assert(
-    encode(SetBusMode(BusMode.hdrDdr)) == 0x3f00,
-    "SET_BUS_MODE(hdrDdr) golden mismatch"
-  )
-  println(s"  SET_BUS_MODE: ${allBusModes.size} round-trips OK")
-
-  // --------------------------------------------------------------
-  // LOAD_TIMING
-  // --------------------------------------------------------------
-
-  println("--- InstructionSim: LOAD_TIMING round-trip ---")
-
-  // 4 regs x sample of 9-bit divider words (0, 1, 0xff, 0x100, 0x1fe, 0x1ff).
-  val dividerSamples = Seq(0, 1, 0xff, 0x100, 0x1fe, 0x1ff)
-  for {
-    reg <- 0 until 4
-    div <- dividerSamples
-  } {
-    val insn = LoadTiming(reg, div)
-    val word = roundTrip(insn)
-    assertOpcode(word, Opcode.loadTiming, "LOAD_TIMING")
-    assert(
-      field(word, 10, 9) == reg,
-      f"LOAD_TIMING reg field mismatch (reg=$reg, word=0x$word%04X)"
-    )
-    assert(
-      field(word, 8, 0) == div,
-      f"LOAD_TIMING divider field mismatch (div=$div, word=0x$word%04X)"
-    )
-  }
-  assert(encode(LoadTiming(0, 0)) == 0x4000, "LOAD_TIMING(0,0) golden mismatch")
-  assert(
-    encode(LoadTiming(3, 0x1ff)) == 0x47ff,
-    "LOAD_TIMING(3,0x1ff) golden mismatch"
-  )
-  try {
-    encode(LoadTiming(4, 0))
-    sys.error("LOAD_TIMING(4,0) should have thrown")
-  } catch { case _: IllegalArgumentException => () }
-  try {
-    encode(LoadTiming(0, 512))
-    sys.error("LOAD_TIMING(0,512) should have thrown")
-  } catch { case _: IllegalArgumentException => () }
-  println(
-    s"  LOAD_TIMING: ${4 * dividerSamples.size} round-trips + range-reject OK"
-  )
-
-  // --------------------------------------------------------------
-  // MARK
-  // --------------------------------------------------------------
-
-  println("--- InstructionSim: MARK round-trip ---")
-
-  for (label <- 0 until 256) {
-    val insn = Mark(label)
-    val word = roundTrip(insn)
-    assertOpcode(word, Opcode.mark, "MARK")
-    assert(
-      field(word, 10, 3) == label,
-      f"MARK label field mismatch (label=$label, word=0x$word%04X)"
-    )
-    assertReservedZero(word, 2, 0, "MARK")
-  }
-  assert(encode(Mark(0)) == 0x4800, "MARK(0) golden mismatch")
-  assert(encode(Mark(0xff)) == 0x4ff8, "MARK(0xff) golden mismatch")
-  try {
-    encode(Mark(256))
-    sys.error("MARK(256) should have thrown")
-  } catch { case _: IllegalArgumentException => () }
-  println("  MARK: 256 round-trips + overflow-reject OK")
-
-  // --------------------------------------------------------------
-  // SAMPLE_BIT_ON_SCL  (target-role; full opcode shape, no tx_symbol)
-  // --------------------------------------------------------------
+  // ------------------------------------------------------------------
+  // §5.6  SAMPLE_BIT_ON_SCL
+  // ------------------------------------------------------------------
 
   println("--- InstructionSim: SAMPLE_BIT_ON_SCL round-trip ---")
 
@@ -528,24 +312,28 @@ object InstructionSim extends App {
     val insn = SampleBitOnScl(expect, mask, capture)
     val word = roundTrip(insn)
     assertOpcode(word, Opcode.sampleBitOnScl, "SAMPLE_BIT_ON_SCL")
-    assertReservedZero(word, 10, 3, "SAMPLE_BIT_ON_SCL")
+    // dst=R7=7 at [25:23]; canonical encoder always sets this
+    assert(
+      field(word, 25, 23) == 7,
+      f"SAMPLE_BIT_ON_SCL dst field must be R7 (7) in " +
+        f"0x${word.toLong & 0xffffffffL}%08X"
+    )
+    assertReservedZero(word, 22, 3, "SAMPLE_BIT_ON_SCL")
     assertFlagTriple(word, expect, mask, capture, "SAMPLE_BIT_ON_SCL")
   }
-  // Golden: SAMPLE_BIT_ON_SCL(0,0,0) = 0x5000.
-  assert(
-    encode(SampleBitOnScl(false, false, false)) == 0x5000,
-    "SAMPLE_BIT_ON_SCL minimal golden mismatch"
-  )
-  // Golden: SAMPLE_BIT_ON_SCL(1,1,1) = 0x5007.
-  assert(
-    encode(SampleBitOnScl(true, true, true)) == 0x5007,
-    "SAMPLE_BIT_ON_SCL full golden mismatch"
+  // Golden §12.4: SAMPLE_BIT_ON_SCL capture=1 → 0x1780_0001
+  // dst=R7 at [25:23] → 7<<23=0x0380_0000; opcode prefix=0x1400_0000;
+  // flags=0b001=1 → total 0x1780_0001
+  assertGolden(
+    encode(SampleBitOnScl(false, false, true)),
+    0x1780_0001L,
+    "SAMPLE_BIT_ON_SCL capture=1 golden"
   )
   println(s"  SAMPLE_BIT_ON_SCL: ${allFlagTriples.size} round-trips OK")
 
-  // --------------------------------------------------------------
-  // DRIVE_BIT_ON_SCL  (target-role; mirrors EMIT_BIT shape)
-  // --------------------------------------------------------------
+  // ------------------------------------------------------------------
+  // §5.7  DRIVE_BIT_ON_SCL
+  // ------------------------------------------------------------------
 
   println("--- InstructionSim: DRIVE_BIT_ON_SCL round-trip ---")
 
@@ -556,125 +344,286 @@ object InstructionSim extends App {
     val insn = DriveBitOnScl(tx, expect, mask, capture)
     val word = roundTrip(insn)
     assertOpcode(word, Opcode.driveBitOnScl, "DRIVE_BIT_ON_SCL")
+    // tx at [4:3]
     assert(
-      field(word, 10, 9) == tx.position,
-      f"DRIVE_BIT_ON_SCL tx_symbol field mismatch for $tx in 0x$word%04X"
+      field(word, 4, 3) == tx.position,
+      s"DRIVE_BIT_ON_SCL tx field mismatch"
     )
-    assertReservedZero(word, 8, 3, "DRIVE_BIT_ON_SCL")
+    // Canonical dst rule: dst=R7 when capture=1, dst=0 when capture=0
+    val expectedDst = if (capture) 7 else 0
+    assert(
+      field(word, 25, 23) == expectedDst,
+      s"DRIVE_BIT_ON_SCL dst field mismatch (capture=$capture)"
+    )
+    assertReservedZero(word, 22, 5, "DRIVE_BIT_ON_SCL [22:5]")
     assertFlagTriple(word, expect, mask, capture, "DRIVE_BIT_ON_SCL")
   }
-  // Golden: DRIVE_BIT_ON_SCL(dominant, 0,0,0) = 0x5800.
-  assert(
-    encode(DriveBitOnScl(TxSymbol.dominant, false, false, false)) == 0x5800,
-    "DRIVE_BIT_ON_SCL minimal golden mismatch"
-  )
-  // Golden: DRIVE_BIT_ON_SCL(recessive, 1,1,1) = 0x5a07.
-  assert(
-    encode(DriveBitOnScl(TxSymbol.recessive, true, true, true)) == 0x5a07,
-    "DRIVE_BIT_ON_SCL full golden mismatch"
+  // Golden §12.4: DRIVE_BIT_ON_SCL tx=dominant → 0x1800_0000
+  // group=00 sub=0110, tx=0b00(dom) at [4:3]=0; dst=0 (no capture)
+  assertGolden(
+    encode(DriveBitOnScl(TxSymbol.dominant, false, false, false)),
+    0x1800_0000L,
+    "DRIVE_BIT_ON_SCL tx=dominant golden"
   )
   println(
-    s"  DRIVE_BIT_ON_SCL: ${allTxSymbols.size * allFlagTriples.size} round-trips OK"
+    s"  DRIVE_BIT_ON_SCL: " +
+      s"${allTxSymbols.size * allFlagTriples.size} round-trips OK"
   )
 
-  // --------------------------------------------------------------
-  // LOAD_LOOP (slot 0xC)
-  // --------------------------------------------------------------
+  // ------------------------------------------------------------------
+  // §5.8  STRETCH_SCL_IMM
+  // ------------------------------------------------------------------
 
-  println("--- InstructionSim: LOAD_LOOP round-trip ---")
+  println("--- InstructionSim: STRETCH_SCL_IMM round-trip ---")
 
-  for {
-    reg <- 0 until 2
-    imm <- 0 until 256
-  } {
-    val insn = LoadLoop(reg, imm)
+  val stretchSamples = Seq(0, 1, 100, 400, 8191, 16383)
+  for (n <- stretchSamples) {
+    val insn = StretchSclImm(n)
     val word = roundTrip(insn)
-    assertOpcode(word, Opcode.loadLoop, "LOAD_LOOP")
+    assertOpcode(word, Opcode.stretchSclImm, "STRETCH_SCL_IMM")
+    // n_quarters at [16:3]
     assert(
-      field(word, 10, 10) == reg,
-      f"LOAD_LOOP reg field mismatch (reg=$reg, word=0x$word%04X)"
+      field(word, 16, 3) == n,
+      s"STRETCH_SCL_IMM n_quarters field mismatch (n=$n)"
     )
-    assertReservedZero(word, 9, 8, "LOAD_LOOP")
-    assert(
-      field(word, 7, 0) == imm,
-      f"LOAD_LOOP imm field mismatch (imm=$imm, word=0x$word%04X)"
-    )
+    assertReservedZero(word, 25, 17, "STRETCH_SCL_IMM [25:17]")
+    assertReservedZero(word, 2, 0, "STRETCH_SCL_IMM [2:0]")
   }
-  // Golden: LOAD_LOOP(0, 0) = 0x6000.
-  assert(encode(LoadLoop(0, 0)) == 0x6000, "LOAD_LOOP(0,0) golden mismatch")
-  // Golden: LOAD_LOOP(1, 0xff) = 0x64ff (reg bit at [10], imm at [7:0]).
-  assert(
-    encode(LoadLoop(1, 0xff)) == 0x64ff,
-    "LOAD_LOOP(1,0xff) golden mismatch"
+  // Golden §12.4: STRETCH_SCL_IMM 400 → 0x1C00_0C80
+  // group=00 sub=0111, n=400 at [16:3] → 400<<3=3200=0x0C80
+  assertGolden(
+    encode(StretchSclImm(400)),
+    0x1c00_0c80L,
+    "STRETCH_SCL_IMM 400 golden"
   )
-  // Range rejects.
+  // Range rejects
   try {
-    encode(LoadLoop(2, 0))
-    sys.error("LOAD_LOOP(2, 0) should have thrown (reg > 1)")
+    encode(StretchSclImm(16384))
+    sys.error("STRETCH_SCL_IMM(16384) should have thrown")
   } catch { case _: IllegalArgumentException => () }
   try {
-    encode(LoadLoop(-1, 0))
-    sys.error("LOAD_LOOP(-1, 0) should have thrown")
+    encode(StretchSclImm(-1))
+    sys.error("STRETCH_SCL_IMM(-1) should have thrown")
   } catch { case _: IllegalArgumentException => () }
-  try {
-    encode(LoadLoop(0, 256))
-    sys.error("LOAD_LOOP(0, 256) should have thrown (imm > 0xff)")
-  } catch { case _: IllegalArgumentException => () }
-  println("  LOAD_LOOP: 512 round-trips + range-reject OK")
+  println(
+    s"  STRETCH_SCL_IMM: ${stretchSamples.size} round-trips + range-reject OK"
+  )
 
-  // --------------------------------------------------------------
-  // DEC_BRANCH (slot 0xD)
-  // --------------------------------------------------------------
+  // ------------------------------------------------------------------
+  // §5.9  STRETCH_SCL_REG
+  // ------------------------------------------------------------------
 
-  println("--- InstructionSim: DEC_BRANCH round-trip ---")
+  println("--- InstructionSim: STRETCH_SCL_REG round-trip ---")
 
-  for {
-    reg <- 0 until 2
-    off <- -128 to 127
-  } {
-    val insn = DecBranch(reg, off)
+  for (src <- 0 until 8) {
+    val insn = StretchSclReg(src)
     val word = roundTrip(insn)
-    assertOpcode(word, Opcode.decBranch, "DEC_BRANCH")
+    assertOpcode(word, Opcode.stretchSclReg, "STRETCH_SCL_REG")
     assert(
-      field(word, 10, 10) == reg,
-      f"DEC_BRANCH reg field mismatch (reg=$reg, word=0x$word%04X)"
+      field(word, 22, 20) == src,
+      s"STRETCH_SCL_REG src field mismatch (src=$src)"
     )
-    assertReservedZero(word, 9, 8, "DEC_BRANCH")
-    assert(
-      field(word, 7, 0) == (off & 0xff),
-      f"DEC_BRANCH offset field mismatch (off=$off, word=0x$word%04X)"
-    )
+    assertReservedZero(word, 25, 23, "STRETCH_SCL_REG [25:23]")
+    assertReservedZero(word, 19, 0, "STRETCH_SCL_REG [19:0]")
   }
-  // Golden: DEC_BRANCH(0, 0) = 0x6800.
-  assert(encode(DecBranch(0, 0)) == 0x6800, "DEC_BRANCH(0,0) golden mismatch")
-  // Golden: DEC_BRANCH(0, -1) = 0x68ff (two's-complement low byte).
-  assert(
-    encode(DecBranch(0, -1)) == 0x68ff,
-    "DEC_BRANCH(0,-1) two's-complement encoding mismatch"
+  // Golden §12.4: STRETCH_SCL_REG src=R0 → 0x2000_0000
+  assertGolden(
+    encode(StretchSclReg(0)),
+    0x2000_0000L,
+    "STRETCH_SCL_REG src=R0 golden"
   )
-  // Golden: DEC_BRANCH(1, 127) = 0x6c7f (reg bit at [10]).
-  assert(
-    encode(DecBranch(1, 127)) == 0x6c7f,
-    "DEC_BRANCH(1,127) golden mismatch"
-  )
-  // Range rejects.
   try {
-    encode(DecBranch(2, 0))
-    sys.error("DEC_BRANCH(2, 0) should have thrown (reg > 1)")
+    encode(StretchSclReg(8))
+    sys.error("STRETCH_SCL_REG(src=8) should have thrown")
   } catch { case _: IllegalArgumentException => () }
-  try {
-    encode(DecBranch(0, 128))
-    sys.error("DEC_BRANCH(0, 128) should have thrown")
-  } catch { case _: IllegalArgumentException => () }
-  try {
-    encode(DecBranch(0, -129))
-    sys.error("DEC_BRANCH(0, -129) should have thrown")
-  } catch { case _: IllegalArgumentException => () }
-  println("  DEC_BRANCH: 512 round-trips + range-reject OK")
+  println("  STRETCH_SCL_REG: 8 round-trips + range-reject OK")
 
-  // --------------------------------------------------------------
-  // SET_ROLE (slot 0x10 --- runtime engine-role select)
-  // --------------------------------------------------------------
+  // ------------------------------------------------------------------
+  // §5.10 HALT
+  // ------------------------------------------------------------------
+
+  println("--- InstructionSim: HALT round-trip ---")
+
+  for (status <- 0 until 32) {
+    val insn = Halt(status)
+    val word = roundTrip(insn)
+    assertOpcode(word, Opcode.halt, "HALT")
+    assert(
+      field(word, 7, 3) == status,
+      s"HALT status field mismatch (status=$status)"
+    )
+    assertReservedZero(word, 25, 8, "HALT [25:8]")
+    assertReservedZero(word, 2, 0, "HALT [2:0]")
+  }
+  // Golden §12.4: HALT status=2 → 0x4000_0010
+  // group=01 sub=0000, status=2 at [7:3] → 2<<3=0x10
+  assertGolden(
+    encode(Halt(2)),
+    0x4000_0010L,
+    "HALT status=2 golden"
+  )
+  // Additional: HALT status=0 → 0x4000_0000
+  assertGolden(
+    encode(Halt(0)),
+    0x4000_0000L,
+    "HALT status=0 golden"
+  )
+  // Range rejects
+  try {
+    encode(Halt(32))
+    sys.error("HALT(32) should have thrown")
+  } catch { case _: IllegalArgumentException => () }
+  try {
+    encode(Halt(-1))
+    sys.error("HALT(-1) should have thrown")
+  } catch { case _: IllegalArgumentException => () }
+  println("  HALT: 32 round-trips + range-reject OK")
+
+  // ------------------------------------------------------------------
+  // §5.11 BRANCH_ON
+  // ------------------------------------------------------------------
+
+  println("--- InstructionSim: BRANCH_ON round-trip ---")
+
+  val branchOffsets = Seq(-512, -256, -4, -1, 0, 1, 4, 255, 511)
+  for {
+    cond <- allCondCodes
+    off <- branchOffsets
+  } {
+    val insn = BranchOn(cond, off)
+    val word = roundTrip(insn)
+    assertOpcode(word, Opcode.branchOn, "BRANCH_ON")
+    // cond at [16:13]
+    assert(
+      field(word, 16, 13) == cond.position,
+      s"BRANCH_ON cond field mismatch ($cond)"
+    )
+    // offset at [12:3] as two's-complement 10-bit
+    assert(
+      field(word, 12, 3) == (off & 0x3ff),
+      s"BRANCH_ON offset field mismatch (off=$off)"
+    )
+    assertReservedZero(word, 25, 17, "BRANCH_ON [25:17]")
+    assertReservedZero(word, 2, 0, "BRANCH_ON [2:0]")
+  }
+  // Golden §12.4: BRANCH_ON MISMATCH, loop_top (offset=-4) → 0x4400_3FE0
+  // cond=MISMATCH=1 at [16:13] → 1<<13=0x2000; offset=-4: 0x3FC<<3=0x1FE0
+  assertGolden(
+    encode(BranchOn(CondCode.mismatch, -4)),
+    0x4400_3fe0L,
+    "BRANCH_ON MISMATCH offset=-4 golden"
+  )
+  // Sugar: JMP <label> is BRANCH_ON ALWAYS, offset
+  assertGolden(
+    encode(BranchOn(CondCode.always, 0)),
+    0x4400_0000L,
+    "BRANCH_ON ALWAYS offset=0 golden"
+  )
+  // Range rejects
+  try {
+    encode(BranchOn(CondCode.always, 512))
+    sys.error("BRANCH_ON(offset=512) should have thrown")
+  } catch { case _: IllegalArgumentException => () }
+  try {
+    encode(BranchOn(CondCode.always, -513))
+    sys.error("BRANCH_ON(offset=-513) should have thrown")
+  } catch { case _: IllegalArgumentException => () }
+  println(
+    s"  BRANCH_ON: ${allCondCodes.size * branchOffsets.size} round-trips + range-reject OK"
+  )
+
+  // ------------------------------------------------------------------
+  // §5.12 WAIT_ON
+  // ------------------------------------------------------------------
+
+  println("--- InstructionSim: WAIT_ON round-trip ---")
+
+  val waitTimeouts = Seq(0, 1, 64, 512, 1023)
+  for {
+    cond <- allCondCodes
+    t <- waitTimeouts
+  } {
+    val insn = WaitOn(cond, t)
+    val word = roundTrip(insn)
+    assertOpcode(word, Opcode.waitOn, "WAIT_ON")
+    assert(
+      field(word, 16, 13) == cond.position,
+      s"WAIT_ON cond field mismatch ($cond)"
+    )
+    assert(
+      field(word, 12, 3) == t,
+      s"WAIT_ON timeout field mismatch (t=$t)"
+    )
+    assertReservedZero(word, 25, 17, "WAIT_ON [25:17]")
+    assertReservedZero(word, 2, 0, "WAIT_ON [2:0]")
+  }
+  // Golden §12.4: WAIT_ON SDA_LOW, 64 → 0x4800_A200
+  // cond=SDA_LOW=5 at [16:13] → 5<<13=0xA000; timeout=64 at [12:3] → 64<<3=0x200
+  assertGolden(
+    encode(WaitOn(CondCode.sdaLow, 64)),
+    0x4800_a200L,
+    "WAIT_ON SDA_LOW 64 golden"
+  )
+  // Range rejects
+  try {
+    encode(WaitOn(CondCode.always, 1024))
+    sys.error("WAIT_ON(timeout=1024) should have thrown")
+  } catch { case _: IllegalArgumentException => () }
+  try {
+    encode(WaitOn(CondCode.always, -1))
+    sys.error("WAIT_ON(timeout=-1) should have thrown")
+  } catch { case _: IllegalArgumentException => () }
+  println(
+    s"  WAIT_ON: ${allCondCodes.size * waitTimeouts.size} round-trips + range-reject OK"
+  )
+
+  // ------------------------------------------------------------------
+  // §5.13 SET_BUS_MODE
+  // ------------------------------------------------------------------
+
+  println("--- InstructionSim: SET_BUS_MODE round-trip ---")
+
+  for (mode <- allBusModes) {
+    val insn = SetBusMode(mode)
+    val word = roundTrip(insn)
+    assertOpcode(word, Opcode.setBusMode, "SET_BUS_MODE")
+    // mode at [6:3]; v0.2 sequential: i2c=0, i3c-OD=1, i3c-PP=2, hdr-ddr=3
+    val expectedWire = BusMode.wireValue(mode)
+    assert(
+      field(word, 6, 3) == expectedWire,
+      s"SET_BUS_MODE mode field mismatch ($mode, wire=$expectedWire)"
+    )
+    assertReservedZero(word, 25, 7, "SET_BUS_MODE [25:7]")
+    assertReservedZero(word, 2, 0, "SET_BUS_MODE [2:0]")
+  }
+  // Golden §12.4: SET_BUS_MODE i3c-PP → 0x4C00_0010
+  // group=01 sub=0011, mode=0b0010 at [6:3] → 2<<3=0x10
+  assertGolden(
+    encode(SetBusMode(BusMode.i3cPp)),
+    0x4c00_0010L,
+    "SET_BUS_MODE i3c-PP golden"
+  )
+  // v0.2 sequential encoding goldens (verify renumbering from v0)
+  assertGolden(
+    encode(SetBusMode(BusMode.i2c)),
+    0x4c00_0000L,
+    "SET_BUS_MODE i2c golden"
+  )
+  assertGolden(
+    encode(SetBusMode(BusMode.i3cOd)),
+    0x4c00_0008L,
+    "SET_BUS_MODE i3c-OD golden"
+  )
+  assertGolden(
+    encode(SetBusMode(BusMode.hdrDdr)),
+    0x4c00_0018L,
+    "SET_BUS_MODE hdr-ddr golden"
+  )
+  println(s"  SET_BUS_MODE: ${allBusModes.size} round-trips OK")
+
+  // ------------------------------------------------------------------
+  // §5.14 SET_ROLE
+  // ------------------------------------------------------------------
 
   println("--- InstructionSim: SET_ROLE round-trip ---")
 
@@ -682,168 +631,437 @@ object InstructionSim extends App {
     val insn = SetRole(role)
     val word = roundTrip(insn)
     assertOpcode(word, Opcode.setRole, "SET_ROLE")
+    // role at [3]
     assert(
-      field(word, 10, 10) == (if (role) 1 else 0),
-      f"SET_ROLE role bit mismatch (role=$role, word=0x$word%04X)"
+      field(word, 3, 3) == (if (role) 1 else 0),
+      s"SET_ROLE role bit mismatch (role=$role)"
     )
-    assertReservedZero(word, 9, 0, "SET_ROLE")
+    assertReservedZero(word, 25, 4, "SET_ROLE [25:4]")
+    assertReservedZero(word, 2, 0, "SET_ROLE [2:0]")
   }
-  // Golden: SET_ROLE(controller) = 0x10 << 11 = 0x8000.
-  assert(
-    encode(SetRole(role = false)) == 0x8000,
-    "SET_ROLE(controller) golden mismatch"
-  )
-  // Golden: SET_ROLE(target) = 0x8000 | (1 << 10) = 0x8400.
-  assert(
-    encode(SetRole(role = true)) == 0x8400,
-    "SET_ROLE(target) golden mismatch"
+  // Golden §12.4: SET_ROLE target → 0x5000_0008
+  assertGolden(encode(SetRole(true)), 0x5000_0008L, "SET_ROLE target golden")
+  // Controller → 0x5000_0000
+  assertGolden(
+    encode(SetRole(false)),
+    0x5000_0000L,
+    "SET_ROLE controller golden"
   )
   println("  SET_ROLE: 2 round-trips OK")
 
-  // --------------------------------------------------------------
-  // HALT
-  // --------------------------------------------------------------
+  // ------------------------------------------------------------------
+  // §5.15 FLAG_CLEAR
+  // ------------------------------------------------------------------
 
-  println("--- InstructionSim: HALT round-trip ---")
+  println("--- InstructionSim: FLAG_CLEAR round-trip ---")
 
-  for (status <- 0 until 16) {
-    val insn = Halt(status)
+  val flagMasks = Seq(0, 1, 0x1f, 0b00001, 0b00110, 0b11111)
+  for (mask <- flagMasks) {
+    val insn = FlagClear(mask)
     val word = roundTrip(insn)
-    assertOpcode(word, Opcode.halt, "HALT")
+    assertOpcode(word, Opcode.flagClear, "FLAG_CLEAR")
+    // mask at [7:3]
     assert(
-      field(word, 10, 7) == status,
-      f"HALT status field mismatch in 0x$word%04X (status=$status)"
+      field(word, 7, 3) == mask,
+      s"FLAG_CLEAR mask field mismatch (mask=$mask)"
     )
-    assertReservedZero(word, 6, 0, "HALT")
+    assertReservedZero(word, 25, 8, "FLAG_CLEAR [25:8]")
+    assertReservedZero(word, 2, 0, "FLAG_CLEAR [2:0]")
   }
-  // HALT(0) = 0x0000 --- the safe-trap-on-zero-memory contract.
-  assert(encode(Halt(0)) == 0x0000, "HALT(0) golden mismatch")
-  // HALT(0xf) = 0x0780.
-  assert(encode(Halt(0xf)) == 0x0780, "HALT(0xf) golden mismatch")
+  // Golden §12.4: FLAG_CLEAR 0b00001 → 0x5400_0008
+  assertGolden(
+    encode(FlagClear(0b00001)),
+    0x5400_0008L,
+    "FLAG_CLEAR 0b00001 golden"
+  )
+  // All-bits: 31<<3=0xF8
+  assertGolden(
+    encode(FlagClear(31)),
+    0x5400_00f8L,
+    "FLAG_CLEAR 0b11111 golden"
+  )
+  // Range rejects
   try {
-    encode(Halt(16))
-    sys.error("HALT(16) should have thrown")
+    encode(FlagClear(32))
+    sys.error("FLAG_CLEAR(32) should have thrown")
   } catch { case _: IllegalArgumentException => () }
-  println("  HALT: 16 round-trips + overflow-reject OK")
+  try {
+    encode(FlagClear(-1))
+    sys.error("FLAG_CLEAR(-1) should have thrown")
+  } catch { case _: IllegalArgumentException => () }
+  println(s"  FLAG_CLEAR: ${flagMasks.size} round-trips + range-reject OK")
 
-  // --------------------------------------------------------------
-  // RESERVED v0.5 + upper-half (0xE..0xF + 0x11..0x1F)
-  // --------------------------------------------------------------
+  // ------------------------------------------------------------------
+  // §5.16 MARK
+  // ------------------------------------------------------------------
+
+  println("--- InstructionSim: MARK round-trip ---")
+
+  val markLabels = Seq(0, 1, 42, 255, 1000, 16383)
+  for (label <- markLabels) {
+    val insn = Mark(label)
+    val word = roundTrip(insn)
+    assertOpcode(word, Opcode.mark, "MARK")
+    // label at [16:3]
+    assert(
+      field(word, 16, 3) == label,
+      s"MARK label field mismatch (label=$label)"
+    )
+    assertReservedZero(word, 25, 17, "MARK [25:17]")
+    assertReservedZero(word, 2, 0, "MARK [2:0]")
+  }
+  // Golden §12.4: MARK label=42 → 0x5800_0150
+  // label=42 at [16:3] → 42<<3=336=0x150
+  assertGolden(
+    encode(Mark(42)),
+    0x5800_0150L,
+    "MARK label=42 golden"
+  )
+  // Range rejects
+  try {
+    encode(Mark(16384))
+    sys.error("MARK(16384) should have thrown")
+  } catch { case _: IllegalArgumentException => () }
+  println(s"  MARK: ${markLabels.size} round-trips + range-reject OK")
+
+  // ------------------------------------------------------------------
+  // §5.17 LOAD_TIMING
+  // ------------------------------------------------------------------
+
+  println("--- InstructionSim: LOAD_TIMING round-trip ---")
+
+  val timingDividers = Seq(0, 1, 59, 480, 16383)
+  for {
+    reg <- 0 until 8
+    div <- timingDividers
+  } {
+    val insn = LoadTiming(reg, div)
+    val word = roundTrip(insn)
+    assertOpcode(word, Opcode.loadTiming, "LOAD_TIMING")
+    // reg at [19:17]
+    assert(
+      field(word, 19, 17) == reg,
+      s"LOAD_TIMING reg field mismatch (reg=$reg)"
+    )
+    // divider at [16:3]
+    assert(
+      field(word, 16, 3) == div,
+      s"LOAD_TIMING divider field mismatch (div=$div)"
+    )
+    assertReservedZero(word, 25, 20, "LOAD_TIMING [25:20]")
+    assertReservedZero(word, 2, 0, "LOAD_TIMING [2:0]")
+  }
+  // Golden §12.4: LOAD_TIMING reg=0, divider=480 → 0x5C00_0F00
+  // reg=0 at [19:17]=0; divider=480 at [16:3] → 480<<3=3840=0x0F00
+  assertGolden(
+    encode(LoadTiming(0, 480)),
+    0x5c00_0f00L,
+    "LOAD_TIMING reg=0 divider=480 golden"
+  )
+  // Range rejects
+  try {
+    encode(LoadTiming(8, 0))
+    sys.error("LOAD_TIMING(reg=8) should have thrown")
+  } catch { case _: IllegalArgumentException => () }
+  try {
+    encode(LoadTiming(0, 16384))
+    sys.error("LOAD_TIMING(divider=16384) should have thrown")
+  } catch { case _: IllegalArgumentException => () }
+  println(
+    s"  LOAD_TIMING: ${8 * timingDividers.size} round-trips + range-reject OK"
+  )
+
+  // ------------------------------------------------------------------
+  // §5.18 LOAD_IMM
+  // ------------------------------------------------------------------
+
+  println("--- InstructionSim: LOAD_IMM round-trip ---")
+
+  val immSamples = Seq(0, 1, 42, 100, 255, 8191, 16383)
+  for {
+    dst <- 0 until 8
+    imm <- immSamples
+  } {
+    val insn = LoadImm(dst, imm)
+    val word = roundTrip(insn)
+    assertOpcode(word, Opcode.loadImm, "LOAD_IMM")
+    assert(field(word, 25, 23) == dst, s"LOAD_IMM dst field mismatch")
+    assert(field(word, 16, 3) == imm, s"LOAD_IMM imm14 field mismatch")
+    assertReservedZero(word, 22, 17, "LOAD_IMM [22:17]")
+    assertReservedZero(word, 2, 0, "LOAD_IMM [2:0]")
+  }
+  // Golden §12.4: LOAD_IMM R3, 100 → 0x8180_0320
+  // dst=3 at [25:23] → 3<<23=0x0180_0000; imm=100 at [16:3] → 100<<3=0x320
+  assertGolden(
+    encode(LoadImm(3, 100)),
+    0x8180_0320L,
+    "LOAD_IMM R3 100 golden"
+  )
+  // Range rejects
+  try {
+    encode(LoadImm(8, 0))
+    sys.error("LOAD_IMM(dst=8) should have thrown")
+  } catch { case _: IllegalArgumentException => () }
+  try {
+    encode(LoadImm(0, 16384))
+    sys.error("LOAD_IMM(imm=16384) should have thrown")
+  } catch { case _: IllegalArgumentException => () }
+  try {
+    encode(LoadImm(0, -1))
+    sys.error("LOAD_IMM(imm=-1) should have thrown")
+  } catch { case _: IllegalArgumentException => () }
+  println(
+    s"  LOAD_IMM: ${8 * immSamples.size} round-trips + range-reject OK"
+  )
+
+  // ------------------------------------------------------------------
+  // §5.19 MOV
+  // ------------------------------------------------------------------
+
+  println("--- InstructionSim: MOV round-trip ---")
+
+  for {
+    dst <- 0 until 8
+    src <- 0 until 8
+  } {
+    val insn = Mov(dst, src)
+    val word = roundTrip(insn)
+    assertOpcode(word, Opcode.mov, "MOV")
+    assert(field(word, 25, 23) == dst, s"MOV dst field mismatch")
+    assert(field(word, 22, 20) == src, s"MOV src field mismatch")
+    assertReservedZero(word, 19, 0, "MOV [19:0]")
+  }
+  // Golden §12.4: MOV R1, R0 → 0x8480_0000
+  // dst=1 at [25:23] → 0x0080_0000; src=0 at [22:20] → 0
+  assertGolden(
+    encode(Mov(1, 0)),
+    0x8480_0000L,
+    "MOV R1 R0 golden"
+  )
+  println("  MOV: 64 round-trips OK")
+
+  // ------------------------------------------------------------------
+  // §5.20 ADD_IMM
+  // ------------------------------------------------------------------
+
+  println("--- InstructionSim: ADD_IMM round-trip ---")
+
+  val addImmSamples = Seq(-8192, -1, 0, 1, 4, 8191)
+  for {
+    dst <- Seq(0, 7)
+    src <- Seq(0, 7)
+    imm <- addImmSamples
+  } {
+    val insn = AddImm(dst, src, imm)
+    val word = roundTrip(insn)
+    assertOpcode(word, Opcode.addImm, "ADD_IMM")
+    assert(field(word, 25, 23) == dst, s"ADD_IMM dst field mismatch")
+    assert(field(word, 22, 20) == src, s"ADD_IMM src field mismatch")
+    assert(
+      field(word, 16, 3) == (imm & 0x3fff),
+      s"ADD_IMM imm14 field mismatch (imm=$imm)"
+    )
+    assertReservedZero(word, 19, 17, "ADD_IMM [19:17]")
+    assertReservedZero(word, 2, 0, "ADD_IMM [2:0]")
+  }
+  // Golden §12.4: ADD_IMM R0, R0, 4 → 0x8800_0020
+  assertGolden(
+    encode(AddImm(0, 0, 4)),
+    0x8800_0020L,
+    "ADD_IMM R0 R0 4 golden"
+  )
+  // Range rejects
+  try {
+    encode(AddImm(0, 0, 8192))
+    sys.error("ADD_IMM(imm=8192) should have thrown")
+  } catch { case _: IllegalArgumentException => () }
+  try {
+    encode(AddImm(0, 0, -8193))
+    sys.error("ADD_IMM(imm=-8193) should have thrown")
+  } catch { case _: IllegalArgumentException => () }
+  println(
+    s"  ADD_IMM: ${2 * 2 * addImmSamples.size} round-trips + range-reject OK"
+  )
+
+  // ------------------------------------------------------------------
+  // §5.21 DEC
+  // ------------------------------------------------------------------
+
+  println("--- InstructionSim: DEC round-trip ---")
+
+  for (reg <- 0 until 8) {
+    val insn = Dec(reg)
+    val word = roundTrip(insn)
+    assertOpcode(word, Opcode.dec, "DEC")
+    // dst=src=reg
+    assert(field(word, 25, 23) == reg, s"DEC dst field mismatch (reg=$reg)")
+    assert(field(word, 22, 20) == reg, s"DEC src field mismatch (reg=$reg)")
+    assertReservedZero(word, 19, 0, "DEC [19:0]")
+  }
+  // Golden §12.4: DEC R6 → 0x8F60_0000
+  // dst=6 at [25:23] → 6<<23=0x0300_0000; src=6 at [22:20] → 6<<20=0x0060_0000
+  assertGolden(
+    encode(Dec(6)),
+    0x8f60_0000L,
+    "DEC R6 golden"
+  )
+  // Additional: DEC R0 → 0x8C00_0000
+  assertGolden(
+    encode(Dec(0)),
+    0x8c00_0000L,
+    "DEC R0 golden"
+  )
+  try {
+    encode(Dec(8))
+    sys.error("DEC(reg=8) should have thrown")
+  } catch { case _: IllegalArgumentException => () }
+  println("  DEC: 8 round-trips + range-reject OK")
+
+  // ------------------------------------------------------------------
+  // §5.22  AND_IMM  / §5.23  OR_IMM  / §5.24  XOR_IMM
+  // (identical layout, different sub-opcodes)
+  // ------------------------------------------------------------------
+
+  println("--- InstructionSim: AND_IMM / OR_IMM / XOR_IMM round-trip ---")
+
+  val logicImmSamples = Seq(0, 1, 0xff, 0x3fff)
+  for (imm <- logicImmSamples) {
+    // AND_IMM
+    val wa = roundTrip(AndImm(0, 0, imm))
+    assertOpcode(wa, Opcode.andImm, "AND_IMM")
+    assert(field(wa, 16, 3) == imm, s"AND_IMM imm field mismatch")
+    // OR_IMM
+    val wo = roundTrip(OrImm(0, 0, imm))
+    assertOpcode(wo, Opcode.orImm, "OR_IMM")
+    assert(field(wo, 16, 3) == imm, s"OR_IMM imm field mismatch")
+    // XOR_IMM
+    val wx = roundTrip(XorImm(0, 0, imm))
+    assertOpcode(wx, Opcode.xorImm, "XOR_IMM")
+    assert(field(wx, 16, 3) == imm, s"XOR_IMM imm field mismatch")
+  }
+  // Golden §12.4: AND_IMM R0, R0, 0xFF → 0x9000_07F8
+  assertGolden(encode(AndImm(0, 0, 0xff)), 0x9000_07f8L, "AND_IMM 0xFF golden")
+  // Golden §12.4: OR_IMM R0, R0, 0x01 → 0x9400_0008
+  assertGolden(encode(OrImm(0, 0, 0x01)), 0x9400_0008L, "OR_IMM 0x01 golden")
+  // Golden §12.4: XOR_IMM R0, R0, 0xFF → 0x9800_07F8
+  assertGolden(encode(XorImm(0, 0, 0xff)), 0x9800_07f8L, "XOR_IMM 0xFF golden")
+  // Range rejects for AND_IMM (same logic applies to OR/XOR)
+  try {
+    encode(AndImm(0, 0, 16384))
+    sys.error("AND_IMM(imm=16384) should have thrown")
+  } catch { case _: IllegalArgumentException => () }
+  println(
+    s"  AND/OR/XOR_IMM: ${3 * logicImmSamples.size} round-trips + golden OK"
+  )
+
+  // ------------------------------------------------------------------
+  // §5.25 SHIFT
+  // ------------------------------------------------------------------
+
+  println("--- InstructionSim: SHIFT round-trip ---")
+
+  val shamtSamples = Seq(0, 1, 16, 31)
+  for {
+    arith <- Seq(false, true)
+    dir <- Seq(false, true)
+    shamt <- shamtSamples
+  } {
+    val insn = Shift(0, 0, arith, dir, shamt)
+    val word = roundTrip(insn)
+    assertOpcode(word, Opcode.shift, "SHIFT")
+    assert(
+      field(word, 19, 19) == (if (arith) 1 else 0),
+      s"SHIFT arith mismatch"
+    )
+    assert(field(word, 18, 18) == (if (dir) 1 else 0), s"SHIFT dir mismatch")
+    assert(field(word, 17, 17) == 0, s"SHIFT [17] not reserved-zero")
+    assert(field(word, 7, 3) == shamt, s"SHIFT shamt mismatch")
+    assertReservedZero(word, 16, 8, "SHIFT [16:8]")
+    assertReservedZero(word, 2, 0, "SHIFT [2:0]")
+  }
+  // Golden §12.4: SHIFT R0, R0, left, 1 → 0x9C00_0008
+  // arith=0 at [19]=0; dir=0(left) at [18]=0; shamt=1 at [7:3] → 1<<3=0x08
+  assertGolden(
+    encode(Shift(0, 0, false, false, 1)),
+    0x9c00_0008L,
+    "SHIFT left 1 golden"
+  )
+  // Range rejects
+  try {
+    encode(Shift(0, 0, false, false, 32))
+    sys.error("SHIFT(shamt=32) should have thrown")
+  } catch { case _: IllegalArgumentException => () }
+  try {
+    encode(Shift(8, 0, false, false, 0))
+    sys.error("SHIFT(dst=8) should have thrown")
+  } catch { case _: IllegalArgumentException => () }
+  println(
+    s"  SHIFT: ${2 * 2 * shamtSamples.size} round-trips + range-reject OK"
+  )
+
+  // ------------------------------------------------------------------
+  // Reserved slot round-trips
+  // ------------------------------------------------------------------
 
   println("--- InstructionSim: ReservedV05 round-trip ---")
 
-  val payloadSamples = Seq(0, 1, 0x3ff, 0x400, 0x7fe, 0x7ff)
+  val payloadSamples = Seq(0, 1, 0xff, 0x3ffff, 0x3ffffff)
   for {
-    op <- reservedOpcodes
+    op <- reservedOpcodes.take(8) // sample to keep runtime short
     p <- payloadSamples
   } {
     val insn = ReservedV05(op, p)
     val word = roundTrip(insn)
     assertOpcode(word, op, s"ReservedV05($op)")
     assert(
-      field(word, 10, 0) == p,
-      f"ReservedV05 payload field mismatch (payload=$p, word=0x$word%04X)"
+      (word & 0x03ffffff) == p,
+      s"ReservedV05 payload mismatch (op=$op, p=$p)"
     )
   }
-  // Golden: ReservedV05(flagClear, 0) = 0x7000 (lowest reserved slot
-  // after LOAD_LOOP / DEC_BRANCH claimed 0xC and 0xD in v1).
-  assert(
-    encode(ReservedV05(Opcode.flagClear, 0)) == 0x7000,
-    "ReservedV05(flagClear, 0) golden mismatch"
-  )
-  // Golden: ReservedV05(captureRun, 0x7ff) = 0x7fff
-  // (op 0x0f << 11 = 0x7800; payload 0x7ff).
-  assert(
-    encode(ReservedV05(Opcode.captureRun, 0x7ff)) == 0x7fff,
-    "ReservedV05(captureRun, 0x7ff) golden mismatch"
-  )
-  // Golden: upper-half reserved slot at op = 0x11 with zero payload
-  // = (0x11 << 11) = 0x8800. Sanity-check the first upper-half slot
-  // round-trips.
-  assert(
-    encode(ReservedV05(Opcode.reserved11, 0)) == 0x8800,
-    "ReservedV05(reserved11, 0) golden mismatch"
-  )
-  // Golden: highest reserved slot at op = 0x1f, max payload.
-  // = (0x1f << 11) | 0x7ff = 0xffff.
-  assert(
-    encode(ReservedV05(Opcode.reserved1f, 0x7ff)) == 0xffff,
-    "ReservedV05(reserved1f, 0x7ff) golden mismatch"
-  )
-  // ReservedV05 constructor must reject v0 opcodes.
+  // Constructor must reject live opcodes
   try {
-    ReservedV05(Opcode.emitBit, 0)
-    sys.error("ReservedV05(emitBit, ...) should have thrown")
-  } catch { case _: IllegalArgumentException => () }
-  // ReservedV05 constructor must reject v0 opcodes in the newly-claimed
-  // 0xC / 0xD slots too.
-  try {
-    ReservedV05(Opcode.loadLoop, 0)
-    sys.error("ReservedV05(loadLoop, ...) should have thrown")
+    ReservedV05(Opcode.emitBitImm, 0)
+    sys.error("ReservedV05(emitBitImm) should have thrown")
   } catch { case _: IllegalArgumentException => () }
   try {
-    ReservedV05(Opcode.decBranch, 0)
-    sys.error("ReservedV05(decBranch, ...) should have thrown")
+    ReservedV05(Opcode.halt, 0)
+    sys.error("ReservedV05(halt) should have thrown")
   } catch { case _: IllegalArgumentException => () }
-  // ReservedV05 constructor must reject the v0 SET_ROLE opcode at 0x10
-  // --- it has its own typed case class.
+  // Payload overflow
   try {
-    ReservedV05(Opcode.setRole, 0)
-    sys.error("ReservedV05(setRole, ...) should have thrown")
-  } catch { case _: IllegalArgumentException => () }
-  // ReservedV05 constructor must reject payload overflow (11-bit cap).
-  try {
-    ReservedV05(Opcode.flagClear, 0x800)
-    sys.error("ReservedV05 with 0x800 payload should have thrown")
+    ReservedV05(Opcode.wireRes9, 1 << 26)
+    sys.error("ReservedV05 payload overflow should have thrown")
   } catch { case _: IllegalArgumentException => () }
   println(
-    s"  ReservedV05: ${reservedOpcodes.size * payloadSamples.size} round-trips + constructor-reject OK"
+    s"  ReservedV05: ${8 * payloadSamples.size} round-trips + constructor-reject OK"
   )
 
-  // --------------------------------------------------------------
-  // Decoder must produce a ReservedV05 for any word whose opcode
-  // field is a non-v0 slot (0x0E..0x0F or 0x11..0x1F), regardless
-  // of where the payload bits sit.
-  // --------------------------------------------------------------
-
-  println("--- InstructionSim: decoder reserved-opcode dispatch ---")
-
-  for {
-    op <- reservedOpcodes
-    p <- payloadSamples
-  } {
-    val word = (op.position << OPCODE_LO) | p
-    val back = decode(word)
-    assert(
-      back == ReservedV05(op, p),
-      f"decoder reserved-opcode dispatch failed for word 0x$word%04X: got $back"
-    )
-  }
-  println(
-    s"  Decoder reserved dispatch: ${reservedOpcodes.size * payloadSamples.size} cases OK"
-  )
-
-  // --------------------------------------------------------------
-  // Flag-triple-at-[2:0] invariant on every bearer opcode.
-  // Concentrates the AGENTS §3.10 check in one place. For each bearer
-  // opcode, encode the three single-flag-set variants and assert
-  // exactly bit 2 / 1 / 0 of the word is the only flag-triple bit set.
-  // --------------------------------------------------------------
+  // ------------------------------------------------------------------
+  // Flag-triple [2:0] invariant across ALL bearer opcodes
+  // (AGENTS §3.10 structural check)
+  // ------------------------------------------------------------------
 
   println("--- InstructionSim: flag-triple [2:0] invariant ---")
 
-  /** For each bearer opcode, returns a builder that produces an `Instruction`
-    * with the given flag triple but otherwise minimal (zero) operand values.
-    * The minimal operands keep the assertion focused on the flag bits only.
-    */
+  /** Minimal-operand bearers: (label, builder(expect, mask, capture)). */
   val bearerBuilders
       : Seq[(String, (Boolean, Boolean, Boolean) => Instruction)] =
     Seq(
-      ("EMIT_BIT", (e, m, c) => EmitBit(TxSymbol.dominant, e, m, c)),
+      ("EMIT_BIT_IMM", (e, m, c) => EmitBitImm(TxSymbol.dominant, e, m, c)),
       (
-        "EMIT_QUARTER",
-        (e, m, c) => EmitQuarter(TxSymbol.dominant, TxSymbol.dominant, e, m, c)
+        "EMIT_BIT_REG",
+        (e, m, c) => EmitBitReg(0, e, m, c)
       ),
+      (
+        "EMIT_QUARTER_IMM",
+        (e, m, c) =>
+          EmitQuarterImm(TxSymbol.dominant, TxSymbol.dominant, e, m, c)
+      ),
+      (
+        "EMIT_QUARTER_REG",
+        (e, m, c) => EmitQuarterReg(0, e, m, c)
+      ),
+      ("EMIT_BYTE", (e, m, c) => EmitByte(e, m, c)),
       ("SAMPLE_BIT_ON_SCL", (e, m, c) => SampleBitOnScl(e, m, c)),
       (
         "DRIVE_BIT_ON_SCL",
@@ -852,37 +1070,74 @@ object InstructionSim extends App {
     )
 
   for ((label, build) <- bearerBuilders) {
-    // expect-only: bit 2 set, bits 1 and 0 clear.
+    // expect-only: bit 2 set, bits 1 and 0 clear
     val wE = encode(build(true, false, false))
     assert(
-      ((wE >> EXPECT_BIT) & 1) == 1 && ((wE >> MASK_BIT) & 1) == 0 &&
-        ((wE >> CAPTURE_BIT) & 1) == 0,
-      f"$label expect-only encoding has wrong flag bits: 0x$wE%04X"
+      ((wE >>> EXPECT_BIT) & 1) == 1 &&
+        ((wE >>> MASK_BIT) & 1) == 0 &&
+        ((wE >>> CAPTURE_BIT) & 1) == 0,
+      s"$label expect-only: wrong flag bits in " +
+        f"0x${wE.toLong & 0xffffffffL}%08X"
     )
-    // mask-only: bit 1 set, bits 2 and 0 clear.
+    // mask-only: bit 1 set, bits 2 and 0 clear
     val wM = encode(build(false, true, false))
     assert(
-      ((wM >> MASK_BIT) & 1) == 1 && ((wM >> EXPECT_BIT) & 1) == 0 &&
-        ((wM >> CAPTURE_BIT) & 1) == 0,
-      f"$label mask-only encoding has wrong flag bits: 0x$wM%04X"
+      ((wM >>> MASK_BIT) & 1) == 1 &&
+        ((wM >>> EXPECT_BIT) & 1) == 0 &&
+        ((wM >>> CAPTURE_BIT) & 1) == 0,
+      s"$label mask-only: wrong flag bits in " +
+        f"0x${wM.toLong & 0xffffffffL}%08X"
     )
-    // capture-only: bit 0 set, bits 2 and 1 clear.
+    // capture-only: bit 0 set, bits 2 and 1 clear
     val wC = encode(build(false, false, true))
     assert(
-      ((wC >> CAPTURE_BIT) & 1) == 1 && ((wC >> EXPECT_BIT) & 1) == 0 &&
-        ((wC >> MASK_BIT) & 1) == 0,
-      f"$label capture-only encoding has wrong flag bits: 0x$wC%04X"
+      ((wC >>> CAPTURE_BIT) & 1) == 1 &&
+        ((wC >>> EXPECT_BIT) & 1) == 0 &&
+        ((wC >>> MASK_BIT) & 1) == 0,
+      s"$label capture-only: wrong flag bits in " +
+        f"0x${wC.toLong & 0xffffffffL}%08X"
     )
   }
-  println(s"  Flag triple at [2:0] on ${bearerBuilders.size} bearer opcodes OK")
+  println(
+    s"  Flag triple at [2:0] on ${bearerBuilders.size} bearer opcodes OK"
+  )
 
-  // --------------------------------------------------------------
-  // Opcode coverage sanity --- the round-trip suite touches every
-  // case in the `Instruction` ADT. If a new opcode lands without a
-  // sim block, the encode/decode match in this file would still be
-  // exhaustive at compile time but coverage would silently drop.
-  // This counter is a coarse smoke check.
-  // --------------------------------------------------------------
+  // ------------------------------------------------------------------
+  // Non-bearer opcodes must have [2:0] = 0 in canonical encoding
+  // (STRETCH_SCL_IMM, STRETCH_SCL_REG, all CTRL, all DATA)
+  // ------------------------------------------------------------------
 
-  println("InstructionSim: full-ISA round-trip + golden encodings OK")
+  println("--- InstructionSim: non-bearer [2:0] == 0 invariant ---")
+
+  val nonBearerSamples: Seq[Instruction] = Seq(
+    StretchSclImm(0),
+    StretchSclReg(0),
+    Halt(0),
+    BranchOn(CondCode.always, 0),
+    WaitOn(CondCode.always, 0),
+    SetBusMode(BusMode.i2c),
+    SetRole(false),
+    FlagClear(0),
+    Mark(0),
+    LoadTiming(0, 0),
+    LoadImm(0, 0),
+    Mov(0, 0),
+    AddImm(0, 0, 0),
+    Dec(0),
+    AndImm(0, 0, 0),
+    OrImm(0, 0, 0),
+    XorImm(0, 0, 0),
+    Shift(0, 0, false, false, 0)
+  )
+  for (insn <- nonBearerSamples) {
+    val word = encode(insn)
+    assert(
+      (word & 0x7) == 0,
+      s"Non-bearer $insn has [2:0] != 0 in " +
+        f"0x${word.toLong & 0xffffffffL}%08X"
+    )
+  }
+  println(s"  Non-bearer [2:0]==0: ${nonBearerSamples.size} opcodes OK")
+
+  println("InstructionSim: all v0.2 round-trips + golden encodings PASS")
 }

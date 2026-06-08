@@ -2,267 +2,262 @@ package mole
 
 import spinal.core._
 
-/** 16-bit fixed-width instruction encoding for the Mole bit-cycle engine.
+/** 32-bit fixed-width instruction encoding for the Mole v0.2 bit-cycle engine.
   *
-  * This file is the Scala-side **reference implementation** of the bytecode
-  * wire format. It is consumed by simulation (round-trip audits, engine tests)
-  * and by the engine's RTL fetch path, which slices the 16-bit instruction word
-  * directly from the `instrReg` register. It is **not** the host's runtime
-  * encoder: the host compiler is the `mole-asm` Rust crate under
-  * `../../mole-asm/` (with its CLI front-end in `../../mole-asm-cli/`), which
-  * emits pre-assembled bytes that travel raw over UART into the engine's SPRAM.
+  * This file is the Scala-side **reference implementation** of the v0.2
+  * bytecode wire format. It is consumed by simulation (round-trip audits,
+  * golden cross-checks) and will be consumed by the v0.2 RTL pipeline (Phase
+  * C). It is **not** the host's runtime encoder: the host compiler is the
+  * `mole-asm` Rust crate under `../../mole-asm/`.
+  *
   * With both the Scala and Rust encoders in tree, the Scala `encode`/`decode`
-  * pair below doubles as a cross-validation oracle --- "every legal instruction
-  * encodes to the same 16-bit word in both implementations" is the cheapest
-  * strong-signal correctness check for a wire-format contract.
+  * pair doubles as a cross-validation oracle. The
+  * `InstructionGoldenCrossCheckSim` reads every `*.molecode` fixture produced
+  * by the Rust encoder and decodes each word with this Scala implementation to
+  * confirm bit-exact agreement.
   *
-  * Wire-format scope. Per `../../AGENTS.md` §3.9 the instruction width is fixed
-  * at 16 bits; §3.10 locks the `expect`/`mask`/`capture` flag triple at bit
-  * positions `[2:0]` on every bearer opcode. The **opcode field is 5 bits wide
-  * at `[15:11]`** --- thirty-two opcode slots, fourteen v0 opcodes in use plus
-  * two v0.5 reserved (`FLAG_CLEAR` at 0x0E, `CAPTURE_RUN` at 0x0F) and sixteen
-  * additional reserved slots at 0x10..0x1F for v0.5+ growth (the runtime
-  * role-select opcode `SET_ROLE` is the first occupant at 0x10; the rest stay
-  * trap slots until a future phase claims them). ROADMAP §"Encoding width"
-  * lists the full per-opcode field budget; §"ISA" enumerates the v0 opcodes.
+  * Wire-format scope. Per `../../docs/MOLE-0.2-SPEC.md` §3 the instruction
+  * width is fixed at **32 bits**. The **opcode field is 6 bits wide** at
+  * `{group[31:30], sub[29:26]}` --- 64 slots total across 4 groups of 16
+  * sub-opcodes each. The flag triple `{expect[2], mask[1], capture[0]}` is
+  * locked at `[2:0]` on every bearer opcode. All 25 live opcodes: 9 WIRE, 8
+  * CTRL, 8 DATA; LOOP group fully reserved.
   *
   * Wire-format stability. Pre-Phase-0 the binary encoding is still mutable
   * (AGENTS §3.17); once the Rust host encoder ships its first tagged release
-  * the encoding becomes a contract between the host compiler and every deployed
-  * Mole. Reordering opcodes, moving the flag triple, repurposing a reserved
-  * `tx_symbol` / `cond_code` slot, or shifting the opcode field would all be
-  * wire-format breaks that require a bytecode-version bump and a `BREAKING
-  * CHANGE:` footer.
+  * the encoding becomes a contract. Reordering opcodes, moving the flag triple,
+  * repurposing a reserved `tx_symbol` / `cond_code` slot, or shifting the
+  * opcode field would all be wire-format breaks requiring a `BREAKING CHANGE:`
+  * footer.
   *
   * File layout:
-  *   1. SpinalEnums for the four operand domains shared across opcodes
-  *      ([[Opcode]], [[TxSymbol]], [[BusMode]], [[CondCode]]) --- shared
-  *      between the Scala reference impl and the RTL fetch path.
-  *   2. The Scala-side [[Instruction]] sealed-trait ADT --- one case class per
-  *      v0 opcode plus a generic `ReservedV05` carrier. Pure Scala; never
-  *      elaborated into RTL.
-  *   3. [[Instruction.encode]] / [[Instruction.decode]] --- the host-side
-  *      round-trip pair operating on the 16-bit wire word as a plain `Int`.
-  *      Pure Scala. The future Rust encoder is the runtime authority; this pair
-  *      is its sim-time twin.
-  *
-  * Ships all four SpinalEnums, all fifteen v0 case classes (including
-  * [[Instruction.SetRole]] for runtime role select at slot `0x10`), encode +
-  * decode bodies for the entire ISA, plus a `ReservedV05` carrier for the
-  * remaining reserved slots (the two v0.5 slots at `0x0E` / `0x0F` and the
-  * fifteen upper-half reserved slots at `0x11..0x1F`). The round-trip audit
-  * lives in [[InstructionSim]]; the engine's RTL-side decode reads bit slices
-  * defined here directly, sharing the SpinalEnum widths but none of this file's
-  * pure-Scala encode/decode body.
+  *   1. Wire-format constants.
+  *   2. SpinalEnums for the four operand domains ([[Opcode]], [[TxSymbol]],
+  *      [[BusMode]], [[CondCode]]).
+  *   3. The Scala-side [[Instruction]] sealed-trait ADT --- one case class per
+  *      v0.2 live opcode plus a [[ReservedV05]] carrier. Pure Scala.
+  *   4. [[Instruction.encode]] / [[Instruction.decode]] --- the host-side
+  *      round-trip pair operating on the 32-bit wire word as a plain `Int`. The
+  *      return value of `encode` is the **bit pattern**, not a meaningful
+  *      numeric value; it may be negative when viewed as a signed `Int` (e.g.
+  *      any DATA or LOOP-group word has bit 31 set).
   */
 
-/** Opcode field --- bits `[15:11]` of every instruction word.
+/** Opcode field --- the 6-bit value `{group[31:30], sub[29:26]}`.
   *
-  * Thirty-two total slots (5-bit field). Fourteen are in v0 use, two are
-  * reserved for v0.5 (`FLAG_CLEAR` at 0x0E, `CAPTURE_RUN` at 0x0F), and sixteen
-  * more (`0x10..0x1F`) are reserved for v0.5+. The runtime role-select opcode
-  * `SET_ROLE` is the first occupant of the upper-half range at `0x10`; the
-  * remaining fifteen upper-half slots stay trap-on- decode until a future phase
-  * claims them. The numeric assignment locked here is the wire-format contract:
-  * declaration order is the binary code under SpinalHDL's default
-  * `binarySequential` encoding.
+  * 64 total slots across 4 groups. 25 are live (9 WIRE + 8 CTRL + 8 DATA); 39
+  * are reserved. The LOOP group (`group=0b11`) is fully reserved.
   *
-  * `HALT` deliberately occupies code `0x0` so a zero-initialised SPRAM word (or
-  * a fetch off the end of a loaded program) traps cleanly rather than decoding
-  * as a free-running `EMIT_BIT`.
-  *
-  * Slots `0xC` and `0xD` carry the v1 loop-counter pair `LOAD_LOOP` and
-  * `DEC_BRANCH` --- they consume what was previously reserved for
-  * `WAIT_ADDRESSED` and `MISMATCH_CLEAR`. Both deferred-v0.5 candidates were
-  * lower-priority than ergonomic bounded loops: the SDK-level expansion for
-  * `WAIT_ADDRESSED` (Start + 8 SAMPLE_BIT_ON_SCL + host compare + conditional
-  * DRIVE_BIT_ON_SCL) has not yet shown the I3C-rate timing pressure that would
-  * justify reserving a slot, and `MISMATCH_CLEAR`'s use case is fully served by
-  * the broader `FLAG_CLEAR` still reserved at `0xE`. See ROADMAP §"Reserved for
-  * v0.5" for the full deferral note.
-  *
-  * The remaining v0.5 reserved slots at `0xE` and `0xF` carry `FLAG_CLEAR` and
-  * `CAPTURE_RUN` per ROADMAP §"Reserved for v0.5". `CALL` / `RET` were
-  * considered and deliberately dropped --- the SDK inlines call sites at
-  * compile time, so dedicated control-flow opcodes never become necessary. The
-  * sixteen upper-half slots (0x11..0x1F) are reservations only; v0 has no
-  * decoder behaviour for them and the engine traps them at fetch.
+  * Each element's `.position` is the 6-bit opcode word value:
+  * `group * 16 + sub`. The `defaultEncoding = binarySequential` is thus the
+  * natural declaration-order encoding, which matches the group/sub partition
+  * only if we declare them in group order. We use an explicit
+  * `SpinalEnumEncoding` so the correspondence is audit-able.
   */
 object Opcode extends SpinalEnum {
-  val halt = newElement() // 0x00 --- safer trap on zero-memory fetch
-  val emitBit = newElement() // 0x01 --- workhorse, one full wire bit
-  val emitQuarter = newElement() // 0x02 --- per-quarter override (glitches)
-  val stretchScl = newElement() // 0x03 --- pull SCL low for N quarters
-  val waitOn = newElement() // 0x04 --- block until cond / timeout
-  val branchOn = newElement() // 0x05 --- conditional PC-relative branch
-  val jmp = newElement() // 0x06 --- unconditional absolute jump
-  val setBusMode = newElement() // 0x07 --- swap symbol-to-electrical map
-  val loadTiming = newElement() // 0x08 --- load quarter-bit divider word
-  val mark = newElement() // 0x09 --- record labelled marker in ring
-  val sampleBitOnScl = newElement() // 0x0A --- target-role sample
-  val driveBitOnScl = newElement() // 0x0B --- target-role drive + sample
-  val loadLoop = newElement() // 0x0C --- load 8-bit loop counter LCR[reg]
-  val decBranch = newElement() // 0x0D --- decrement LCR[reg], branch if != 0
-  val flagClear = newElement() // 0x0E reserved (v0.5)
-  val captureRun = newElement() // 0x0F reserved (v0.5)
-  val setRole = newElement() // 0x10 --- runtime role select (controller/target)
-  val reserved11 = newElement() // 0x11 reserved (v0.5+)
-  val reserved12 = newElement() // 0x12 reserved (v0.5+)
-  val reserved13 = newElement() // 0x13 reserved (v0.5+)
-  val reserved14 = newElement() // 0x14 reserved (v0.5+)
-  val reserved15 = newElement() // 0x15 reserved (v0.5+)
-  val reserved16 = newElement() // 0x16 reserved (v0.5+)
-  val reserved17 = newElement() // 0x17 reserved (v0.5+)
-  val reserved18 = newElement() // 0x18 reserved (v0.5+)
-  val reserved19 = newElement() // 0x19 reserved (v0.5+)
-  val reserved1a = newElement() // 0x1A reserved (v0.5+)
-  val reserved1b = newElement() // 0x1B reserved (v0.5+)
-  val reserved1c = newElement() // 0x1C reserved (v0.5+)
-  val reserved1d = newElement() // 0x1D reserved (v0.5+)
-  val reserved1e = newElement() // 0x1E reserved (v0.5+)
-  val reserved1f = newElement() // 0x1F reserved (v0.5+)
+  // ---- WIRE group (group = 0b00 = 0) --------------------------------
+  val emitBitImm = newElement() // 0x00  WIRE sub=0x0
+  val emitBitReg = newElement() // 0x01  WIRE sub=0x1
+  val emitQuarterImm = newElement() // 0x02  WIRE sub=0x2
+  val emitQuarterReg = newElement() // 0x03  WIRE sub=0x3
+  val emitByte = newElement() // 0x04  WIRE sub=0x4
+  val sampleBitOnScl = newElement() // 0x05  WIRE sub=0x5
+  val driveBitOnScl = newElement() // 0x06  WIRE sub=0x6
+  val stretchSclImm = newElement() // 0x07  WIRE sub=0x7
+  val stretchSclReg = newElement() // 0x08  WIRE sub=0x8
+  val wireRes9 = newElement() // 0x09  WIRE reserved
+  val wireResA = newElement() // 0x0A  WIRE reserved
+  val wireResB = newElement() // 0x0B  WIRE reserved
+  val wireResC = newElement() // 0x0C  WIRE reserved
+  val wireResD = newElement() // 0x0D  WIRE reserved
+  val wireResE = newElement() // 0x0E  WIRE reserved
+  val wireResF = newElement() // 0x0F  WIRE reserved
 
-  /** `true` for opcode codes 0x00..0x0D (the fourteen lower-half v0 opcodes)
-    * and the upper-half v0 opcode `SET_ROLE` at 0x10. `false` for every
-    * reserved slot (0x0E, 0x0F, 0x11..0x1F). Host encoder uses this to refuse
-    * generating reserved-slot instructions in v0 programs.
+  // ---- CTRL group (group = 0b01 = 1) --------------------------------
+  val halt = newElement() // 0x10  CTRL sub=0x0
+  val branchOn = newElement() // 0x11  CTRL sub=0x1
+  val waitOn = newElement() // 0x12  CTRL sub=0x2
+  val setBusMode = newElement() // 0x13  CTRL sub=0x3
+  val setRole = newElement() // 0x14  CTRL sub=0x4
+  val flagClear = newElement() // 0x15  CTRL sub=0x5
+  val mark = newElement() // 0x16  CTRL sub=0x6
+  val loadTiming = newElement() // 0x17  CTRL sub=0x7
+  val ctrlRes8 = newElement() // 0x18  CTRL reserved
+  val ctrlRes9 = newElement() // 0x19  CTRL reserved
+  val ctrlResA = newElement() // 0x1A  CTRL reserved
+  val ctrlResB = newElement() // 0x1B  CTRL reserved
+  val ctrlResC = newElement() // 0x1C  CTRL reserved
+  val ctrlResD = newElement() // 0x1D  CTRL reserved
+  val ctrlResE = newElement() // 0x1E  CTRL reserved
+  val ctrlResF = newElement() // 0x1F  CTRL reserved
+
+  // ---- DATA group (group = 0b10 = 2) --------------------------------
+  val loadImm = newElement() // 0x20  DATA sub=0x0
+  val mov = newElement() // 0x21  DATA sub=0x1
+  val addImm = newElement() // 0x22  DATA sub=0x2
+  val dec = newElement() // 0x23  DATA sub=0x3
+  val andImm = newElement() // 0x24  DATA sub=0x4
+  val orImm = newElement() // 0x25  DATA sub=0x5
+  val xorImm = newElement() // 0x26  DATA sub=0x6
+  val shift = newElement() // 0x27  DATA sub=0x7
+  val dataRes8 = newElement() // 0x28  DATA reserved
+  val dataRes9 = newElement() // 0x29  DATA reserved
+  val dataResA = newElement() // 0x2A  DATA reserved
+  val dataResB = newElement() // 0x2B  DATA reserved
+  val dataResC = newElement() // 0x2C  DATA reserved
+  val dataResD = newElement() // 0x2D  DATA reserved
+  val dataResE = newElement() // 0x2E  DATA reserved
+  val dataResF = newElement() // 0x2F  DATA reserved
+
+  // ---- LOOP group (group = 0b11 = 3) --- fully reserved -------------
+  val loopRes0 = newElement() // 0x30  LOOP reserved
+  val loopRes1 = newElement() // 0x31  LOOP reserved
+  val loopRes2 = newElement() // 0x32  LOOP reserved
+  val loopRes3 = newElement() // 0x33  LOOP reserved
+  val loopRes4 = newElement() // 0x34  LOOP reserved
+  val loopRes5 = newElement() // 0x35  LOOP reserved
+  val loopRes6 = newElement() // 0x36  LOOP reserved
+  val loopRes7 = newElement() // 0x37  LOOP reserved
+  val loopRes8 = newElement() // 0x38  LOOP reserved
+  val loopRes9 = newElement() // 0x39  LOOP reserved
+  val loopResA = newElement() // 0x3A  LOOP reserved
+  val loopResB = newElement() // 0x3B  LOOP reserved
+  val loopResC = newElement() // 0x3C  LOOP reserved
+  val loopResD = newElement() // 0x3D  LOOP reserved
+  val loopResE = newElement() // 0x3E  LOOP reserved
+  val loopResF = newElement() // 0x3F  LOOP reserved
+
+  /** `true` iff the opcode slot is a live v0.2 opcode (one of the 25 defined in
+    * spec §4). `false` for every reserved slot.
     */
-  def isV0(op: Opcode.E): Boolean =
-    op.position < 14 || op == setRole
+  def isLive(op: Opcode.E): Boolean = op match {
+    case `emitBitImm` | `emitBitReg` | `emitQuarterImm` | `emitQuarterReg` |
+        `emitByte` | `sampleBitOnScl` | `driveBitOnScl` | `stretchSclImm` |
+        `stretchSclReg` =>
+      true
+    case `halt` | `branchOn` | `waitOn` | `setBusMode` | `setRole` |
+        `flagClear` | `mark` | `loadTiming` =>
+      true
+    case `loadImm` | `mov` | `addImm` | `dec` | `andImm` | `orImm` | `xorImm` |
+        `shift` =>
+      true
+    case _ => false
+  }
+
+  /** The 2-bit group of an opcode (bits `[31:30]` of the instruction). */
+  def group(op: Opcode.E): Int = (op.position >> 4) & 0x3
+
+  /** The 4-bit sub-opcode of an opcode (bits `[29:26]` of the instruction). */
+  def sub(op: Opcode.E): Int = op.position & 0xf
 }
 
-/** Per-line drive operand --- 2 bits, named symbolically per ROADMAP §"TX
-  * symbol". Decoded against the active [[BusMode]] to obtain the actual
-  * pad-driver state (NMOS on / PMOS on / both off). The engine itself knows
-  * nothing about which protocol applies.
+/** Per-line drive operand --- 2 bits, named symbolically per spec §2.
   *
-  * `reserved` (binary `11`) is held for the v0.5 `raw_override` escape (see
-  * ROADMAP §"Reserved for v0.5"). The encoder/decoder round-trip the value but
-  * the engine refuses to execute it in v0 --- per AGENTS §3.11 the encoding
-  * must not be repurposed.
+  * `reserved` (binary `11`) is held for the v0.5 `raw_override` escape. The
+  * encoder/decoder round-trip the value but the engine refuses to execute it in
+  * v0.2 unless `(use-raw-primitives)` is declared.
   *
-  * Appears in three opcodes:
-  *   - [[Instruction.EmitBit]] (SDA only; SCL is engine-generated).
-  *   - [[Instruction.EmitQuarter]] (both lines: two 2-bit fields).
-  *   - [[Instruction.DriveBitOnScl]] (SDA only; target role).
+  * Appears in five opcodes: EMIT_BIT_IMM, EMIT_BIT_REG, EMIT_QUARTER_IMM (two
+  * fields: sda and scl), EMIT_QUARTER_REG (via register low bits), and
+  * DRIVE_BIT_ON_SCL.
   */
 object TxSymbol extends SpinalEnum {
-  val dominant = newElement() // 0b00 --- pull bus toward dominant state
-  val recessive = newElement() // 0b01 --- release toward recessive state
-  val hiz = newElement() // 0b10 --- driver disabled (true Hi-Z)
+  val dominant = newElement() // 0b00 --- active-drive toward dominant
+  val recessive = newElement() // 0b01 --- release / Hi-Z + pull
+  val hiz = newElement() // 0b10 --- tri-state driver-off
   val reserved = newElement() // 0b11 --- v0.5 raw_override (do not repurpose)
 }
 
-/** Bus mode register --- 3-bit operand of [[Instruction.SetBusMode]] and the
-  * engine's only piece of protocol context.
+/** Bus mode register --- 4-bit wire encoding per spec §9.
   *
-  * `mode[2]` selects the SCL high-half drive class (0 = OD-release, 1 = PP
-  * active high). `mode[1:0]` selects which of the four
-  * [[Instruction.LoadTiming]] divider registers feeds the quarter-bit timer.
-  * The encoding is deliberately non-sequential to keep the `mode[2:0]`
-  * semantics auditable directly from the wire word --- per ROADMAP §"Bus mode
-  * register":
+  * v0.2 renumbers from v0 (which used non-sequential values 0, 1, 6, 7). v0.2
+  * wire values are sequential: i2c=0, i3c-OD=1, i3c-PP=2, hdr-ddr=3.
   *
-  * {{{
-  *   i2c    : mode[2]=0 mode[1:0]=00 -> 0b000 = 0
-  *   i3cOd  : mode[2]=0 mode[1:0]=01 -> 0b001 = 1
-  *   i3cPp  : mode[2]=1 mode[1:0]=10 -> 0b110 = 6
-  *   hdrDdr : mode[2]=1 mode[1:0]=11 -> 0b111 = 7
-  * }}}
-  *
-  * The SpinalEnum carries the wire encoding via [[SpinalEnumEncoding]] so RTL
-  * (Step 8) and host (Step 7) see the same 3-bit value.
+  * The explicit `SpinalEnumEncoding` carries the wire values so RTL and host
+  * always agree at the bit level.
   */
 object BusMode extends SpinalEnum {
-  val i2c = newElement()
-  val i3cOd = newElement()
-  val i3cPp = newElement()
-  val hdrDdr = newElement()
+  val i2c = newElement() // 0b0000 = 0   OD class
+  val i3cOd = newElement() // 0b0001 = 1   OD class
+  val i3cPp = newElement() // 0b0010 = 2   PP class
+  val hdrDdr = newElement() // 0b0011 = 3   PP class
+  // 0b0100..0b1111 reserved; engine traps STATUS_TRAP if SET
 
-  defaultEncoding = SpinalEnumEncoding("busModeWire")(
+  defaultEncoding = SpinalEnumEncoding("busModeWireV02")(
     i2c -> 0,
     i3cOd -> 1,
-    i3cPp -> 6,
-    hdrDdr -> 7
+    i3cPp -> 2,
+    hdrDdr -> 3
   )
+
+  /** Wire-level integer value for a BusMode element. Matches the
+    * `defaultEncoding` table above and the Rust encoder's constants.
+    */
+  def wireValue(mode: BusMode.E): Int = mode match {
+    case `i2c`    => 0
+    case `i3cOd`  => 1
+    case `i3cPp`  => 2
+    case `hdrDdr` => 3
+  }
 }
 
-/** Unified condition code --- 4-bit field at `[10:7]` of both
-  * [[Instruction.BranchOn]] (PC-relative branch) and [[Instruction.WaitOn]]
-  * (timed block). Single shared namespace per AGENTS §3.14: adding a code in a
-  * reserved slot is not a wire-format break; repurposing one in use is.
+/** Unified condition code --- 4-bit field at `[16:13]` of both BRANCH_ON and
+  * WAIT_ON. Single shared namespace per spec §6 and AGENTS §3.14.
   *
-  * Codes 0..9 are in use per `../../fpga/Mole/TODO.md` §"Engine flags +
-  * cond-code namespace" and ROADMAP §"Engine flags --- unified condition
-  * codes". The declaration order below is the wire-format binding. Codes 10..15
-  * round-trip cleanly through the encoder but decode to a "trap" the engine
-  * refuses to execute (Step 8 enforces).
+  * Codes 0..11 are live; 12..15 are reserved. Adding a code in a reserved slot
+  * is NOT a wire-format break; repurposing one in use IS.
+  *
+  * Declaration order matches wire codes 0..15 so `.position == wire_code`.
   */
 object CondCode extends SpinalEnum {
-  val always = newElement() // 0x0  unconditional
-  val mismatch = newElement() // 0x1  MISMATCH_FLAG == 1
-  val notMismatch = newElement() // 0x2  MISMATCH_FLAG == 0
-  val startSeen = newElement() // 0x3  edge: Start observed (START_FLAG)
-  val stopSeen = newElement() // 0x4  edge: Stop observed  (STOP_FLAG)
-  val sdaLow = newElement() // 0x5  level: SDA sampled low
-  val sdaHigh = newElement() // 0x6  level: SDA sampled high
-  val sclHigh = newElement() // 0x7  level: SCL sampled high
-  val timeout = newElement() // 0x8  TIMEOUT_FLAG == 1
-  val notTimeout = newElement() // 0x9  TIMEOUT_FLAG == 0
-  val reserved10 = newElement() // 0xA  reserved (v0.5)
-  val reserved11 = newElement() // 0xB  reserved (v0.5)
-  val reserved12 = newElement() // 0xC  reserved (v0.5)
-  val reserved13 = newElement() // 0xD  reserved (v0.5)
-  val reserved14 = newElement() // 0xE  reserved (v0.5)
-  val reserved15 = newElement() // 0xF  reserved (v0.5)
+  val always = newElement() // 0x0  unconditional (always true)
+  val mismatch = newElement() // 0x1  MISMATCH_FLAG is set
+  val notMismatch = newElement() // 0x2  MISMATCH_FLAG is clear
+  val startSeen = newElement() // 0x3  START_FLAG is set
+  val stopSeen = newElement() // 0x4  STOP_FLAG is set
+  val sdaLow = newElement() // 0x5  SDA currently dominant (low)
+  val sdaHigh = newElement() // 0x6  SDA currently recessive (high/hi-z)
+  val sclHigh = newElement() // 0x7  SCL currently recessive (high/hi-z)
+  val timeout = newElement() // 0x8  TIMEOUT_FLAG is set
+  val notTimeout = newElement() // 0x9  TIMEOUT_FLAG is clear
+  val regZero = newElement() // 0xA  REG_ZERO_FLAG is set (NEW in v0.2)
+  val notRegZero = newElement() // 0xB  REG_ZERO_FLAG is clear (NEW in v0.2)
+  val reserved12 = newElement() // 0xC  reserved (engine trap STATUS_TRAP)
+  val reserved13 = newElement() // 0xD  reserved
+  val reserved14 = newElement() // 0xE  reserved
+  val reserved15 = newElement() // 0xF  reserved
 
-  /** `true` for cond codes 0x0..0x9 (the ten v0 codes). `false` for 0xA..0xF
-    * (reserved). Host encoder uses this to warn when generating a reserved-slot
-    * condition.
-    */
-  def isV0(c: CondCode.E): Boolean = c.position < 10
+  /** `true` for live cond codes 0x0..0xB. `false` for 0xC..0xF (reserved). */
+  def isLive(c: CondCode.E): Boolean = c.position < 12
 }
 
-/** Host-side instruction value --- one case class per opcode. The sealed trait
-  * gives the round-trip suite a typed `==`-based equality check, and the
-  * case-class form is what the future Rust host encoder mirrors.
-  *
-  * Reserved v0.5 opcode slots collapse onto a single
-  * [[Instruction.ReservedV05]] carrier --- they have no operand structure in v0
-  * and the engine refuses to execute them at fetch.
+/** Host-side instruction value --- one case class per live v0.2 opcode plus a
+  * [[ReservedV05]] carrier for reserved slots. The sealed trait gives the
+  * round-trip suite typed `==`-based equality, and the case-class form mirrors
+  * the Rust host encoder's structure.
   */
 sealed trait Instruction
 
 object Instruction {
 
-  // --------------------------------------------------------------
-  // Wire-format constants (locked; changing any of these is a
-  // bytecode wire-format break per AGENTS §3.9 / §3.10).
-  // --------------------------------------------------------------
+  // ------------------------------------------------------------
+  // Wire-format constants (spec §3, §10)
+  // ------------------------------------------------------------
 
-  /** Instruction word width, in bits. */
-  val WORD_WIDTH: Int = 16
+  /** Instruction word width, in bits (v0.2 = 32). */
+  val WORD_WIDTH: Int = 32
 
-  /** Opcode field width, in bits. */
-  val OPCODE_WIDTH: Int = 5
+  /** Group field high bit. */
+  val GROUP_HI: Int = 31
 
-  /** Opcode field high bit. */
-  val OPCODE_HI: Int = 15
+  /** Group field low bit (2-bit field `[31:30]`). */
+  val GROUP_LO: Int = 30
 
-  /** Opcode field low bit. */
-  val OPCODE_LO: Int = 11
+  /** Sub-opcode field high bit. */
+  val SUB_HI: Int = 29
 
-  /** Operand region width, in bits (everything below the opcode field). */
-  val OPERAND_WIDTH: Int = OPCODE_LO
-
-  /** `tx_symbol` field width, in bits. */
-  val TX_SYMBOL_WIDTH: Int = 2
-
-  /** `cond_code` field width, in bits (shared by `WAIT_ON` / `BRANCH_ON`). */
-  val COND_CODE_WIDTH: Int = 4
-
-  /** `mode` field width on `SET_BUS_MODE`, in bits. */
-  val BUS_MODE_WIDTH: Int = 3
+  /** Sub-opcode field low bit (4-bit field `[29:26]`). */
+  val SUB_LO: Int = 26
 
   /** Flag triple --- `expect` bit position. Locked at `[2]`. */
   val EXPECT_BIT: Int = 2
@@ -273,62 +268,73 @@ object Instruction {
   /** Flag triple --- `capture` bit position. Locked at `[0]`. */
   val CAPTURE_BIT: Int = 0
 
-  // --------------------------------------------------------------
-  // Per-opcode host-side case classes
-  // --------------------------------------------------------------
+  /** High bit of flag triple (same as EXPECT_BIT; named for range checks). */
+  val FLAG_TRIPLE_HI: Int = 2
 
-  /** `EMIT_BIT tx_symbol expect mask capture` --- emit one full I2C/I3C wire
-    * bit (4 quarter-bit cycles at canonical positions: SCL low/low/high/high,
-    * SDA held at `txSymbol` throughout). Layout:
+  /** Low bit of flag triple. */
+  val FLAG_TRIPLE_LO: Int = 0
+
+  /** Mirrors `mole-abi::MAGIC`. Full 32-bit preamble word 0 value. */
+  val MAGIC: Long = 0x0002_4d4cL
+
+  /** Mirrors `mole-abi::FORMAT_VERSION`. */
+  val FORMAT_VERSION: Int = 0x0002
+
+  /** Mirrors `mole-abi::PREAMBLE_WORDS`. */
+  val PREAMBLE_WORDS: Int = 2
+
+  /** Mirrors `mole-abi::MAX_PROGRAM_WORDS`. */
+  val MAX_PROGRAM_WORDS: Int = 8192
+
+  // ------------------------------------------------------------
+  // Per-opcode host-side case classes
+  // Bit layouts per spec §5; field positions are quoted literally.
+  // ------------------------------------------------------------
+
+  /** WIRE.EMIT_BIT_IMM (spec §5.1)
     *
     * {{{
-    *   [15:11] opcode   [10:9] tx_symbol   [8:3] reserved (=0)
-    *   [2] expect       [1] mask           [0] capture
+    *   [31:26] opcode = group=0b00 sub=0b0000 (= 0x00 << 26)
+    *   [25: 5] reserved = 0
+    *   [ 4: 3] tx_symbol (2 bits)
+    *   [ 2: 0] flags (expect[2], mask[1], capture[0])
     * }}}
-    *
-    * Per ROADMAP §"Canonical EMIT_BIT shape" SCL is engine-generated and not
-    * part of the bitstream. The compare against the sampled SDA value, gated by
-    * `mask`, updates the sticky `MISMATCH_FLAG`. `capture=1` also writes the
-    * sampled bit to the result ring.
-    *
-    * Stretch-aware Q2 entry: in controller role under OD-class BUS_MODE, the
-    * engine auto-pauses the Q1->Q2 advance until the slave releases SCL (or
-    * `MoleConfig.stretchTimeoutCycles` fabric cycles elapse, whichever comes
-    * first). Under PP-class BUS_MODE the slave is in violation; the engine
-    * HALTs with status 0xD. See ROADMAP §"Stretch-aware Q2 entry".
     */
-  case class EmitBit(
+  case class EmitBitImm(
       txSymbol: TxSymbol.E,
       expect: Boolean,
       mask: Boolean,
       capture: Boolean
   ) extends Instruction
 
-  /** `HALT status` --- end of program, status returned to the host via the
-    * result ring. Layout:
+  /** WIRE.EMIT_BIT_REG (spec §5.2)
     *
     * {{{
-    *   [15:11] opcode   [10:7] status   [6:0] reserved (=0)
+    *   [31:26] opcode = group=0b00 sub=0b0001
+    *   [25:23] reserved = 0
+    *   [22:20] src (3 bits: register R0–R7; low 2 bits used as tx_symbol at E)
+    *   [19: 3] reserved = 0
+    *   [ 2: 0] flags
     * }}}
-    *
-    * `status` is 4 bits --- 16 distinct termination codes. The first few are
-    * reserved by convention for `ok` / `mismatch` / `timeout` / `bus-error`
-    * outcomes; the SDK pins them in a later step.
     */
-  case class Halt(status: Int) extends Instruction
+  case class EmitBitReg(
+      src: Int,
+      expect: Boolean,
+      mask: Boolean,
+      capture: Boolean
+  ) extends Instruction
 
-  /** `EMIT_QUARTER sda_symbol scl_symbol expect mask capture` --- single
-    * quarter-bit override of both SDA and SCL. The only opcode that encodes SCL
-    * in the bitstream (per ROADMAP §"When to use EMIT_QUARTER"). Used for Start
-    * / Stop / Repeated Start, HDR-DDR bit shapes, compliance violations
-    * (early/late releases, glitches), and bus-idle waits. Layout:
+  /** WIRE.EMIT_QUARTER_IMM (spec §5.3)
     *
     * {{{
-    *   [15:11] opcode      [10:9] sda_symbol   [8:7] scl_symbol
-    *   [6:3] reserved (=0) [2] expect [1] mask [0] capture
+    *   [31:26] opcode = group=0b00 sub=0b0010
+    *   [25: 7] reserved = 0
+    *   [ 6: 5] scl_symbol (2 bits)
+    *   [ 4: 3] sda_symbol (2 bits)
+    *   [ 2: 0] flags
     * }}}
     */
-  case class EmitQuarter(
+  case class EmitQuarterImm(
       sdaSymbol: TxSymbol.E,
       sclSymbol: TxSymbol.E,
       expect: Boolean,
@@ -336,114 +342,49 @@ object Instruction {
       capture: Boolean
   ) extends Instruction
 
-  /** `STRETCH_SCL n` --- hold SCL low for `n` quarters. 11-bit operand at
-    * `[10:0]` (max 2047 quarters, ~512 µs at the 24 MHz default fabric clock
-    * with the reset divider). Used in both roles: controller-role forced
-    * stretching (fuzz) and target-role canonical clock stretching. The SDK
-    * chains multiple `STRETCH_SCL` calls when a single 11-bit field is not
-    * enough.
-    *
-    * `STRETCH_SCL` is the controller-role *forced-stretch* primitive (also the
-    * canonical target-role stretching mechanic). It holds SCL low for exactly N
-    * quarters regardless of any slave stretching --- the auto-stretch-sync that
-    * `EMIT_BIT` does at Q1->Q2 is NOT applied here. If a slave is also
-    * stretching during a `STRETCH_SCL`, the engine still releases SCL after N
-    * quarters; the next `EMIT_BIT`'s Q1->Q2 guard catches any residual slave
-    * stretch.
-    */
-  case class StretchScl(nQuarters: Int) extends Instruction
-
-  /** `WAIT_ON cond, timeout` --- block until `cond` becomes true, or until
-    * `timeout` quarter-bit ticks elapse. Layout:
+  /** WIRE.EMIT_QUARTER_REG (spec §5.4)
     *
     * {{{
-    *   [15:11] opcode   [10:7] cond_code   [6:0] timeout (unsigned)
+    *   [31:26] opcode = group=0b00 sub=0b0011
+    *   [25:23] reserved = 0
+    *   [22:20] src (3 bits: register; R[src][3:2]=scl, R[src][1:0]=sda at E)
+    *   [19: 3] reserved = 0
+    *   [ 2: 0] flags
     * }}}
-    *
-    * `timeout = 0` means "wait forever" (no timeout). 7-bit unsigned operand
-    * caps the per-instruction timeout at 127 quarter-bit ticks; longer waits
-    * compose with `BRANCH_ON TIMEOUT` + `JMP`. Shares the
-    * `[10:7]cond_code [6:0]operand` shape with [[BranchOn]] --- only operand
-    * semantics differ (signed-PC-offset vs unsigned-quarter-timeout) per AGENTS
-    * §3.14.
     */
-  case class WaitOn(cond: CondCode.E, timeoutQuarters: Int) extends Instruction
+  case class EmitQuarterReg(
+      src: Int,
+      expect: Boolean,
+      mask: Boolean,
+      capture: Boolean
+  ) extends Instruction
 
-  /** `BRANCH_ON cond, offset` --- conditional jump to a PC-relative signed
-    * 7-bit offset (-64..63 instructions). Layout:
+  /** WIRE.EMIT_BYTE (spec §5.5)
     *
     * {{{
-    *   [15:11] opcode   [10:7] cond_code   [6:0] pc_rel_offset (signed)
+    *   [31:26] opcode = group=0b00 sub=0b0100
+    *   [25: 3] reserved = 0
+    *   [ 2: 0] flags (applied to the ACK/NAK ninth-bit slot)
     * }}}
-    *
-    * The unified branch opcode replaces all per-condition branch instructions:
-    * a new condition is a new `cond_code` value, not a new opcode. Shares field
-    * shape with [[WaitOn]]. Long-range branches compose with [[Jmp]] (an
-    * unconditional 11-bit absolute jump).
     */
-  case class BranchOn(cond: CondCode.E, pcRelOffset: Int) extends Instruction
+  case class EmitByte(
+      expect: Boolean,
+      mask: Boolean,
+      capture: Boolean
+  ) extends Instruction
 
-  /** `JMP addr` --- unconditional jump to absolute 11-bit instruction address
-    * (0..2047). Layout: `[15:11] opcode [10:0] addr`. Programs larger than 2048
-    * instructions need an SDK-level sectioning convention; v0 sims fit in the
-    * 2K range with margin. Long-distance conditional branches in the SDK expand
-    * to `BRANCH_ON cond, near` + `JMP far` to stay within [[BranchOn]]'s
-    * -64..63 reach while still spanning the JMP range.
-    */
-  case class Jmp(addr: Int) extends Instruction
-
-  /** `SET_BUS_MODE mode` --- swap the symbol-to-electrical mapping plus the
-    * active timing divider. Layout:
+  /** WIRE.SAMPLE_BIT_ON_SCL (spec §5.6)
     *
     * {{{
-    *   [15:11] opcode   [10:8] mode   [7:0] reserved (=0)
+    *   [31:26] opcode = group=0b00 sub=0b0101
+    *   [25:23] dst (3 bits: must be R7=0b111 unless raw/ pragma)
+    *   [22: 3] reserved = 0
+    *   [ 2: 0] flags
     * }}}
     *
-    * The 3-bit `mode` field's encoding is non-sequential to keep `mode[2]` =
-    * SCL drive class and `mode[1:0]` = active divider register directly
-    * readable from the wire (see [[BusMode]]).
-    */
-  case class SetBusMode(mode: BusMode.E) extends Instruction
-
-  /** `LOAD_TIMING reg word` --- load one of four quarter-bit divider words.
-    * Layout:
-    *
-    * {{{
-    *   [15:11] opcode   [10:9] reg   [8:0] divider_word
-    * }}}
-    *
-    * `reg` selects `pp-freq` / `od-freq` / `i2c-freq` / `hdr-ddr-freq`. The
-    * 9-bit divider field caps the slowest quarter at 511 fabric cycles (~21.3
-    * µs / 11.7 kHz bit rate at the 24 MHz default fabric clock) --- comfortably
-    * below the slowest spec'd bus mode (I²C SM at 100 kHz needs roughly 60
-    * cycles per quarter at 24 MHz fabric). Pure --- does not change the active
-    * mode (use [[SetBusMode]] for that).
-    */
-  case class LoadTiming(reg: Int, dividerWord: Int) extends Instruction
-
-  /** `MARK label` --- insert a labelled marker (with implicit timestamp) in the
-    * result ring. Layout:
-    *
-    * {{{
-    *   [15:11] opcode   [10:3] label   [2:0] reserved (=0)
-    * }}}
-    *
-    * 256 distinct labels --- ample for the per-test sectioning that
-    * disassemblers and result decoders rely on.
-    */
-  case class Mark(label: Int) extends Instruction
-
-  /** `SAMPLE_BIT_ON_SCL expect mask capture` --- target-role opcode: wait for
-    * the next SCL rising edge (driven externally), sample SDA at the canonical
-    * sample point, compare, optionally capture. Layout:
-    *
-    * {{{
-    *   [15:11] opcode      [10:3] reserved (=0)
-    *   [2] expect [1] mask [0] capture
-    * }}}
-    *
-    * No `tx_symbol` field --- the target only reads SDA in this opcode. The
-    * companion [[DriveBitOnScl]] does both.
+    * This case class always encodes `dst=7` (R7), matching the canonical
+    * non-raw-mode encoder. Under raw/ mode the encoder would need a separate
+    * path; the Scala encoder here is the canonical path.
     */
   case class SampleBitOnScl(
       expect: Boolean,
@@ -451,20 +392,19 @@ object Instruction {
       capture: Boolean
   ) extends Instruction
 
-  /** `DRIVE_BIT_ON_SCL tx_symbol expect mask capture` --- target-role opcode:
-    * on the next SCL falling edge, drive SDA per `tx_symbol` for one
-    * external-SCL-clocked bit cell; concurrently, on the SCL rising edge inside
-    * that cell, sample SDA, compare, optionally capture. The simultaneous drive
-    * + sample is what enables I3C DAA arbitration: a target driving `recessive`
-    * reads `dominant` iff another target pulled the line low, setting
-    * `MISMATCH_FLAG`. Layout:
+  /** WIRE.DRIVE_BIT_ON_SCL (spec §5.7)
     *
     * {{{
-    *   [15:11] opcode      [10:9] tx_symbol    [8:3] reserved (=0)
-    *   [2] expect [1] mask [0] capture
+    *   [31:26] opcode = group=0b00 sub=0b0110
+    *   [25:23] dst (3 bits: R7 when capture=1, else 0b000)
+    *   [22: 5] reserved = 0
+    *   [ 4: 3] tx_symbol (2 bits)
+    *   [ 2: 0] flags
     * }}}
     *
-    * Identical shape to [[EmitBit]] --- the only difference is who clocks SCL.
+    * Canonical encoder rule (spec §5.7): when `capture=0`, `dst=0b000` is
+    * emitted; when `capture=1`, `dst=7` (R7). This matches the Rust encoder's
+    * canonical non-raw path.
     */
   case class DriveBitOnScl(
       txSymbol: TxSymbol.E,
@@ -473,315 +413,513 @@ object Instruction {
       capture: Boolean
   ) extends Instruction
 
-  /** `LOAD_LOOP reg, imm8` --- load an 8-bit immediate into one of the two loop
-    * counter registers (`LCR0` at `reg=0`, `LCR1` at `reg=1`). Layout:
+  /** WIRE.STRETCH_SCL_IMM (spec §5.8)
     *
     * {{{
-    *   [15:11] opcode   [10] reg   [9:8] reserved (=0)   [7:0] imm8
+    *   [31:26] opcode = group=0b00 sub=0b0111
+    *   [25:17] reserved = 0
+    *   [16: 3] n_quarters (14 bits, unsigned, 0..16383)
+    *   [ 2: 0] reserved = 0  (NOT a flag bearer)
     * }}}
-    *
-    * Bits `[9:8]` are reserved (= 0) in the v1 two-LCR build; widening to a
-    * future four-LCR file uses those two bits as additional reg-id bits with no
-    * wire-format break. The encoder pins `reg` to `{0, 1}`.
-    *
-    * Paired with [[DecBranch]] for bounded loops: `LOAD_LOOP reg=0, imm=N`
-    * primes LCR0 to `N`, then `DEC_BRANCH reg=0, back_offset` decrements LCR0
-    * each pass and back-edges while LCR0 != 0. `imm = 0` is legal but unusual
-    * --- the SDK warns since the matching `DEC_BRANCH` wraps to `0xFF` and runs
-    * a full 256 iterations. Documented in the moleasm book.
     */
-  case class LoadLoop(reg: Int, imm: Int) extends Instruction
+  case class StretchSclImm(nQuarters: Int) extends Instruction
 
-  /** `DEC_BRANCH reg, offset` --- decrement `LCR[reg]` and conditionally branch
-    * by a signed 8-bit PC-relative offset (±128 instructions) if the
-    * post-decrement value is non-zero. Layout:
+  /** WIRE.STRETCH_SCL_REG (spec §5.9)
     *
     * {{{
-    *   [15:11] opcode   [10] reg   [9:8] reserved (=0)
-    *   [7:0] pc_rel_offset (signed)
+    *   [31:26] opcode = group=0b00 sub=0b1000
+    *   [25:23] reserved = 0
+    *   [22:20] src (3 bits: R[src][13:0] used as count at E)
+    *   [19: 3] reserved = 0
+    *   [ 2: 0] reserved = 0  (NOT a flag bearer)
     * }}}
-    *
-    * Semantics, per fetch:
-    *   1. `LCR[reg] <- LCR[reg] - 1` (8-bit wrap; `0 -> 0xFF`).
-    *   2. `if (LCR[reg] != 0) PC <- PC + offset`.
-    *
-    * Same reserved-bit shape as [[LoadLoop]] --- `[9:8]` reserved for the
-    * eventual wider reg field. Carries its own 8-bit signed offset (-128..127)
-    * --- intentionally wider than [[BranchOn]]'s 7-bit offset because tight
-    * inner loops benefit from longer back-edges. Sticky engine flags
-    * (`MISMATCH_FLAG`, `TIMEOUT_FLAG`, `START_FLAG`, `STOP_FLAG`) are NOT
-    * touched by `DEC_BRANCH` per AGENTS §3.15.
     */
-  case class DecBranch(reg: Int, pcRelOffset: Int) extends Instruction
+  case class StretchSclReg(src: Int) extends Instruction
 
-  /** `SET_ROLE role` --- runtime engine-role select. Layout:
+  /** CTRL.HALT (spec §5.10)
     *
     * {{{
-    *   [15:11] opcode   [10] role   [9:0] reserved (=0)
+    *   [31:26] opcode = group=0b01 sub=0b0000
+    *   [25: 8] reserved = 0
+    *   [ 7: 3] status (5 bits, 0..31; user range 0..0x1C)
+    *   [ 2: 0] reserved = 0
     * }}}
+    */
+  case class Halt(status: Int) extends Instruction
+
+  /** CTRL.BRANCH_ON (spec §5.11)
     *
-    * `role = 0` selects controller role; `role = 1` selects target role. The
-    * power-on default is taken from `MoleConfig.role` so a program that never
-    * issues `SET_ROLE` keeps the historical compile-time-style behaviour. The
-    * decode arm also releases all bus drivers (`sdaDriveLow/High`,
-    * `sclDriveLow/High := False`) before writing the role register so a
-    * mid-program role switch leaves the bus in a clean Hi-Z state regardless of
-    * which arm was driving last. There is no "must be first" check --- the SDK
-    * convention is to issue `SET_ROLE` near the top of every program, but the
-    * engine accepts the opcode at any PC.
+    * {{{
+    *   [31:26] opcode = group=0b01 sub=0b0001
+    *   [25:17] reserved = 0
+    *   [16:13] cond (4 bits: condition code 0..15)
+    *   [12: 3] offset (10 bits, signed two's-complement, -512..511)
+    *   [ 2: 0] reserved = 0
+    * }}}
+    */
+  case class BranchOn(cond: CondCode.E, pcRelOffset: Int) extends Instruction
+
+  /** CTRL.WAIT_ON (spec §5.12)
+    *
+    * {{{
+    *   [31:26] opcode = group=0b01 sub=0b0010
+    *   [25:17] reserved = 0
+    *   [16:13] cond (4 bits: condition code 0..15)
+    *   [12: 3] timeout (10 bits, unsigned, 0..1023; 0 = infinite)
+    *   [ 2: 0] reserved = 0
+    * }}}
+    */
+  case class WaitOn(cond: CondCode.E, timeoutQuarters: Int) extends Instruction
+
+  /** CTRL.SET_BUS_MODE (spec §5.13)
+    *
+    * {{{
+    *   [31:26] opcode = group=0b01 sub=0b0011
+    *   [25: 7] reserved = 0
+    *   [ 6: 3] mode (4 bits: 0b0000=i2c, 0b0001=i3c-OD, 0b0010=i3c-PP,
+    *                          0b0011=hdr-ddr; 0b0100..0b1111 reserved)
+    *   [ 2: 0] reserved = 0
+    * }}}
+    */
+  case class SetBusMode(mode: BusMode.E) extends Instruction
+
+  /** CTRL.SET_ROLE (spec §5.14)
+    *
+    * {{{
+    *   [31:26] opcode = group=0b01 sub=0b0100
+    *   [25: 4] reserved = 0
+    *   [ 3]    role (1 bit: 0=controller, 1=target)
+    *   [ 2: 0] reserved = 0
+    * }}}
     */
   case class SetRole(role: Boolean) extends Instruction
 
-  /** Reserved opcode carrier --- round-trips an 11-bit operand payload verbatim
-    * for any reserved-v0.5 / reserved-v0.5+ opcode slot. v0 has no semantics
-    * for any reserved slot, and the per-opcode payload layout is a v0.5+ design
-    * decision that has not happened yet.
+  /** CTRL.FLAG_CLEAR (spec §5.15)
     *
-    * Constructor enforces `Opcode.isV0(opcode) == false`; v0 opcodes use their
-    * own typed case classes, not this carrier.
+    * {{{
+    *   [31:26] opcode = group=0b01 sub=0b0101
+    *   [25: 8] reserved = 0
+    *   [ 7: 3] mask (5 bits; bit N=1 clears flag N)
+    *   [ 2: 0] reserved = 0
+    * }}}
+    */
+  case class FlagClear(clearMask: Int) extends Instruction
+
+  /** CTRL.MARK (spec §5.16)
+    *
+    * {{{
+    *   [31:26] opcode = group=0b01 sub=0b0110
+    *   [25:17] reserved = 0
+    *   [16: 3] label (14 bits, unsigned, 0..16383)
+    *   [ 2: 0] reserved = 0
+    * }}}
+    */
+  case class Mark(label: Int) extends Instruction
+
+  /** CTRL.LOAD_TIMING (spec §5.17)
+    *
+    * {{{
+    *   [31:26] opcode = group=0b01 sub=0b0111
+    *   [25:20] reserved = 0
+    *   [19:17] reg (3 bits: timing-register selector 0..7)
+    *   [16: 3] divider (14 bits, unsigned, 0..16383)
+    *   [ 2: 0] reserved = 0
+    * }}}
+    */
+  case class LoadTiming(reg: Int, divider: Int) extends Instruction
+
+  /** DATA.LOAD_IMM (spec §5.18)
+    *
+    * {{{
+    *   [31:26] opcode = group=0b10 sub=0b0000
+    *   [25:23] dst (3 bits: destination register R0–R7)
+    *   [22:17] reserved = 0
+    *   [16: 3] imm14 (14 bits, unsigned, 0..16383)
+    *   [ 2: 0] reserved = 0
+    * }}}
+    *
+    * Sugar: `LOAD_LOOP n` assembles as `LOAD_IMM R6, n`.
+    */
+  case class LoadImm(dst: Int, imm14: Int) extends Instruction
+
+  /** DATA.MOV (spec §5.19)
+    *
+    * {{{
+    *   [31:26] opcode = group=0b10 sub=0b0001
+    *   [25:23] dst (3 bits)
+    *   [22:20] src (3 bits)
+    *   [19: 3] reserved = 0
+    *   [ 2: 0] reserved = 0
+    * }}}
+    */
+  case class Mov(dst: Int, src: Int) extends Instruction
+
+  /** DATA.ADD_IMM (spec §5.20)
+    *
+    * {{{
+    *   [31:26] opcode = group=0b10 sub=0b0010
+    *   [25:23] dst (3 bits)
+    *   [22:20] src (3 bits)
+    *   [19:17] reserved = 0
+    *   [16: 3] imm14 (14 bits, signed two's-complement, -8192..8191)
+    *   [ 2: 0] reserved = 0
+    * }}}
+    */
+  case class AddImm(dst: Int, src: Int, imm14: Int) extends Instruction
+
+  /** DATA.DEC (spec §5.21)
+    *
+    * {{{
+    *   [31:26] opcode = group=0b10 sub=0b0011
+    *   [25:23] dst (3 bits; same register as src)
+    *   [22:20] src (3 bits; same as dst; assembler ensures dst==src)
+    *   [19: 3] reserved = 0
+    *   [ 2: 0] reserved = 0
+    * }}}
+    */
+  case class Dec(reg: Int) extends Instruction
+
+  /** DATA.AND_IMM (spec §5.22)
+    *
+    * {{{
+    *   [31:26] opcode = group=0b10 sub=0b0100
+    *   [25:23] dst (3 bits)
+    *   [22:20] src (3 bits)
+    *   [19:17] reserved = 0
+    *   [16: 3] imm14 (14 bits, zero-extended mask)
+    *   [ 2: 0] reserved = 0
+    * }}}
+    */
+  case class AndImm(dst: Int, src: Int, imm14: Int) extends Instruction
+
+  /** DATA.OR_IMM (spec §5.23) --- identical layout to AND_IMM, sub=0b0101. */
+  case class OrImm(dst: Int, src: Int, imm14: Int) extends Instruction
+
+  /** DATA.XOR_IMM (spec §5.24) --- identical layout to AND_IMM, sub=0b0110. */
+  case class XorImm(dst: Int, src: Int, imm14: Int) extends Instruction
+
+  /** DATA.SHIFT (spec §5.25)
+    *
+    * {{{
+    *   [31:26] opcode = group=0b10 sub=0b0111
+    *   [25:23] dst (3 bits)
+    *   [22:20] src (3 bits)
+    *   [19]    arith (1 bit: 0=logical, 1=arithmetic)
+    *   [18]    dir   (1 bit: 0=left, 1=right)
+    *   [17]    reserved = 0
+    *   [16: 8] reserved = 0
+    *   [ 7: 3] shamt (5 bits: shift amount 0..31)
+    *   [ 2: 0] reserved = 0
+    * }}}
+    */
+  case class Shift(dst: Int, src: Int, arith: Boolean, dir: Boolean, shamt: Int)
+      extends Instruction
+
+  /** Reserved opcode carrier --- round-trips a 26-bit operand payload verbatim
+    * for any reserved slot. v0.2 has no semantics for reserved slots; the
+    * engine traps them at fetch.
+    *
+    * Constructor enforces `Opcode.isLive(opcode) == false`; live opcodes use
+    * their own typed case classes.
     */
   case class ReservedV05(opcode: Opcode.E, payload: Int) extends Instruction {
     require(
-      !Opcode.isV0(opcode),
-      s"ReservedV05 carries reserved opcodes only; got v0 opcode $opcode"
+      !Opcode.isLive(opcode),
+      s"ReservedV05 carries reserved opcodes only; got live opcode $opcode"
     )
     require(
-      payload >= 0 && payload < (1 << OPERAND_WIDTH),
-      s"ReservedV05 payload must fit in $OPERAND_WIDTH bits, got $payload"
+      payload >= 0 && payload < (1 << 26),
+      s"ReservedV05 payload must fit in 26 bits, got $payload"
     )
   }
 
-  // --------------------------------------------------------------
+  // ------------------------------------------------------------
   // Encode / decode --- host-side round-trip pair
-  // --------------------------------------------------------------
+  // ------------------------------------------------------------
 
-  /** Encode a host-side [[Instruction]] into its 16-bit wire word.
+  /** Encode a host-side [[Instruction]] into its 32-bit wire word.
     *
-    * **Pure Scala, not RTL.** This function is the sim-time reference encoder,
-    * not the host's runtime encoder. The host compiler (the `mole-asm` Rust
-    * crate under `../../mole-asm/`) emits pre-assembled bytes over UART; this
-    * Scala function exists to (1) satisfy Step 7's "round-trip encode/decode"
-    * sim requirement, (2) let Step 9+ engine sims construct test programs in
-    * Scala instead of hand-coded hex literals, and (3) cross-validate the Rust
-    * encoder once it lands --- if the two implementations agree on every legal
-    * instruction, the wire format is correct.
+    * **Pure Scala, not RTL.** This is the sim-time reference encoder. The host
+    * runtime encoder is the `mole-asm` Rust crate; this Scala function exists
+    * to (1) satisfy the round-trip sim requirement and (2) cross-validate the
+    * Rust encoder via the golden fixture cross-check sim.
     *
-    * `encode` operates on Scala case classes and returns a plain `scala.Int`.
-    * It cannot elaborate into hardware: SpinalHDL does not "see" Scala case
-    * classes at elaboration time, and the call site would emerge as a baked-in
-    * constant even if invoked from a Component body.
+    * Returns the **bit pattern** as a plain `scala.Int`. The return value may
+    * be negative when viewed as a signed Int (bit 31 set for DATA and LOOP
+    * group words); this is expected --- callers must treat the value as an
+    * unsigned 32-bit quantity (e.g. use `Integer.toUnsignedString` for display,
+    * or `0xFFFFFFFFL & word` when promoting to `Long`).
     *
-    * Throws [[IllegalArgumentException]] on out-of-range operand values (e.g. a
-    * `Jmp` whose address overflows 11 bits) --- the host SDK is responsible for
-    * catching those before they reach the engine.
+    * Throws [[IllegalArgumentException]] on out-of-range operand values --- the
+    * caller is responsible for range-checking before calling encode.
     */
   def encode(insn: Instruction): Int = insn match {
-    case EmitBit(tx, expect, mask, capture) =>
-      (Opcode.emitBit.position << OPCODE_LO) |
-        (tx.position << 9) |
+
+    // ---- WIRE group -----------------------------------------------
+
+    case EmitBitImm(tx, expect, mask, capture) =>
+      opcodeWord(Opcode.emitBitImm) |
+        (tx.position << 3) |
         flagTripleBits(expect, mask, capture)
 
-    case Halt(status) =>
-      require(
-        status >= 0 && status < (1 << 4),
-        s"HALT status must be 0..15, got $status"
-      )
-      (Opcode.halt.position << OPCODE_LO) |
-        (status << 7)
-
-    case EmitQuarter(sdaSymbol, sclSymbol, expect, mask, capture) =>
-      (Opcode.emitQuarter.position << OPCODE_LO) |
-        (sdaSymbol.position << 9) |
-        (sclSymbol.position << 7) |
+    case EmitBitReg(src, expect, mask, capture) =>
+      requireReg("EMIT_BIT_REG src", src)
+      opcodeWord(Opcode.emitBitReg) |
+        (src << 20) |
         flagTripleBits(expect, mask, capture)
 
-    case StretchScl(nQuarters) =>
-      require(
-        nQuarters >= 0 && nQuarters < (1 << 11),
-        s"STRETCH_SCL n_quarters must fit in 11 bits, got $nQuarters"
-      )
-      (Opcode.stretchScl.position << OPCODE_LO) | nQuarters
+    case EmitQuarterImm(sda, scl, expect, mask, capture) =>
+      opcodeWord(Opcode.emitQuarterImm) |
+        (scl.position << 5) |
+        (sda.position << 3) |
+        flagTripleBits(expect, mask, capture)
 
-    case WaitOn(cond, timeoutQuarters) =>
-      require(
-        timeoutQuarters >= 0 && timeoutQuarters < (1 << 7),
-        s"WAIT_ON timeout must fit in 7 bits unsigned, got $timeoutQuarters"
-      )
-      (Opcode.waitOn.position << OPCODE_LO) |
-        (cond.position << 7) |
-        (timeoutQuarters & 0x7f)
+    case EmitQuarterReg(src, expect, mask, capture) =>
+      requireReg("EMIT_QUARTER_REG src", src)
+      opcodeWord(Opcode.emitQuarterReg) |
+        (src << 20) |
+        flagTripleBits(expect, mask, capture)
 
-    case BranchOn(cond, pcRelOffset) =>
-      require(
-        pcRelOffset >= -64 && pcRelOffset <= 63,
-        s"BRANCH_ON pc_rel_offset must be signed 7-bit (-64..63), got $pcRelOffset"
-      )
-      (Opcode.branchOn.position << OPCODE_LO) |
-        (cond.position << 7) |
-        (pcRelOffset & 0x7f)
-
-    case Jmp(addr) =>
-      require(
-        addr >= 0 && addr < (1 << 11),
-        s"JMP addr must fit in 11 bits, got $addr"
-      )
-      (Opcode.jmp.position << OPCODE_LO) | addr
-
-    case SetBusMode(mode) =>
-      (Opcode.setBusMode.position << OPCODE_LO) |
-        (busModeWireValue(mode) << 8)
-
-    case LoadTiming(reg, dividerWord) =>
-      require(
-        reg >= 0 && reg < (1 << 2),
-        s"LOAD_TIMING reg must fit in 2 bits (0..3), got $reg"
-      )
-      require(
-        dividerWord >= 0 && dividerWord < (1 << 9),
-        s"LOAD_TIMING divider_word must fit in 9 bits, got $dividerWord"
-      )
-      (Opcode.loadTiming.position << OPCODE_LO) |
-        (reg << 9) |
-        dividerWord
-
-    case Mark(label) =>
-      require(
-        label >= 0 && label < (1 << 8),
-        s"MARK label must fit in 8 bits, got $label"
-      )
-      (Opcode.mark.position << OPCODE_LO) |
-        (label << 3)
+    case EmitByte(expect, mask, capture) =>
+      opcodeWord(Opcode.emitByte) |
+        flagTripleBits(expect, mask, capture)
 
     case SampleBitOnScl(expect, mask, capture) =>
-      (Opcode.sampleBitOnScl.position << OPCODE_LO) |
+      // Canonical: dst=R7=7 always (non-raw mode)
+      opcodeWord(Opcode.sampleBitOnScl) |
+        (7 << 23) |
         flagTripleBits(expect, mask, capture)
 
     case DriveBitOnScl(tx, expect, mask, capture) =>
-      (Opcode.driveBitOnScl.position << OPCODE_LO) |
-        (tx.position << 9) |
+      // Canonical: dst=R7 when capture=1, dst=0 when capture=0 (spec §5.7)
+      val dst = if (capture) 7 else 0
+      opcodeWord(Opcode.driveBitOnScl) |
+        (dst << 23) |
+        (tx.position << 3) |
         flagTripleBits(expect, mask, capture)
 
-    case LoadLoop(reg, imm) =>
+    case StretchSclImm(nQuarters) =>
       require(
-        reg >= 0 && reg < 2,
-        s"LOAD_LOOP reg must be 0 or 1, got $reg"
+        nQuarters >= 0 && nQuarters < (1 << 14),
+        s"STRETCH_SCL_IMM n_quarters must be 0..16383, got $nQuarters"
       )
-      require(
-        imm >= 0 && imm < (1 << 8),
-        s"LOAD_LOOP imm must fit in 8 bits unsigned, got $imm"
-      )
-      (Opcode.loadLoop.position << OPCODE_LO) |
-        (reg << 10) |
-        (imm & 0xff)
+      opcodeWord(Opcode.stretchSclImm) | (nQuarters << 3)
 
-    case DecBranch(reg, pcRelOffset) =>
+    case StretchSclReg(src) =>
+      requireReg("STRETCH_SCL_REG src", src)
+      opcodeWord(Opcode.stretchSclReg) | (src << 20)
+
+    // ---- CTRL group -----------------------------------------------
+
+    case Halt(status) =>
       require(
-        reg >= 0 && reg < 2,
-        s"DEC_BRANCH reg must be 0 or 1, got $reg"
+        status >= 0 && status < 32,
+        s"HALT status must be 0..31, got $status"
       )
+      opcodeWord(Opcode.halt) | (status << 3)
+
+    case BranchOn(cond, pcRelOffset) =>
       require(
-        pcRelOffset >= -128 && pcRelOffset <= 127,
-        s"DEC_BRANCH pc_rel_offset must be signed 8-bit (-128..127), got $pcRelOffset"
+        pcRelOffset >= -512 && pcRelOffset <= 511,
+        s"BRANCH_ON offset must be signed 10-bit (-512..511), got $pcRelOffset"
       )
-      (Opcode.decBranch.position << OPCODE_LO) |
-        (reg << 10) |
-        (pcRelOffset & 0xff)
+      opcodeWord(Opcode.branchOn) |
+        (cond.position << 13) |
+        ((pcRelOffset & 0x3ff) << 3)
+
+    case WaitOn(cond, timeoutQuarters) =>
+      require(
+        timeoutQuarters >= 0 && timeoutQuarters < 1024,
+        s"WAIT_ON timeout must be 0..1023, got $timeoutQuarters"
+      )
+      opcodeWord(Opcode.waitOn) |
+        (cond.position << 13) |
+        (timeoutQuarters << 3)
+
+    case SetBusMode(mode) =>
+      opcodeWord(Opcode.setBusMode) | (BusMode.wireValue(mode) << 3)
 
     case SetRole(role) =>
-      (Opcode.setRole.position << OPCODE_LO) |
-        ((if (role) 1 else 0) << 10)
+      opcodeWord(Opcode.setRole) | ((if (role) 1 else 0) << 3)
+
+    case FlagClear(clearMask) =>
+      require(
+        clearMask >= 0 && clearMask < 32,
+        s"FLAG_CLEAR mask must be 0..31 (5-bit), got $clearMask"
+      )
+      opcodeWord(Opcode.flagClear) | (clearMask << 3)
+
+    case Mark(label) =>
+      require(
+        label >= 0 && label < (1 << 14),
+        s"MARK label must be 0..16383, got $label"
+      )
+      opcodeWord(Opcode.mark) | (label << 3)
+
+    case LoadTiming(reg, divider) =>
+      require(
+        reg >= 0 && reg < 8,
+        s"LOAD_TIMING reg must be 0..7, got $reg"
+      )
+      require(
+        divider >= 0 && divider < (1 << 14),
+        s"LOAD_TIMING divider must be 0..16383, got $divider"
+      )
+      opcodeWord(Opcode.loadTiming) | (reg << 17) | (divider << 3)
+
+    // ---- DATA group -----------------------------------------------
+
+    case LoadImm(dst, imm14) =>
+      requireReg("LOAD_IMM dst", dst)
+      require(
+        imm14 >= 0 && imm14 < (1 << 14),
+        s"LOAD_IMM imm14 must be 0..16383 (unsigned), got $imm14"
+      )
+      opcodeWord(Opcode.loadImm) | (dst << 23) | (imm14 << 3)
+
+    case Mov(dst, src) =>
+      requireReg("MOV dst", dst)
+      requireReg("MOV src", src)
+      opcodeWord(Opcode.mov) | (dst << 23) | (src << 20)
+
+    case AddImm(dst, src, imm14) =>
+      requireReg("ADD_IMM dst", dst)
+      requireReg("ADD_IMM src", src)
+      require(
+        imm14 >= -8192 && imm14 <= 8191,
+        s"ADD_IMM imm14 must be -8192..8191 (signed 14-bit), got $imm14"
+      )
+      opcodeWord(Opcode.addImm) |
+        (dst << 23) |
+        (src << 20) |
+        ((imm14 & 0x3fff) << 3)
+
+    case Dec(reg) =>
+      requireReg("DEC", reg)
+      // Spec §5.21: dst and src both set to the same register.
+      opcodeWord(Opcode.dec) | (reg << 23) | (reg << 20)
+
+    case AndImm(dst, src, imm14) =>
+      requireReg("AND_IMM dst", dst)
+      requireReg("AND_IMM src", src)
+      require(
+        imm14 >= 0 && imm14 < (1 << 14),
+        s"AND_IMM imm14 must be 0..16383 (zero-extended), got $imm14"
+      )
+      opcodeWord(Opcode.andImm) |
+        (dst << 23) |
+        (src << 20) |
+        (imm14 << 3)
+
+    case OrImm(dst, src, imm14) =>
+      requireReg("OR_IMM dst", dst)
+      requireReg("OR_IMM src", src)
+      require(
+        imm14 >= 0 && imm14 < (1 << 14),
+        s"OR_IMM imm14 must be 0..16383, got $imm14"
+      )
+      opcodeWord(Opcode.orImm) |
+        (dst << 23) |
+        (src << 20) |
+        (imm14 << 3)
+
+    case XorImm(dst, src, imm14) =>
+      requireReg("XOR_IMM dst", dst)
+      requireReg("XOR_IMM src", src)
+      require(
+        imm14 >= 0 && imm14 < (1 << 14),
+        s"XOR_IMM imm14 must be 0..16383, got $imm14"
+      )
+      opcodeWord(Opcode.xorImm) |
+        (dst << 23) |
+        (src << 20) |
+        (imm14 << 3)
+
+    case Shift(dst, src, arith, dir, shamt) =>
+      requireReg("SHIFT dst", dst)
+      requireReg("SHIFT src", src)
+      require(
+        shamt >= 0 && shamt < 32,
+        s"SHIFT shamt must be 0..31, got $shamt"
+      )
+      opcodeWord(Opcode.shift) |
+        (dst << 23) |
+        (src << 20) |
+        ((if (arith) 1 else 0) << 19) |
+        ((if (dir) 1 else 0) << 18) |
+        (shamt << 3)
+
+    // ---- Reserved carrier -----------------------------------------
 
     case ReservedV05(opcode, payload) =>
-      // Constructor already enforces non-v0 opcode + 11-bit payload range.
-      (opcode.position << OPCODE_LO) | payload
+      // Constructor already enforces non-live opcode + 26-bit payload.
+      opcodeWord(opcode) | payload
   }
 
-  /** Decode a 16-bit wire word into its host-side [[Instruction]].
+  /** Decode a 32-bit wire word into its host-side [[Instruction]].
     *
-    * **Pure Scala, not RTL.** Same role as [[encode]] (which see): this is the
-    * sim-time reference decoder, not the engine's RTL fetch decoder. The
-    * engine's decode happens combinationally on the 16-bit `instrReg` register
-    * sliced per-opcode against the layouts in this file's case-class doc
-    * comments, sharing the SpinalEnum widths defined above but none of this
-    * Scala function's body.
-    *
-    * `word` must fit in the lower 16 bits; the upper bits are required to be
-    * zero so callers cannot accidentally pass a sign-extended `Int`.
+    * **Pure Scala, not RTL.** Same role as [[encode]]. `word` is the raw 32-bit
+    * bit pattern; it may be negative when treated as a signed `Int`.
     *
     * Reserved-bit slices in the wire word are not inspected --- a hand-crafted
     * word with stray bits in a reserved field decodes to the same case-class
     * value as a clean one. Round-trip stability (`decode(encode(i)) == i`) is
     * the invariant the sim asserts; strict "reject stray reserved bits" is a
-    * defense-in-depth check the engine (not this function) can choose to add
-    * later.
+    * defense-in-depth check the engine performs at fetch.
     */
   def decode(word: Int): Instruction = {
-    require(
-      (word & ~0xffff) == 0,
-      f"instruction word 0x$word%08X has bits set above [15:0]"
-    )
-    val op = Opcode.elements((word >> OPCODE_LO) & 0x1f)
+    val groupBits = (word >>> 30) & 0x3
+    val subBits = (word >>> 26) & 0xf
+    val opPos = (groupBits << 4) | subBits
+    val op = Opcode.elements(opPos)
+
     op match {
-      case Opcode.emitBit =>
-        EmitBit(
-          txSymbol = TxSymbol.elements((word >> 9) & 0x3),
+
+      // ---- WIRE group ---------------------------------------------
+
+      case Opcode.emitBitImm =>
+        EmitBitImm(
+          txSymbol = TxSymbol.elements((word >>> 3) & 0x3),
           expect = bitSet(word, EXPECT_BIT),
           mask = bitSet(word, MASK_BIT),
           capture = bitSet(word, CAPTURE_BIT)
         )
 
-      case Opcode.halt =>
-        Halt(status = (word >> 7) & 0xf)
-
-      case Opcode.emitQuarter =>
-        EmitQuarter(
-          sdaSymbol = TxSymbol.elements((word >> 9) & 0x3),
-          sclSymbol = TxSymbol.elements((word >> 7) & 0x3),
+      case Opcode.emitBitReg =>
+        EmitBitReg(
+          src = (word >>> 20) & 0x7,
           expect = bitSet(word, EXPECT_BIT),
           mask = bitSet(word, MASK_BIT),
           capture = bitSet(word, CAPTURE_BIT)
         )
 
-      case Opcode.stretchScl =>
-        StretchScl(nQuarters = word & 0x7ff)
-
-      case Opcode.waitOn =>
-        WaitOn(
-          cond = CondCode.elements((word >> 7) & 0xf),
-          timeoutQuarters = word & 0x7f
+      case Opcode.emitQuarterImm =>
+        EmitQuarterImm(
+          sdaSymbol = TxSymbol.elements((word >>> 3) & 0x3),
+          sclSymbol = TxSymbol.elements((word >>> 5) & 0x3),
+          expect = bitSet(word, EXPECT_BIT),
+          mask = bitSet(word, MASK_BIT),
+          capture = bitSet(word, CAPTURE_BIT)
         )
 
-      case Opcode.branchOn =>
-        BranchOn(
-          cond = CondCode.elements((word >> 7) & 0xf),
-          pcRelOffset = signExtend7(word & 0x7f)
+      case Opcode.emitQuarterReg =>
+        EmitQuarterReg(
+          src = (word >>> 20) & 0x7,
+          expect = bitSet(word, EXPECT_BIT),
+          mask = bitSet(word, MASK_BIT),
+          capture = bitSet(word, CAPTURE_BIT)
         )
 
-      case Opcode.jmp =>
-        Jmp(addr = word & 0x7ff)
-
-      case Opcode.setBusMode =>
-        val wireBits = (word >> 8) & 0x7
-        SetBusMode(
-          mode = busModeFromWire.getOrElse(
-            wireBits,
-            throw new IllegalArgumentException(
-              f"SET_BUS_MODE word 0x$word%04X: undefined mode bits " +
-                f"$wireBits%d (legal wire values: 0, 1, 6, 7)"
-            )
-          )
+      case Opcode.emitByte =>
+        EmitByte(
+          expect = bitSet(word, EXPECT_BIT),
+          mask = bitSet(word, MASK_BIT),
+          capture = bitSet(word, CAPTURE_BIT)
         )
-
-      case Opcode.loadTiming =>
-        LoadTiming(
-          reg = (word >> 9) & 0x3,
-          dividerWord = word & 0x1ff
-        )
-
-      case Opcode.mark =>
-        Mark(label = (word >> 3) & 0xff)
 
       case Opcode.sampleBitOnScl =>
+        // Decode: dst field at [25:23] is present but ignored in canonical mode.
+        // The case class always represents the canonical R7 destination.
         SampleBitOnScl(
           expect = bitSet(word, EXPECT_BIT),
           mask = bitSet(word, MASK_BIT),
@@ -790,61 +928,148 @@ object Instruction {
 
       case Opcode.driveBitOnScl =>
         DriveBitOnScl(
-          txSymbol = TxSymbol.elements((word >> 9) & 0x3),
+          txSymbol = TxSymbol.elements((word >>> 3) & 0x3),
           expect = bitSet(word, EXPECT_BIT),
           mask = bitSet(word, MASK_BIT),
           capture = bitSet(word, CAPTURE_BIT)
         )
 
-      case Opcode.loadLoop =>
-        LoadLoop(
-          reg = (word >> 10) & 0x1,
-          imm = word & 0xff
+      case Opcode.stretchSclImm =>
+        StretchSclImm(nQuarters = (word >>> 3) & 0x3fff)
+
+      case Opcode.stretchSclReg =>
+        StretchSclReg(src = (word >>> 20) & 0x7)
+
+      // ---- CTRL group ---------------------------------------------
+
+      case Opcode.halt =>
+        Halt(status = (word >>> 3) & 0x1f)
+
+      case Opcode.branchOn =>
+        BranchOn(
+          cond = CondCode.elements((word >>> 13) & 0xf),
+          pcRelOffset = signExtend10((word >>> 3) & 0x3ff)
         )
 
-      case Opcode.decBranch =>
-        DecBranch(
-          reg = (word >> 10) & 0x1,
-          pcRelOffset = signExtend8(word & 0xff)
+      case Opcode.waitOn =>
+        WaitOn(
+          cond = CondCode.elements((word >>> 13) & 0xf),
+          timeoutQuarters = (word >>> 3) & 0x3ff
+        )
+
+      case Opcode.setBusMode =>
+        val modeWire = (word >>> 3) & 0xf
+        SetBusMode(
+          mode = busModeFromWire.getOrElse(
+            modeWire,
+            throw new IllegalArgumentException(
+              f"SET_BUS_MODE word 0x${word.toLong & 0xffffffffL}%08X: " +
+                s"undefined mode wire value $modeWire " +
+                s"(live values: 0=i2c, 1=i3c-OD, 2=i3c-PP, 3=hdr-ddr)"
+            )
+          )
         )
 
       case Opcode.setRole =>
-        SetRole(role = bitSet(word, 10))
+        SetRole(role = bitSet(word, 3))
+
+      case Opcode.flagClear =>
+        FlagClear(clearMask = (word >>> 3) & 0x1f)
+
+      case Opcode.mark =>
+        Mark(label = (word >>> 3) & 0x3fff)
+
+      case Opcode.loadTiming =>
+        LoadTiming(
+          reg = (word >>> 17) & 0x7,
+          divider = (word >>> 3) & 0x3fff
+        )
+
+      // ---- DATA group ---------------------------------------------
+
+      case Opcode.loadImm =>
+        LoadImm(
+          dst = (word >>> 23) & 0x7,
+          imm14 = (word >>> 3) & 0x3fff
+        )
+
+      case Opcode.mov =>
+        Mov(
+          dst = (word >>> 23) & 0x7,
+          src = (word >>> 20) & 0x7
+        )
+
+      case Opcode.addImm =>
+        AddImm(
+          dst = (word >>> 23) & 0x7,
+          src = (word >>> 20) & 0x7,
+          imm14 = signExtend14((word >>> 3) & 0x3fff)
+        )
+
+      case Opcode.dec =>
+        Dec(reg = (word >>> 23) & 0x7)
+
+      case Opcode.andImm =>
+        AndImm(
+          dst = (word >>> 23) & 0x7,
+          src = (word >>> 20) & 0x7,
+          imm14 = (word >>> 3) & 0x3fff
+        )
+
+      case Opcode.orImm =>
+        OrImm(
+          dst = (word >>> 23) & 0x7,
+          src = (word >>> 20) & 0x7,
+          imm14 = (word >>> 3) & 0x3fff
+        )
+
+      case Opcode.xorImm =>
+        XorImm(
+          dst = (word >>> 23) & 0x7,
+          src = (word >>> 20) & 0x7,
+          imm14 = (word >>> 3) & 0x3fff
+        )
+
+      case Opcode.shift =>
+        Shift(
+          dst = (word >>> 23) & 0x7,
+          src = (word >>> 20) & 0x7,
+          arith = bitSet(word, 19),
+          dir = bitSet(word, 18),
+          shamt = (word >>> 3) & 0x1f
+        )
+
+      // ---- Reserved carrier (all other slots) ---------------------
 
       case reserved =>
-        // Every reserved opcode slot (0x0E, 0x0F, 0x11..0x1F) round-trips its
-        // payload verbatim; the engine traps these at fetch.
-        ReservedV05(opcode = reserved, payload = word & 0x7ff)
+        ReservedV05(opcode = reserved, payload = word & 0x03ffffff)
     }
   }
 
-  // --------------------------------------------------------------
+  // ------------------------------------------------------------
   // Internal helpers
-  // --------------------------------------------------------------
+  // ------------------------------------------------------------
 
-  /** Wire encoding for [[BusMode]] --- mirrors the SpinalEnumEncoding
-    * `busModeWire` declared on the enum itself. The wire codes are deliberately
-    * non-sequential per ROADMAP §"Bus mode register": `mode[2]` (the SCL drive
-    * class) sits high while `mode[1:0]` (the timing-divider selector) sits low,
-    * so `mode` bits read directly as "drive-class then divider". The host
-    * encoder MUST use these wire codes (not the SpinalEnumElement `.position`
-    * declaration index) so the Scala reference and the engine RTL agree at the
-    * bit level.
+  /** Build the 32-bit opcode prefix for `op`: `{group[31:30], sub[29:26]}`. The
+    * 26 low bits are zero; payload fields are OR-ed in by the encoder.
+    *
+    * Note: the result is a Java/Scala `Int` which is signed. For WIRE and CTRL
+    * group words the MSBs are 0b00 and 0b01, so the Int value is positive. For
+    * DATA group words (MSBs = 0b10) the Int value is negative --- this is
+    * correct; callers should treat encode results as bit patterns.
     */
-  private val busModeWireValue: Map[BusMode.E, Int] = Map(
-    BusMode.i2c -> 0,
-    BusMode.i3cOd -> 1,
-    BusMode.i3cPp -> 6,
-    BusMode.hdrDdr -> 7
+  private def opcodeWord(op: Opcode.E): Int =
+    op.position << 26
+
+  /** Wire value map for BusMode --- v0.2 sequential encoding. */
+  private val busModeFromWire: Map[Int, BusMode.E] = Map(
+    0 -> BusMode.i2c,
+    1 -> BusMode.i3cOd,
+    2 -> BusMode.i3cPp,
+    3 -> BusMode.hdrDdr
   )
 
-  /** Inverse of [[busModeWireValue]], used by [[decode]]. */
-  private val busModeFromWire: Map[Int, BusMode.E] =
-    busModeWireValue.map(_.swap)
-
-  /** Pack the (expect, mask, capture) triple into bits `[2:0]` of the word.
-    * Used by every bearer opcode. Locked layout per AGENTS §3.10.
-    */
+  /** Pack the (expect, mask, capture) triple into bits `[2:0]`. */
   private def flagTripleBits(
       expect: Boolean,
       mask: Boolean,
@@ -854,23 +1079,20 @@ object Instruction {
       (if (mask) 1 << MASK_BIT else 0) |
       (if (capture) 1 << CAPTURE_BIT else 0)
 
-  /** `true` iff bit `pos` is set in `word`. Shorthand used by every flag-triple
-    * decoder.
-    */
+  /** `true` iff bit `pos` is set in `word` (treats word as unsigned). */
   private def bitSet(word: Int, pos: Int): Boolean =
-    ((word >> pos) & 1) == 1
+    ((word >>> pos) & 1) == 1
 
-  /** Sign-extend an 8-bit unsigned value (0..255) into a signed `Int`
-    * (-128..127). Used by [[DecBranch]] to recover its signed PC-relative
-    * offset from the wire word's low byte. Uses Java's arithmetic-right-shift
-    * on `Int` (`>>`) to sign-extend the top bit.
-    */
-  private def signExtend8(byte: Int): Int = (byte << 24) >> 24
+  /** Sign-extend a 10-bit value (0..1023) to a signed `Int` (-512..511). */
+  private def signExtend10(v: Int): Int = (v << 22) >> 22
 
-  /** Sign-extend a 7-bit unsigned value (0..127) into a signed `Int` (-64..63).
-    * Used by [[BranchOn]] to recover its signed PC-relative offset from the
-    * wire word's low septet. Shifts the top bit into the sign position before
-    * arithmetic-right-shifting it back.
-    */
-  private def signExtend7(septet: Int): Int = (septet << 25) >> 25
+  /** Sign-extend a 14-bit value (0..16383) to a signed `Int` (-8192..8191). */
+  private def signExtend14(v: Int): Int = (v << 18) >> 18
+
+  /** Assert `reg` is in range 0..7; throws [[IllegalArgumentException]]. */
+  private def requireReg(name: String, reg: Int): Unit =
+    require(
+      reg >= 0 && reg < 8,
+      s"$name register must be R0..R7 (0..7), got $reg"
+    )
 }

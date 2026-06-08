@@ -34,11 +34,11 @@ object SymbolDecoderContentionSim extends App {
   // Layer 1: pure-Scala cartesian-product sweep
   // ------------------------------------------------------------------
 
-  /** Legal wire-level `BUS_MODE` values per INV-WIRE-BUS-MODE-VALUES
-    * (`Instruction.scala::busModeWireValue`). Encoded non-sequentially so
-    * `mode[2]` reads as the PP-vs-OD selector at the wire layer.
+  /** Legal wire-level `BUS_MODE` values per v0.2 encoding (sequential). i2c=0,
+    * i3c-OD=1, i3c-PP=2, hdr-ddr=3. (v0 used non-sequential 0,1,6,7 --- those
+    * are retired in v0.2.)
     */
-  val busModeWires: Seq[Int] = Seq(0, 1, 6, 7)
+  val busModeWires: Seq[Int] = Seq(0, 1, 2, 3)
 
   /** Wire-level `tx_symbol` values, including `reserved` (3) so the sweep
     * covers a hand-crafted bitstream that smuggles the v0.5 raw_override
@@ -50,8 +50,8 @@ object SymbolDecoderContentionSim extends App {
   def busModeName(wire: Int): String = wire match {
     case 0 => "i2c"
     case 1 => "i3c-OD"
-    case 6 => "i3c-PP"
-    case 7 => "hdr-ddr"
+    case 2 => "i3c-PP"
+    case 3 => "hdr-ddr"
     case n => s"<illegal:$n>"
   }
 
@@ -99,16 +99,14 @@ object SymbolDecoderContentionSim extends App {
     io.driveHigh := decoded.driveHigh
   }
 
-  /** SpinalEnum element corresponding to a wire-level `BUS_MODE` value. Mirrors
-    * `Instruction.scala::busModeWireValue` --- if a fifth `BUS_MODE` lands at
-    * the wire level without an entry here, the sweep fails fast at the `case _`
-    * rather than silently skipping the new cell.
+  /** SpinalEnum element corresponding to a v0.2 wire-level `BUS_MODE` value.
+    * v0.2 uses sequential codes: 0=i2c, 1=i3c-OD, 2=i3c-PP, 3=hdr-ddr.
     */
   def busModeElem(wire: Int): BusMode.E = wire match {
     case 0 => BusMode.i2c
     case 1 => BusMode.i3cOd
-    case 6 => BusMode.i3cPp
-    case 7 => BusMode.hdrDdr
+    case 2 => BusMode.i3cPp
+    case 3 => BusMode.hdrDdr
     case n => sys.error(s"no BusMode element for wire=$n")
   }
 
