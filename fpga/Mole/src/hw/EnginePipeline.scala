@@ -458,9 +458,14 @@ case class EnginePipeline(cfg: MoleConfig) extends Component {
   // --------------------------------------------------------------------------
   // X-stage CTRL state registers (C.8)
   //
-  // xMarkPhase: 0=IDLE, 1=COMMIT_TS_LO, 2=COMMIT_TS_HI, 3=DONE
-  //   (DONE is a one-cycle "just finished" marker that prevents re-entry on
-  //   the cycle after commit, mirroring xWireDone for the WIRE FSM.)
+  // xMarkPhase: 0=IDLE/COMMIT_HEADER, 1=COMMIT_TS_LO, 2=COMMIT_TS_HI.
+  //   After phase-2 commit (or skip-on-overflow), phase resets directly
+  //   to 0 and xMarkDone pulses for one cycle to release X. There is no
+  //   separate "DONE" phase value — xMarkDone is the done marker.
+  //   (Earlier C.8 drafts used phase=3 as DONE but the reset-to-0 was
+  //   gated on xMarkActive, which goes False the same cycle xMarkDone
+  //   goes True, so phase wedged at 3 and the next MARK in X silently
+  //   dropped all 3 ring writes.)
   //
   // The MARK 3-word commit is an inline X-stage mini-FSM. X stalls
   // (haltWhen) for the 3 cycles needed to emit header / ts_lo / ts_hi to W.
@@ -1069,16 +1074,19 @@ case class EnginePipeline(cfg: MoleConfig) extends Component {
   // Whole-or-nothing skip path: at phase-0 entry, if no room, latch
   // overflow and fast-forward to done. xMarkSkip is consumed by the
   // direct-ring block (below) which gates valid := False on this path.
+  //
+  // Note: phase resets directly to 0 (not to 3 then back) because the
+  // phase-3 "DONE" marker has no consumer — xMarkDone (the one-cycle
+  // pulse) is what gates X-stage release, and a phase-3 → 0 reset
+  // predicated on xMarkActive would never fire (xMarkActive goes False
+  // the same cycle xMarkDone goes True). Leaving phase at 3 would then
+  // wedge the NEXT MARK in X with xMarkStalling=False and
+  // xMarkDriveRing=False, silently dropping all 3 ring writes.
   val xMarkSkip = xMarkActive && xMarkPhase === 0 && !xMarkRoomAvailable
   when(xMarkSkip) {
     ringOverflow := True
-    xMarkPhase := 3
-    xMarkDone := True
-  }
-  // Phase 3 → 0 reset (idle marker). Happens the cycle after final commit
-  // (or after skip). xMarkDone (one-cycle pulse) gates this cleanly.
-  when(xMarkActive && xMarkPhase === 3) {
     xMarkPhase := 0
+    xMarkDone := True
   }
 
   // ---- C.8 WAIT_ON inline single-state spin ------------------------------
@@ -1723,8 +1731,11 @@ case class EnginePipeline(cfg: MoleConfig) extends Component {
       // Handshake accepted: commit pointer + phase advance.
       ringWrPtr := ringWrPtr + 1
       xMarkPhase := xMarkPhase + 1
-      // Final commit (phase 2 → 3): mark done so X fires next cycle.
+      // Final commit (phase 2 → done): reset phase to 0 (skipping the
+      // phase-3 marker — see xMarkSkip comment above) and pulse
+      // xMarkDone so X fires next cycle.
       when(xMarkPhase === 2) {
+        xMarkPhase := 0
         xMarkDone := True
       }
     }
