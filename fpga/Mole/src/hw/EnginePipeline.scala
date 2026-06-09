@@ -42,6 +42,42 @@ object PipeStageables {
     */
   val IS_TRAP = Payload(Bool())
 
+  /** True when the decoded opcode is CTRL.BRANCH_ON (group=01, sub=0001). */
+  val IS_BRANCH_ON = Payload(Bool())
+
+  /** True when the decoded opcode is CTRL.WAIT_ON (group=01, sub=0010). */
+  val IS_WAIT_ON = Payload(Bool())
+
+  /** True when the decoded opcode is CTRL.FLAG_CLEAR (group=01, sub=0101). */
+  val IS_FLAG_CLEAR = Payload(Bool())
+
+  /** True when the decoded opcode is CTRL.MARK (group=01, sub=0110). */
+  val IS_MARK = Payload(Bool())
+
+  /** True when the decoded opcode is CTRL.LOAD_TIMING (group=01, sub=0111). */
+  val IS_LOAD_TIMING = Payload(Bool())
+
+  /** BRANCH_ON / WAIT_ON 4-bit cond code, decoded at D from `[16:13]`. */
+  val COND_CODE = Payload(UInt(4 bits))
+
+  /** BRANCH_ON signed 10-bit PC-relative offset, decoded at D from `[12:3]`. */
+  val BRANCH_OFFSET = Payload(SInt(10 bits))
+
+  /** WAIT_ON unsigned 10-bit timeout, decoded at D from `[12:3]`. */
+  val WAIT_TIMEOUT = Payload(UInt(10 bits))
+
+  /** FLAG_CLEAR 5-bit mask, decoded at D from `[7:3]`. Bit N clears flag N. */
+  val FLAG_CLEAR_MASK = Payload(UInt(5 bits))
+
+  /** MARK 14-bit label, decoded at D from `[16:3]`. */
+  val MARK_LABEL = Payload(UInt(14 bits))
+
+  /** LOAD_TIMING 3-bit register selector, decoded at D from `[19:17]`. */
+  val LOAD_TIMING_REG = Payload(UInt(3 bits))
+
+  /** LOAD_TIMING 14-bit divider, decoded at D from `[16:3]`. */
+  val LOAD_TIMING_DIVIDER = Payload(UInt(14 bits))
+
   /** 5-bit halt status: extracted from instruction [7:3] for HALT, or
     * STATUS_TRAP (0x1F) for trap cases.
     */
@@ -189,14 +225,22 @@ case class EnginePipeline(cfg: MoleConfig) extends Component {
   // Sticky engine flags (spec §7).
   // One-cycle forwarding model: written at W, read from these regs in D.
   // mismatchFlagReg / timeoutFlagReg are written by the WIRE mini-FSM.
-  // startFlagReg / stopFlagReg are STUBBED in C.7 (no writer wired yet):
-  // bus-observer START/STOP edge detection lands in C.8 with WAIT_ON.
+  // startFlagReg / stopFlagReg are written by the always-on bus-observer
+  // edge detectors below (C.8).
   val mismatchFlagReg = Reg(Bool()) init False
   val timeoutFlagReg = Reg(Bool()) init False
   val startFlagReg = Reg(Bool()) init False
   startFlagReg.allowUnsetRegToAvoidLatch()
   val stopFlagReg = Reg(Bool()) init False
   stopFlagReg.allowUnsetRegToAvoidLatch()
+
+  // REG_ZERO_FLAG (spec §7 bit 4): set by the most recent flag-writing DATA
+  // opcode when its result is zero. Writers (DEC, ADD_IMM, MOV, LOAD_IMM,
+  // AND_IMM, OR_IMM, XOR_IMM, SHIFT) land in C.9. Reader (BRANCH_ON
+  // REG_ZERO / NOT_REG_ZERO) is wired in C.8 via the cond evaluator below.
+  // Declared now so the cond evaluator has a stable read path.
+  val regZeroFlagReg = Reg(Bool()) init False
+  regZeroFlagReg.allowUnsetRegToAvoidLatch()
 
   // roleReg: mutable via SET_ROLE in C.8.
   // Encoding (matching v0 BitCycleEngineCore): False=Controller, True=Target.
@@ -258,6 +302,16 @@ case class EnginePipeline(cfg: MoleConfig) extends Component {
   // --------------------------------------------------------------------------
   val observer = BusObserver(io.sda.read, io.scl.read)
 
+  // START/STOP sticky-flag writers (C.8, spec §7).
+  // The observer emits one-cycle pulses on `startEdge` / `stopEdge`. These
+  // are sticky flags set asynchronously by the engine; clearing requires
+  // FLAG_CLEAR (handled in W below). The writers here are conditional set-
+  // only; X-stage FLAG_CLEAR commits at W and may clear them on the same
+  // cycle — clear wins by virtue of FLAG_CLEAR's W-stage assignment running
+  // after this set (Scala last-assignment-wins on a single Reg).
+  when(observer.startEdge) { startFlagReg := True }
+  when(observer.stopEdge) { stopFlagReg := True }
+
   // --------------------------------------------------------------------------
   // Register file
   // --------------------------------------------------------------------------
@@ -292,10 +346,57 @@ case class EnginePipeline(cfg: MoleConfig) extends Component {
   val timerLoadReg = Reg(Bool()) init False
   // Default: auto-clear each cycle (one-cycle pulse).
   timerLoadReg := False
-  timer.io.reload :=
-    U(cfg.quarterPeriodCyclesReset - 1, timer.counterWidth bits)
+
+  // --------------------------------------------------------------------------
+  // LOAD_TIMING register file (C.8, spec §5.17)
+  //
+  // 8 timing registers, each 14 bits. Indexed by `reg=0..7`. Odd regs
+  // (1, 3, 5, 7) are setup/hold time slots — reserved in C.8 (writable but
+  // not consumed by the WIRE FSM yet). Even regs (0, 2, 4, 6) are the
+  // quarter-bit-clock dividers selected by the active BUS_MODE per spec §5.17.
+  //
+  // All 8 reset to `cfg.quarterPeriodCyclesReset - 1` so a program that
+  // never issues LOAD_TIMING behaves exactly as the C.7 fixed-divider engine.
+  // --------------------------------------------------------------------------
+  val loadTimingRegs = Vec(
+    Reg(UInt(14 bits)) init (cfg.quarterPeriodCyclesReset - 1),
+    8
+  )
+
+  // Active quarter-bit divider, selected by busModeReg per spec §5.17 table.
+  // i2c       → reg 0
+  // i3c-OD    → reg 2
+  // i3c-PP    → reg 4
+  // hdr-ddr   → reg 6
+  val activeDivider = UInt(14 bits)
+  activeDivider := loadTimingRegs(0) // default; switch below picks final.
+  switch(busModeReg) {
+    is(BusMode.i2c) { activeDivider := loadTimingRegs(0) }
+    is(BusMode.i3cOd) { activeDivider := loadTimingRegs(2) }
+    is(BusMode.i3cPp) { activeDivider := loadTimingRegs(4) }
+    is(BusMode.hdrDdr) { activeDivider := loadTimingRegs(6) }
+  }
+  timer.io.reload := activeDivider.resize(timer.counterWidth bits)
   timer.io.load := timerLoadReg
   timer.io.enable := timerEnable
+
+  // --------------------------------------------------------------------------
+  // Free-running quarter-bit timestamp (C.8, spec §5.16)
+  //
+  // 32-bit timestamp consumed by MARK records. Increments on `timer.io.tick`
+  // — i.e. once per quarter-bit boundary while the timer is enabled.
+  //
+  // SPEC GAP (v0.2 §5.16): "free-running" implies the timestamp should tick
+  // even between emits, but the `QuarterBitTimer` only ticks during WIRE
+  // mini-FSM execution (when `timerEnable` is set). In practice MARK records
+  // measure quarter-bit time *spanned by emits*, which is the only meaningful
+  // wall-clock measure for the test (idle dead-time has no quarter-bit
+  // unit). Add as `docs(spec)` follow-up to either tighten the wording or
+  // add a separate always-on counter at a defined rate.
+  val quarterTimestampReg = Reg(UInt(32 bits)) init 0
+  when(timer.io.tick) {
+    quarterTimestampReg := quarterTimestampReg + 1
+  }
 
   // --------------------------------------------------------------------------
   // PC register (owned by F1)
@@ -336,6 +437,33 @@ case class EnginePipeline(cfg: MoleConfig) extends Component {
   val xDriveBitPhase = Reg(UInt(2 bits)) init 0 // DRIVE_BIT sub-phase 0..2
   val xByteDataReg = Reg(Bits(8 bits)) init 0 // latched R7 for EMIT_BYTE
   val xCapturedBit = Reg(Bool()) init False // captured bit from WIRE op
+
+  // --------------------------------------------------------------------------
+  // X-stage CTRL state registers (C.8)
+  //
+  // xMarkPhase: 0=IDLE, 1=COMMIT_TS_LO, 2=COMMIT_TS_HI, 3=DONE
+  //   (DONE is a one-cycle "just finished" marker that prevents re-entry on
+  //   the cycle after commit, mirroring xWireDone for the WIRE FSM.)
+  //
+  // The MARK 3-word commit is an inline X-stage mini-FSM. X stalls
+  // (haltWhen) for the 3 cycles needed to emit header / ts_lo / ts_hi to W.
+  // We latch the timestamp at COMMIT_HEADER entry so all three words share
+  // the same atomic timestamp, even if the timer ticks mid-commit.
+  // --------------------------------------------------------------------------
+  val xMarkPhase = Reg(UInt(2 bits)) init 0
+  // MARK label is read directly from the X-stage payload (instruction is
+  // held in X for the full 3-cycle commit while xMarkStalling stalls X),
+  // so no separate latch reg is needed. Timestamp IS latched because it
+  // would otherwise advance during the commit.
+  val xMarkTimestampReg = Reg(UInt(32 bits)) init 0
+
+  // WAIT_ON state:
+  //   xWaitOnActive    — True while a WAIT_ON is spinning in X.
+  //   xWaitOnCounter   — remaining quarter-bit ticks until timeout.
+  //   xWaitOnInfinite  — True if timeout=0 (wait forever; no countdown).
+  val xWaitOnActive = Reg(Bool()) init False
+  val xWaitOnCounter = Reg(UInt(10 bits)) init 0
+  val xWaitOnInfinite = Reg(Bool()) init False
 
   // Inline stretch-wait guard registers (AGENTS §"Stretch-aware Q2 entry").
   // Not a separate pipeline stage — inline on the X stage (preserves Fmax).
@@ -468,16 +596,43 @@ case class EnginePipeline(cfg: MoleConfig) extends Component {
   val dIsWire = (dGroup === 0)
   val dIsWireLive = dIsWire && (dSub <= 8)
   // SET_BUS_MODE (CTRL sub=0x3) and SET_ROLE (CTRL sub=0x4): implemented in C.7
-  // because they are required by nearly every WIRE test program. All other
-  // CTRL/DATA opcodes trap to STATUS_TRAP pending C.8/C.9.
+  // because they are required by nearly every WIRE test program.
   val dIsSetBusMode = (dGroup === 1) && (dSub === 3)
   val dIsSetRole = (dGroup === 1) && (dSub === 4)
-  // CTRL/DATA non-HALT non-WIRE → trap in C.7, EXCEPT SET_BUS_MODE + SET_ROLE.
+  // C.8 CTRL opcodes: BRANCH_ON, WAIT_ON, FLAG_CLEAR, MARK, LOAD_TIMING.
+  val dIsBranchOn = (dGroup === 1) && (dSub === 1)
+  val dIsWaitOn = (dGroup === 1) && (dSub === 2)
+  val dIsFlagClear = (dGroup === 1) && (dSub === 5)
+  val dIsMark = (dGroup === 1) && (dSub === 6)
+  val dIsLoadTiming = (dGroup === 1) && (dSub === 7)
+  // CTRL/DATA non-HALT non-WIRE → trap, EXCEPT the live CTRL opcodes above.
+  // DATA group implementation lands in C.9; for now traps to STATUS_TRAP.
   val dIsTrap =
-    !dIsHalt && !dIsWireLive && !dIsSetBusMode && !dIsSetRole
+    !dIsHalt && !dIsWireLive && !dIsSetBusMode && !dIsSetRole &&
+      !dIsBranchOn && !dIsWaitOn && !dIsFlagClear && !dIsMark &&
+      !dIsLoadTiming
 
   d.up(PipeStageables.IS_HALT) := dIsHalt
   d.up(PipeStageables.IS_TRAP) := dIsTrap
+  d.up(PipeStageables.IS_BRANCH_ON) := dIsBranchOn
+  d.up(PipeStageables.IS_WAIT_ON) := dIsWaitOn
+  d.up(PipeStageables.IS_FLAG_CLEAR) := dIsFlagClear
+  d.up(PipeStageables.IS_MARK) := dIsMark
+  d.up(PipeStageables.IS_LOAD_TIMING) := dIsLoadTiming
+
+  // CTRL.BRANCH_ON / WAIT_ON shared cond code at [16:13] (4 bits, spec §6).
+  d.up(PipeStageables.COND_CODE) := dInsn(16 downto 13).asUInt
+  // BRANCH_ON signed 10-bit offset at [12:3].
+  d.up(PipeStageables.BRANCH_OFFSET) := dInsn(12 downto 3).asSInt
+  // WAIT_ON unsigned 10-bit timeout at [12:3].
+  d.up(PipeStageables.WAIT_TIMEOUT) := dInsn(12 downto 3).asUInt
+  // FLAG_CLEAR 5-bit mask at [7:3].
+  d.up(PipeStageables.FLAG_CLEAR_MASK) := dInsn(7 downto 3).asUInt
+  // MARK 14-bit label at [16:3].
+  d.up(PipeStageables.MARK_LABEL) := dInsn(16 downto 3).asUInt
+  // LOAD_TIMING 3-bit reg selector at [19:17], 14-bit divider at [16:3].
+  d.up(PipeStageables.LOAD_TIMING_REG) := dInsn(19 downto 17).asUInt
+  d.up(PipeStageables.LOAD_TIMING_DIVIDER) := dInsn(16 downto 3).asUInt
 
   // HALT status from instruction [7:3]; STATUS_TRAP for traps; 0 for WIRE.
   val dHaltStatus = dInsn(7 downto 3).asUInt
@@ -563,6 +718,14 @@ case class EnginePipeline(cfg: MoleConfig) extends Component {
     (x(PipeStageables.OPCODE_SUB) === 3) && !x(PipeStageables.IS_TRAP)
   val xIsSetRole = (x(PipeStageables.OPCODE_GROUP) === 1) &&
     (x(PipeStageables.OPCODE_SUB) === 4) && !x(PipeStageables.IS_TRAP)
+  // C.8 CTRL opcode handles (live only when !IS_TRAP).
+  val xIsBranchOn = x(PipeStageables.IS_BRANCH_ON) && !x(PipeStageables.IS_TRAP)
+  val xIsWaitOn = x(PipeStageables.IS_WAIT_ON) && !x(PipeStageables.IS_TRAP)
+  val xIsFlagClear =
+    x(PipeStageables.IS_FLAG_CLEAR) && !x(PipeStageables.IS_TRAP)
+  val xIsMark = x(PipeStageables.IS_MARK) && !x(PipeStageables.IS_TRAP)
+  val xIsLoadTiming =
+    x(PipeStageables.IS_LOAD_TIMING) && !x(PipeStageables.IS_TRAP)
   val xSub = x(PipeStageables.OPCODE_SUB)
   val xInsn = x(PipeStageables.INSTRUCTION)
 
@@ -577,6 +740,37 @@ case class EnginePipeline(cfg: MoleConfig) extends Component {
   val xCapture = xInsn(Instruction.CAPTURE_BIT) // flag: capture
   val xRegAVal = x(PipeStageables.REG_A_VALUE)
   val xRegBVal = x(PipeStageables.REG_B_VALUE) // R7 data for EMIT_BYTE
+
+  // ---- Cond-code evaluator (C.8, spec §6) --------------------------------
+  // Shared between BRANCH_ON and WAIT_ON. Combinational function on the
+  // sticky flags + the synchronised bus samples. Reserved codes 12..15 are
+  // checked explicitly in the CTRL dispatch below and trap STATUS_TRAP;
+  // here they evaluate to False as defence-in-depth.
+  //
+  // Reads from the *current* architectural Reg values. WIRE flag writers
+  // (mismatchFlagReg / timeoutFlagReg) and START/STOP set/clear at the same
+  // cycle, so BRANCH_ON/WAIT_ON observe values "one cycle behind" the
+  // setting opcode — which is correct since BRANCH_ON/WAIT_ON are by
+  // construction a later opcode in program order.
+  val xCondCode = x(PipeStageables.COND_CODE)
+  val xCondTrue = Bool()
+  xCondTrue := False
+  switch(xCondCode) {
+    is(0) { xCondTrue := True } // ALWAYS
+    is(1) { xCondTrue := mismatchFlagReg } // MISMATCH
+    is(2) { xCondTrue := !mismatchFlagReg } // NOT_MISMATCH
+    is(3) { xCondTrue := startFlagReg } // START_SEEN
+    is(4) { xCondTrue := stopFlagReg } // STOP_SEEN
+    is(5) { xCondTrue := !observer.sdaSampled } // SDA_LOW (dominant)
+    is(6) { xCondTrue := observer.sdaSampled } // SDA_HIGH (recessive)
+    is(7) { xCondTrue := observer.sclSampled } // SCL_HIGH
+    is(8) { xCondTrue := timeoutFlagReg } // TIMEOUT
+    is(9) { xCondTrue := !timeoutFlagReg } // NOT_TIMEOUT
+    is(10) { xCondTrue := regZeroFlagReg } // REG_ZERO
+    is(11) { xCondTrue := !regZeroFlagReg } // NOT_REG_ZERO
+    default { xCondTrue := False } // 12..15 reserved; trap path takes over.
+  }
+  val xCondReserved = xCondCode >= 12
 
   // ---- HALT / TRAP path ---------------------------------------------------
   val xHaltOrTrap = x(PipeStageables.IS_HALT) || x(PipeStageables.IS_TRAP)
@@ -602,8 +796,42 @@ case class EnginePipeline(cfg: MoleConfig) extends Component {
   // Stall X while the WIRE mini-FSM is running or starting.
   x.haltWhen(xWireRunning || xWireStarting || waitingForStretch)
 
+  // C.8 CTRL stalls.
+  //
+  // MARK: 3-cycle inline mini-FSM in X (header/ts_lo/ts_hi). Stall X for
+  //   phases 0..2 inclusive. Phase 3 is the one-cycle "done" marker that
+  //   lets the pipeline advance and gates re-entry. xMarkDone is the
+  //   one-cycle completion marker analogous to xWireDone.
+  //
+  // WAIT_ON: spin in X every cycle, evaluate cond/timer. xWaitOnDone is
+  //   set on the cycle the wait completes (cond true OR timeout fired);
+  //   the stall releases that same cycle so X fires once. Subsequent cycles
+  //   are gated by xWaitOnDone preventing re-entry.
+  val xMarkDone = Reg(Bool()) init False
+  xMarkDone := False // auto-clear
+  // xMarkActive: this MARK is mid-commit. Stall while phase != 3 and not done.
+  val xMarkActive = xIsMark && x.isValid && !xMarkDone
+  val xMarkStalling = xMarkActive && (xMarkPhase < 3)
+  x.haltWhen(xMarkStalling)
+
+  val xWaitOnDone = Reg(Bool()) init False
+  xWaitOnDone := False // auto-clear
+  // Set combinationally by the WAIT_ON body below: True the cycle the
+  // wait completes. Drives both xWaitOnDone latching and the stall release.
+  val xWaitOnCompletes = Bool()
+  xWaitOnCompletes := False
+  val xWaitOnActiveThisCycle = xIsWaitOn && x.isValid && !xWaitOnDone
+  // Stall X for WAIT_ON unless it is completing this cycle.
+  x.haltWhen(xWaitOnActiveThisCycle && !xWaitOnCompletes)
+
   // Stall X when ring write is back-pressured (for halt/trap path).
   x.haltWhen(xHaltOrTrap && !io.ringWrite.ready)
+
+  // MARK back-pressure / W-stage mutex are handled inline in the C.8 MARK
+  // direct-ring-drive block (see component-scope block below). xMarkStalling
+  // above already keeps X stalled through phases 0..2; phase advance is
+  // gated on io.ringWrite.ready inside the direct-drive block, so a
+  // back-pressured ring port naturally extends the stall by holding phase.
 
   // ---- HALT / TRAP outputs ------------------------------------------------
   // Set when IS_HALT or IS_TRAP is true (non-WIRE path).
@@ -633,6 +861,87 @@ case class EnginePipeline(cfg: MoleConfig) extends Component {
     x.up(PipeStageables.HALT_REQUEST) := True
     x.up(PipeStageables.RING_WRITE_VALID) := True
     x.up(PipeStageables.RING_WRITE_DATA) := xWireHaltWord
+    x.up(PipeStageables.PC_REDIRECT_VALID) := True
+    x.up(PipeStageables.PC_REDIRECT_TARGET) := x(PipeStageables.PC)
+  }
+
+  // ---- C.8 MARK ring-write data words -------------------------------------
+  // MARK records are committed by a direct X→ring drive at component scope
+  // (see "C.8 MARK direct ring drive" block below), bypassing the W stage's
+  // ring-write payload path. The W path is reserved for one-write-per-
+  // instruction flow (HALT, capture-1 WIRE); MARK is multi-write per
+  // instruction and would otherwise need a FIFO between X and W. Inline
+  // direct drive matches the inline-stretch-guard and per-quarter WIRE
+  // FSM precedents (see AGENTS.md §"Pipeline framework note").
+  //
+  // Header word (phase 0): [31:30] = 0b10 (MARK tag, spec §11), [29:14] = 0,
+  // [13:0] = label.
+  // ts_lo (phase 1): low 16 bits of timestamp, padded with 0 in [31:16].
+  // ts_hi (phase 2): high 16 bits of timestamp, padded with 0 in [31:16].
+  // (Two halves rather than one 32-bit slice keeps the host-side decode
+  // simple and matches the v0-era 16-bit-grain ring shape the host
+  // already parses; the SPRAM word is 32 bits so the upper 16 are zero.)
+  // MARK header reads MARK_LABEL straight from the X-stage payload. The
+  // MARK instruction is held in X for the entire 3-cycle commit (X stalls
+  // via xMarkStalling), so the payload is stable across all phases — no
+  // need to latch the label into a separate reg.
+  val xMarkHeader =
+    B"10" ## B(0, 16 bits) ## x(PipeStageables.MARK_LABEL).asBits
+  val xMarkTsLoWord =
+    B(0, 16 bits) ## xMarkTimestampReg(15 downto 0).asBits
+  val xMarkTsHiWord =
+    B(0, 16 bits) ## xMarkTimestampReg(31 downto 16).asBits
+  val xMarkRingData = Bits(32 bits)
+  switch(xMarkPhase) {
+    is(0) { xMarkRingData := xMarkHeader }
+    is(1) { xMarkRingData := xMarkTsLoWord }
+    is(2) { xMarkRingData := xMarkTsHiWord }
+    default { xMarkRingData := B(0, 32 bits) }
+  }
+
+  // ---- C.8 BRANCH_ON PC redirect output -----------------------------------
+  // Taken branches drive PC_REDIRECT_VALID/TARGET. Untaken branches fall
+  // through (no redirect). The W stage extends the existing flush mechanism
+  // to consume these and overwrite pcReg.
+  //
+  // SPEC GAP (v0.2 §5.11): out-of-range branch target behaviour is not
+  // specified. v0 trapped (4-bit status 0xF); v0.2 traps with STATUS_TRAP
+  // (5-bit 0x1F) per the same principle. Track as docs(spec) follow-up.
+  val xBranchOffset = x(PipeStageables.BRANCH_OFFSET)
+  // Target PC = branch_pc + 1 + offset. Compute in signed arithmetic so
+  // negative offsets work. progAddrWidth bits result for the redirect.
+  // branch_pc + 1 + offset can be negative (offset < -branch_pc-1) or
+  // overflow programLength; treat both as out-of-range and trap.
+  val xBranchPcPlus1 = (x(PipeStageables.PC) + 1).asSInt
+  val xBranchTarget =
+    (xBranchPcPlus1.resize((progAddrWidth + 2) bits) +
+      xBranchOffset.resize((progAddrWidth + 2) bits))
+  val xBranchTargetUnsigned = xBranchTarget.asUInt
+  val xBranchOutOfRange = xBranchTarget < 0 ||
+    xBranchTargetUnsigned >= io.programLength.resize(xBranchTarget.getWidth)
+  val xBranchTaken = xIsBranchOn && !xCondReserved && xCondTrue &&
+    !xBranchOutOfRange
+  val xBranchTrap = xIsBranchOn &&
+    (xCondReserved || (xCondTrue && xBranchOutOfRange))
+
+  when(xBranchTaken) {
+    x.up(PipeStageables.PC_REDIRECT_VALID) := True
+    x.up(PipeStageables.PC_REDIRECT_TARGET) :=
+      xBranchTargetUnsigned.resize(13 bits)
+  }
+  when(xBranchTrap) {
+    x.up(PipeStageables.HALT_REQUEST) := True
+    x.up(PipeStageables.RING_WRITE_VALID) := True
+    x.up(PipeStageables.RING_WRITE_DATA) := makeTrapWord()
+    x.up(PipeStageables.PC_REDIRECT_VALID) := True
+    x.up(PipeStageables.PC_REDIRECT_TARGET) := x(PipeStageables.PC)
+  }
+
+  // ---- C.8 WAIT_ON trap on reserved cond ---------------------------------
+  when(xIsWaitOn && xCondReserved) {
+    x.up(PipeStageables.HALT_REQUEST) := True
+    x.up(PipeStageables.RING_WRITE_VALID) := True
+    x.up(PipeStageables.RING_WRITE_DATA) := makeTrapWord()
     x.up(PipeStageables.PC_REDIRECT_VALID) := True
     x.up(PipeStageables.PC_REDIRECT_TARGET) := x(PipeStageables.PC)
   }
@@ -674,6 +983,133 @@ case class EnginePipeline(cfg: MoleConfig) extends Component {
     sdaDriveHigh := False
     sclDriveLow := False
     sclDriveHigh := False
+  }
+
+  // ---- C.8 LOAD_TIMING single-cycle execution ----------------------------
+  // Writes `divider` into timing register `reg`. Fires the cycle X commits.
+  // No range checks (assembler-enforced; both fields are wire-width-bounded).
+  when(x.isValid && xIsLoadTiming && x.isReady) {
+    loadTimingRegs(x(PipeStageables.LOAD_TIMING_REG)) :=
+      x(PipeStageables.LOAD_TIMING_DIVIDER)
+  }
+
+  // ---- C.8 FLAG_CLEAR single-cycle execution -----------------------------
+  // Applies the 5-bit mask: flags[N] := flags[N] & ~mask[N]. Per spec §7:
+  //   bit 0 = MISMATCH_FLAG
+  //   bit 1 = TIMEOUT_FLAG
+  //   bit 2 = START_FLAG
+  //   bit 3 = STOP_FLAG
+  //   bit 4 = REG_ZERO_FLAG
+  //
+  // Last-assignment-wins on each flag: FLAG_CLEAR runs after the always-on
+  // START/STOP set-writers above (textual order), so a FLAG_CLEAR that
+  // arrives on the same cycle as a start/stop edge wins (correct: program
+  // explicitly asked for clear). WIRE-FSM writers run later in the file
+  // but are gated on xWireActive — a FLAG_CLEAR and a WIRE-FSM flag write
+  // on the same cycle is structurally impossible because the FSMs are
+  // mutually exclusive in X (only one opcode in X at a time).
+  when(x.isValid && xIsFlagClear && x.isReady) {
+    val mask = x(PipeStageables.FLAG_CLEAR_MASK)
+    when(mask(0)) { mismatchFlagReg := False }
+    when(mask(1)) { timeoutFlagReg := False }
+    when(mask(2)) { startFlagReg := False }
+    when(mask(3)) { stopFlagReg := False }
+    when(mask(4)) { regZeroFlagReg := False }
+  }
+
+  // ---- C.8 MARK 3-cycle inline mini-FSM ---------------------------------
+  //
+  // Phase 0: entry. Latch label + current timestamp. Direct-ring block (see
+  //   below) drives header word to io.ringWrite. On accepted handshake,
+  //   ringWrPtr++ and xMarkPhase → 1.
+  // Phase 1: direct-ring drives ts_lo. On accept, ringWrPtr++, phase → 2.
+  // Phase 2: direct-ring drives ts_hi. On accept, ringWrPtr++, phase → 3
+  //   and xMarkDone := True so X fires next cycle and stall releases.
+  // Phase 3: one-cycle "done" marker. Stall releases; pipeline fires; the
+  //   xMarkDone reg prevents re-entry next cycle. Phase resets to 0 here.
+  //
+  // SPEC GAP (v0.2 §5.16): mid-window MARK overflow behaviour is not
+  // specified. Implementation choice: check at window start; either MARK
+  // lands whole or not at all. Avoids partial records the host cannot
+  // parse. Track as docs(spec) follow-up.
+  //
+  // Whole-or-nothing overflow check: if at phase-0 entry the ring would
+  // overflow during the 3-word commit (ringWrPtr + 3 > resultWordCount-1
+  // → no room for header+ts_lo+ts_hi before the HALT slot), set
+  // ringOverflow and skip the entire commit. The xMarkSkip branch drives
+  // the FSM straight to phase 3 / done.
+  val xMarkRoomAvailable =
+    (ringWrPtr +^ U(3, ringPtrWidth + 1 bits)) <=
+      U(resultWordCount - 1, ringPtrWidth + 1 bits)
+  // Phase-0 timestamp latch. Captures quarterTimestampReg so subsequent
+  // phases (1, 2) commit consistent ts_lo / ts_hi halves of the same
+  // value. The label needs no latch — the MARK instruction sits in X
+  // for the full commit (xMarkStalling holds X), so MARK_LABEL is
+  // stable across all phases.
+  when(xMarkActive && xMarkPhase === 0) {
+    xMarkTimestampReg := quarterTimestampReg
+  }
+  // Whole-or-nothing skip path: at phase-0 entry, if no room, latch
+  // overflow and fast-forward to done. xMarkSkip is consumed by the
+  // direct-ring block (below) which gates valid := False on this path.
+  val xMarkSkip = xMarkActive && xMarkPhase === 0 && !xMarkRoomAvailable
+  when(xMarkSkip) {
+    ringOverflow := True
+    xMarkPhase := 3
+    xMarkDone := True
+  }
+  // Phase 3 → 0 reset (idle marker). Happens the cycle after final commit
+  // (or after skip). xMarkDone (one-cycle pulse) gates this cleanly.
+  when(xMarkActive && xMarkPhase === 3) {
+    xMarkPhase := 0
+  }
+
+  // ---- C.8 WAIT_ON inline single-state spin ------------------------------
+  //
+  // Per spec §5.12: timeout=0 ⇒ infinite wait (no decrement, no TIMEOUT
+  // set). Otherwise decrement xWaitOnCounter each cycle; on counter==0
+  // before cond met, set TIMEOUT_FLAG and complete. On cond met first,
+  // clear TIMEOUT_FLAG and complete.
+  //
+  // Two state-bits:
+  //   xWaitOnActive  — True from entry through completion.
+  //   xWaitOnCounter — decrementing remaining timeout.
+  //
+  // Entry vs running distinguished by xWaitOnActive register.
+  when(xWaitOnActiveThisCycle && !xCondReserved) {
+    val condMet = xCondTrue
+    when(!xWaitOnActive) {
+      // ---- Entry cycle: latch timeout / infinite flag. -------------------
+      val timeoutImm = x(PipeStageables.WAIT_TIMEOUT)
+      xWaitOnInfinite := (timeoutImm === 0)
+      xWaitOnCounter := timeoutImm
+      xWaitOnActive := True
+      when(condMet) {
+        // Cond already true on entry: clear TIMEOUT, complete same cycle.
+        timeoutFlagReg := False
+        xWaitOnCompletes := True
+        xWaitOnDone := True
+        xWaitOnActive := False
+      }
+    } otherwise {
+      // ---- Running cycle: check cond / decrement / timeout. -------------
+      when(condMet) {
+        timeoutFlagReg := False
+        xWaitOnCompletes := True
+        xWaitOnDone := True
+        xWaitOnActive := False
+      } elsewhen (xWaitOnInfinite) {
+        // Infinite wait: no decrement, no timeout. Keep spinning.
+      } elsewhen (xWaitOnCounter === 0) {
+        // Timeout expired. Set TIMEOUT_FLAG, complete.
+        timeoutFlagReg := True
+        xWaitOnCompletes := True
+        xWaitOnDone := True
+        xWaitOnActive := False
+      } otherwise {
+        xWaitOnCounter := xWaitOnCounter - 1
+      }
+    }
   }
 
   // ---- WIRE mini-FSM body -------------------------------------------------
@@ -1236,10 +1672,64 @@ case class EnginePipeline(cfg: MoleConfig) extends Component {
     )
   w.haltWhen(wWillIssueRingWrite && !io.ringWrite.ready)
 
-  // Flush pipeline on halt commit.
+  // ---- C.8 MARK direct ring drive (Option 1) ----------------------------
+  // MARK is the only opcode that needs >1 ring write per instruction
+  // (header, ts_lo, ts_hi). The W-stage ring path is one-write-per-firing
+  // by construction; folding 3 writes through W would require a 3-deep
+  // FIFO between X and W. Instead, X drives io.ringWrite directly for
+  // MARK, with a mutex against W's writer so the two writers are never
+  // simultaneously active.
+  //
+  // Contention case: at most one cycle, at MARK phase-0 entry, where W
+  // may be draining the instruction that was in X the cycle before MARK
+  // entered. The mutex is `!wDrainingRingWrite` — if W is firing a ring
+  // write this cycle, MARK holds phase and tries again next cycle.
+  //
+  // Phase advance is gated on io.ringWrite.ready AND mutex AND active.
+  // Back-pressure (ready=False) naturally extends the X stall (because
+  // xMarkStalling holds while phase < 3) without a separate haltWhen.
+  //
+  // Whole-or-nothing overflow: xMarkSkip (set at phase 0 when no room)
+  // suppresses io.ringWrite.valid for the whole MARK and the FSM body
+  // above fast-forwards to phase 3.
+  val wDrainingRingWrite = w.down.isFiring && w(PipeStageables.RING_WRITE_VALID)
+  val xMarkDriveRing = xMarkActive && (xMarkPhase < 3) && !xMarkSkip
+  when(xMarkDriveRing && !wDrainingRingWrite) {
+    // Override the component-scope idle defaults (and any W-stage
+    // assignment, which is gated False by the mutex above).
+    io.ringWrite.valid := True
+    io.ringWrite.payload.addr :=
+      (U(resultBase, spramAddrWidth bits) +
+        ringWrPtr.resize(spramAddrWidth bits)).resized
+    io.ringWrite.payload.data := xMarkRingData
+    when(io.ringWrite.ready) {
+      // Handshake accepted: commit pointer + phase advance.
+      ringWrPtr := ringWrPtr + 1
+      xMarkPhase := xMarkPhase + 1
+      // Final commit (phase 2 → 3): mark done so X fires next cycle.
+      when(xMarkPhase === 2) {
+        xMarkDone := True
+      }
+    }
+  }
+
+  // Flush pipeline on halt commit OR taken branch (C.8).
+  //
+  // The W-stage flush mechanism is extended to consume PC_REDIRECT_VALID
+  // from any opcode (HALT, trap, taken BRANCH_ON). For HALT/trap the
+  // engine halts and the flushed stragglers never resume. For taken
+  // BRANCH_ON the pcReg is overwritten with the redirect target and the
+  // pipeline re-fetches from the new PC.
   val flush = False
   when(w.down.isFiring && w(PipeStageables.HALT_REQUEST)) {
     flush := True
+  }
+  when(
+    w.down.isFiring && w(PipeStageables.PC_REDIRECT_VALID) &&
+      !w(PipeStageables.HALT_REQUEST)
+  ) {
+    flush := True
+    pcReg := w(PipeStageables.PC_REDIRECT_TARGET).resize(progAddrWidth bits)
   }
   for (upstream <- List(f1, f2, d, r, x)) {
     upstream.throwWhen(flush, usingReady = true)
@@ -1249,6 +1739,10 @@ case class EnginePipeline(cfg: MoleConfig) extends Component {
   when(flush) {
     xWireState := WS_IDLE
     waitingForStretch := False
+    xMarkPhase := 0
+    xMarkDone := False
+    xWaitOnActive := False
+    xWaitOnDone := False
   }
 
   // --------------------------------------------------------------------------

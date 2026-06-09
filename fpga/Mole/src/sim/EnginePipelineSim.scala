@@ -42,9 +42,14 @@ object EnginePipelineSim {
   // C.7: EMIT_BIT_IMM now EXECUTES (not traps). Used in the emit-bit test below.
   private val emitBitImmWord: Long = 0x00000008L
 
-  // CTRL.BRANCH_ON: group=0b01 sub=0b0001 → opcode pos 0x11 = 17
-  // 17 << 26 = 0x44000000. Still traps in C.7 (CTRL opcodes not yet implemented).
-  private val branchOnWord: Long = 0x44000000L
+  // CTRL still-reserved sub: group=0b01 sub=0b1000 → opcode pos 0x18 = 24.
+  // 24 << 26 = 0x60000000. Per spec §4 the CTRL group reserves sub-codes
+  // 0b1000..0b1111 — this picks the lowest reserved sub. After C.8 the
+  // live CTRL opcodes (BRANCH_ON, WAIT_ON, FLAG_CLEAR, MARK, LOAD_TIMING)
+  // all execute; this still-reserved sub is the only CTRL opcode left
+  // that traps to STATUS_TRAP, so it is the canonical regression target
+  // for the "non-HALT CTRL traps" case.
+  private val ctrlReservedWord: Long = 0x60000000L
 
   // LOOP group reserved: group=0b11 sub=0b0000 → 0xFC000000
   private val loopGroupWord: Long = 0xfc000000L
@@ -248,7 +253,11 @@ object EnginePipelineSim {
   }
 
   // --------------------------------------------------------------------------
-  // Case 3: Trap on non-HALT CTRL opcode (BRANCH_ON, not yet implemented C.7)
+  // Case 3: Trap on non-HALT CTRL opcode (still-reserved CTRL sub 0b1000).
+  // After C.8, BRANCH_ON / WAIT_ON / FLAG_CLEAR / MARK / LOAD_TIMING all
+  // execute; CTRL sub-codes 0b1000..0b1111 remain reserved and must trap
+  // to STATUS_TRAP. This case nails the "still-reserved CTRL sub"
+  // regression with the lowest such sub.
   // --------------------------------------------------------------------------
   def caseTrapOnNonHalt(): Unit = {
     compileDut().doSim("trap-on-ctrl-opcode") { dut =>
@@ -256,11 +265,11 @@ object EnginePipelineSim {
       initInputs(dut)
       dut.clockDomain.waitSampling(4)
 
-      // CTRL.BRANCH_ON → should trap in C.7 (CTRL not yet implemented)
+      // CTRL sub=0b1000 (still reserved post-C.8) → must trap STATUS_TRAP.
       val mem = Array.fill(
         simCfg.programWordCount + (simCfg.resultRingByteCount + 3) / 4
       )(0L)
-      mem(0) = branchOnWord
+      mem(0) = ctrlReservedWord
       forkSpramModel(dut, mem)
 
       var ringWordCapture = 0L
@@ -547,6 +556,221 @@ object EnginePipelineSim {
   }
 
   // --------------------------------------------------------------------------
+  // C.8 smoke cases — one per new CTRL opcode (BRANCH_ON, MARK, LOAD_TIMING).
+  //
+  // The full v0.2 ISA coverage lives in `BitCycleEngineSim` (C.8 sim suite,
+  // landed in Commit 3). These cases prove the dispatch wiring in
+  // EnginePipeline itself, so a regression in the X-stage CTRL block fails
+  // here first.
+  // --------------------------------------------------------------------------
+
+  // BRANCH_ON ALWAYS, +1: PC=0 branches over a trap at PC=1, lands on HALT(0)
+  // at PC=2. Verifies PC redirect + flush + re-fetch path.
+  def caseBranchOnAlwaysSkip(): Unit = {
+    compileDut().doSim("branch-on-always-skip") { dut =>
+      dut.clockDomain.forkStimulus(period = 10)
+      initInputs(dut)
+      dut.clockDomain.waitSampling(4)
+
+      val mem = Array.fill(
+        simCfg.programWordCount + (simCfg.resultRingByteCount + 3) / 4
+      )(0L)
+      // BRANCH_ON ALWAYS, offset=+1: cond=0 at [16:13], offset=1 at [12:3].
+      // group=01 sub=0001 [29:26], offset_field = 1 << 3 = 0x8.
+      // 0x44000000 | 0x00000008 = 0x44000008.
+      mem(0) = 0x44000008L
+      // PC=1: still-reserved CTRL trap — must be skipped.
+      mem(1) = ctrlReservedWord
+      // PC=2: HALT(0).
+      mem(2) = haltWord(0)
+      forkSpramModel(dut, mem)
+
+      var ringWordCapture = 0L
+      fork {
+        while (true) {
+          if (
+            dut.io.ringWrite.valid.toBoolean && dut.io.ringWrite.ready.toBoolean
+          ) {
+            ringWordCapture = dut.io.ringWrite.payload.data.toLong & 0xffffffffL
+          }
+          dut.clockDomain.waitSampling()
+        }
+      }
+
+      dut.io.programLength #= 3
+      dut.io.engineStart #= true
+      dut.clockDomain.waitSampling()
+
+      waitFor(
+        dut,
+        50,
+        dut.io.halted.toBoolean,
+        "[caseBranchOnAlwaysSkip] engine did not halt"
+      )
+
+      assert(
+        dut.io.haltStatus.toInt == 0,
+        s"[caseBranchOnAlwaysSkip] expected status 0 (branch landed on HALT(0))" +
+          s", got 0x${dut.io.haltStatus.toInt.toHexString} — branch was not " +
+          s"taken (would have hit STATUS_TRAP at PC=1)"
+      )
+      val ringTag = ((ringWordCapture >> 30) & 0x3L).toInt
+      assert(
+        ringTag == 3,
+        s"[caseBranchOnAlwaysSkip] ring tag: expected 3 (HALT) got $ringTag"
+      )
+
+      println("[caseBranchOnAlwaysSkip] PASS")
+    }
+  }
+
+  // MARK label=0x1234, HALT(0): verifies the 3-word MARK commit lands.
+  // Checks the first ring word is the MARK header (tag=0b10, label=0x1234).
+  def caseMarkBasic(): Unit = {
+    compileDut().doSim("mark-basic") { dut =>
+      dut.clockDomain.forkStimulus(period = 10)
+      initInputs(dut)
+      dut.clockDomain.waitSampling(4)
+
+      val mem = Array.fill(
+        simCfg.programWordCount + (simCfg.resultRingByteCount + 3) / 4
+      )(0L)
+      // MARK label=0x1234: group=01 sub=0110 [29:26], label at [16:3].
+      // 0x4 << 26 = 0x18000000; sub=6 → (1<<30)|(6<<26) = 0x58000000.
+      // label 0x1234 << 3 = 0x91A0. Final = 0x580091A0.
+      mem(0) = 0x580091a0L
+      mem(1) = haltWord(0)
+      forkSpramModel(dut, mem)
+
+      // Capture (addr, data) tuples on accepted ring handshakes so the
+      // test can verify MARK records land at [resultBase, recordLimit] and
+      // HALT lands at the reserved resultLimit slot (per C.8.1 fix).
+      val ringRecords =
+        scala.collection.mutable.ArrayBuffer.empty[(Long, Long)]
+      fork {
+        while (true) {
+          if (
+            dut.io.ringWrite.valid.toBoolean && dut.io.ringWrite.ready.toBoolean
+          ) {
+            ringRecords += ((
+              dut.io.ringWrite.payload.addr.toLong & 0xffffL,
+              dut.io.ringWrite.payload.data.toLong & 0xffffffffL
+            ))
+          }
+          dut.clockDomain.waitSampling()
+        }
+      }
+
+      dut.io.programLength #= 2
+      dut.io.engineStart #= true
+      dut.clockDomain.waitSampling()
+
+      waitFor(
+        dut,
+        80,
+        dut.io.halted.toBoolean,
+        "[caseMarkBasic] engine did not halt"
+      )
+
+      // Expect 4 ring writes: MARK header, ts_lo, ts_hi, HALT.
+      assert(
+        ringRecords.size == 4,
+        s"[caseMarkBasic] expected 4 ring writes (mark x3 + halt), got " +
+          s"${ringRecords.size}: " +
+          ringRecords
+            .map { case (a, d) => f"(0x$a%x→0x$d%08x)" }
+            .mkString(", ")
+      )
+      // ---- MARK records: header, ts_lo, ts_hi at resultBase + {0,1,2}. ----
+      val resultBase = simCfg.programWordCount.toLong
+      val resultLimit = resultBase + ((simCfg.resultRingByteCount + 3) / 4) - 1
+      val (mhdrAddr, markHeader) = ringRecords(0)
+      assert(
+        mhdrAddr == resultBase,
+        s"[caseMarkBasic] mark header addr: expected 0x${resultBase.toHexString}" +
+          f" (resultBase), got 0x$mhdrAddr%x"
+      )
+      val markTag = ((markHeader >> 30) & 0x3L).toInt
+      val markLabel = (markHeader & 0x3fffL).toInt
+      assert(
+        markTag == 0x2,
+        s"[caseMarkBasic] mark header tag: expected 0b10 (2), got $markTag " +
+          s"(word=0x${markHeader.toHexString})"
+      )
+      assert(
+        markLabel == 0x1234,
+        s"[caseMarkBasic] mark label: expected 0x1234 got " +
+          f"0x$markLabel%x (word=0x${markHeader.toHexString})"
+      )
+      val (mtloAddr, _) = ringRecords(1)
+      assert(
+        mtloAddr == resultBase + 1,
+        s"[caseMarkBasic] ts_lo addr: expected 0x${(resultBase + 1).toHexString}" +
+          f", got 0x$mtloAddr%x"
+      )
+      val (mthiAddr, _) = ringRecords(2)
+      assert(
+        mthiAddr == resultBase + 2,
+        s"[caseMarkBasic] ts_hi addr: expected 0x${(resultBase + 2).toHexString}" +
+          f", got 0x$mthiAddr%x"
+      )
+      // ---- HALT record at the reserved resultLimit slot. ------------------
+      val (haltAddr, haltW) = ringRecords(3)
+      assert(
+        haltAddr == resultLimit,
+        s"[caseMarkBasic] halt addr: expected 0x${resultLimit.toHexString}" +
+          f" (resultLimit), got 0x$haltAddr%x"
+      )
+      assert(
+        ((haltW >> 30) & 0x3L) == 0x3,
+        s"[caseMarkBasic] halt word tag: expected 0b11, got " +
+          f"0x$haltW%08x"
+      )
+
+      println("[caseMarkBasic] PASS")
+    }
+  }
+
+  // LOAD_TIMING reg=0, divider=12 then HALT. Verifies the opcode commits
+  // without trapping and the engine reaches HALT(0).
+  def caseLoadTimingBasic(): Unit = {
+    compileDut().doSim("load-timing-basic") { dut =>
+      dut.clockDomain.forkStimulus(period = 10)
+      initInputs(dut)
+      dut.clockDomain.waitSampling(4)
+
+      val mem = Array.fill(
+        simCfg.programWordCount + (simCfg.resultRingByteCount + 3) / 4
+      )(0L)
+      // LOAD_TIMING reg=0, divider=12: group=01 sub=0111 [29:26], reg at
+      // [19:17], divider at [16:3]. sub=7 → (1<<30)|(7<<26) = 0x5C000000.
+      // reg=0 contributes nothing; divider=12 << 3 = 0x60. Final = 0x5C000060.
+      mem(0) = 0x5c000060L
+      mem(1) = haltWord(0)
+      forkSpramModel(dut, mem)
+
+      dut.io.programLength #= 2
+      dut.io.engineStart #= true
+      dut.clockDomain.waitSampling()
+
+      waitFor(
+        dut,
+        50,
+        dut.io.halted.toBoolean,
+        "[caseLoadTimingBasic] engine did not halt"
+      )
+      assert(
+        dut.io.haltStatus.toInt == 0,
+        s"[caseLoadTimingBasic] expected status 0, got " +
+          s"0x${dut.io.haltStatus.toInt.toHexString} — LOAD_TIMING trapped " +
+          s"or never reached HALT(0)"
+      )
+
+      println("[caseLoadTimingBasic] PASS")
+    }
+  }
+
+  // --------------------------------------------------------------------------
   // Entry point
   // --------------------------------------------------------------------------
   def main(args: Array[String]): Unit = {
@@ -557,6 +781,9 @@ object EnginePipelineSim {
     caseFetchSequence()
     caseProgramLengthZero()
     caseEmitBitDrivesSclLow()
-    println("EnginePipelineSim: all 7 cases passed")
+    caseBranchOnAlwaysSkip()
+    caseMarkBasic()
+    caseLoadTimingBasic()
+    println("EnginePipelineSim: all 10 cases passed")
   }
 }
