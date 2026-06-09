@@ -102,6 +102,7 @@ sim: sim-config sim-opendrain sim-baud-gen sim-rx-sync \
      sim-symbol-decoder-contention \
      sim-engine-emit-bit-data-hold \
      sim-engine-stretch-role \
+     sim-engine-jmp-boundary \
      sim-regfile sim-engine-pipeline ## Run all simulations (Phase C in flight)
 
 # Per-block sim / gen targets land here once their hint blocks in

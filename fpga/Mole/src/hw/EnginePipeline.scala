@@ -403,8 +403,25 @@ case class EnginePipeline(cfg: MoleConfig) extends Component {
   // --------------------------------------------------------------------------
   val pcReg = Reg(UInt(progAddrWidth bits)) init 0
 
-  // fetchActive: engine is running and not halted.
-  val fetchActive = io.engineStart && !haltedReg &&
+  // fetchActive: engine is running, not halted, in-range, AND no
+  // HALT/trap is in flight downstream.
+  //
+  // The last clause prevents an SPRAM-read/result-write deadlock: the
+  // SPRAM controller's `resultWrite.ready := !readCmd.valid` arbitration
+  // means F1's continuous reads back-pressure W's ring write. If F1 keeps
+  // fetching while X is committing a HALT/trap to W, W stalls waiting
+  // for ringWrite.ready, X stalls behind W, and the engine never halts.
+  // Suppressing fetches when any downstream stage has HALT_REQUEST in
+  // its payload drains the SPRAM read port for the cycle W needs to
+  // commit the HALT word, then haltedReg goes True and fetching stays
+  // off permanently. Without this, programs that BRANCH_ON-trap (or
+  // that simply HALT while pcReg is still well inside programLength)
+  // never observe the halt.
+  //
+  // The in-flight HALT check itself is wired below (after the CtrlLinks
+  // are declared); we declare a Bool now and assign it later.
+  val haltInFlight = Bool()
+  val fetchActive = io.engineStart && !haltedReg && !haltInFlight &&
     (pcReg < io.programLength.resize(progAddrWidth bits))
 
   // --------------------------------------------------------------------------
@@ -1743,7 +1760,34 @@ case class EnginePipeline(cfg: MoleConfig) extends Component {
     xMarkDone := False
     xWaitOnActive := False
     xWaitOnDone := False
+    // Clear the F2 instruction-latch state so the post-flush refetch
+    // forces a fresh SPRAM-response capture. Without this clear, the
+    // stale f2InstrReg (from the pre-flush in-flight fetch that the
+    // throwWhen invalidated at the StageLink level) would be exposed as
+    // f2.up(INSTRUCTION) to the next post-flush transaction — the
+    // post-flush f2 transaction sees f2InstrValid=True (stale) and
+    // skips the haltWhen-on-pending wait, propagating the wrong
+    // instruction into D. This was the C.8 BRANCH redirect bug:
+    // BRANCH at PC=0 redirected to PC=7, but the post-flush
+    // transaction at F2 saw the stale HALT(0x0a) latched from the
+    // pre-flush PC=1 fetch, and that HALT(0x0a) committed at W.
+    f2InstrValid := False
+    f2RespPending := False
   }
+
+  // Late-bind the haltInFlight Bool declared at the top of this Component.
+  //
+  // The check observes ONLY W (not X) to avoid a combinational loop:
+  // x.up(HALT_REQUEST) is set conditionally in a when() body that
+  // depends on x_down_isReady → w_up_ready → w_haltRequest →
+  // io_ringWrite_ready → io_resultWrite_ready (in SpramController) →
+  // io_readCmd_valid (combinationally fed by fetchActive) →
+  // haltInFlight → fetchActive. Observing the registered xw boundary
+  // (i.e., w.up payload, which arrives one cycle after X drives it)
+  // breaks the loop. The 1-cycle delay in suppressing fetches is
+  // acceptable: W needs at least one cycle of ringWrite.ready to
+  // commit anyway, so the SPRAM read port frees up in time.
+  haltInFlight := w.isValid && w(PipeStageables.HALT_REQUEST)
 
   // --------------------------------------------------------------------------
   // Build — assemble all CtrlLinks and StageLinks.

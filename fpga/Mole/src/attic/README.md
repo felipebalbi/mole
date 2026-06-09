@@ -22,7 +22,7 @@ the non-engine sims keep passing.
 | `BitCycleEngineTargetSim.scala.v0-stash` | `src/sim/BitCycleEngineTargetSim.scala` | Resurrected in C.8 (depends on MARK) |
 | `BitCycleEngineTargetDut.scala.v0-stash` | `src/sim/BitCycleEngineTargetDut.scala` | **Resurrected in C.7** |
 | `BitCycleEngineTwoTargetDut.scala.v0-stash` | `src/sim/BitCycleEngineTwoTargetDut.scala` | **Resurrected in C.7** |
-| `BitCycleEngineJmpBoundarySim.scala.v0-stash` | `src/sim/BitCycleEngineJmpBoundarySim.scala` | Resurrected in C.8 (CTRL) |
+| `BitCycleEngineJmpBoundarySim.scala.v0-stash` | `src/sim/BitCycleEngineJmpBoundarySim.scala` | **Resurrected in C.8** |
 | `BitCycleEngineEmitBitDataHoldSim.scala.v0-stash` | `src/sim/BitCycleEngineEmitBitDataHoldSim.scala` | **Resurrected in C.7** |
 | `MoleTopSim.scala.v0-stash` | `src/sim/MoleTopSim.scala` | Resurrected in C.10 (end-to-end) |
 | `MoleTopFlowControlSim.scala.v0-stash` | `src/sim/MoleTopFlowControlSim.scala` | Resurrected in C.10 (end-to-end) |
