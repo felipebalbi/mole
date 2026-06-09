@@ -39,7 +39,12 @@ object EnginePipelineSim {
     (0x40000000L | (status.toLong << 3)) & 0xffffffffL
 
   // EMIT_BIT_IMM: group=0b00 sub=0b0000 tx=recessive (01) → [4:3]=01 → 0x08
+  // C.7: EMIT_BIT_IMM now EXECUTES (not traps). Used in the emit-bit test below.
   private val emitBitImmWord: Long = 0x00000008L
+
+  // CTRL.BRANCH_ON: group=0b01 sub=0b0001 → opcode pos 0x11 = 17
+  // 17 << 26 = 0x44000000. Still traps in C.7 (CTRL opcodes not yet implemented).
+  private val branchOnWord: Long = 0x44000000L
 
   // LOOP group reserved: group=0b11 sub=0b0000 → 0xFC000000
   private val loopGroupWord: Long = 0xfc000000L
@@ -66,6 +71,8 @@ object EnginePipelineSim {
     dut.io.programLength #= 0
     dut.io.sdaSampled #= true // SDA released (recessive)
     dut.io.sclSampled #= true // SCL released
+    dut.io.sda.read #= true // SDA pad read-back
+    dut.io.scl.read #= true // SCL pad read-back
     dut.io.spramRead.ready #= true
     dut.io.spramResp.valid #= false
     dut.io.spramResp.payload #= 0
@@ -241,19 +248,19 @@ object EnginePipelineSim {
   }
 
   // --------------------------------------------------------------------------
-  // Case 3: Trap on non-HALT (EMIT_BIT_IMM)
+  // Case 3: Trap on non-HALT CTRL opcode (BRANCH_ON, not yet implemented C.7)
   // --------------------------------------------------------------------------
   def caseTrapOnNonHalt(): Unit = {
-    compileDut().doSim("trap-on-non-halt") { dut =>
+    compileDut().doSim("trap-on-ctrl-opcode") { dut =>
       dut.clockDomain.forkStimulus(period = 10)
       initInputs(dut)
       dut.clockDomain.waitSampling(4)
 
-      // EMIT_BIT_IMM (group=00, sub=0000, tx=recessive) → should trap
+      // CTRL.BRANCH_ON → should trap in C.7 (CTRL not yet implemented)
       val mem = Array.fill(
         simCfg.programWordCount + (simCfg.resultRingByteCount + 3) / 4
       )(0L)
-      mem(0) = emitBitImmWord
+      mem(0) = branchOnWord
       forkSpramModel(dut, mem)
 
       var ringWordCapture = 0L
@@ -486,6 +493,60 @@ object EnginePipelineSim {
   }
 
   // --------------------------------------------------------------------------
+  // Case 7: EMIT_BIT_IMM drives SCL low (basic WIRE opcode execution test)
+  // --------------------------------------------------------------------------
+  def caseEmitBitDrivesSclLow(): Unit = {
+    compileDut().doSim("emit-bit-drives-scl-low") { dut =>
+      dut.clockDomain.forkStimulus(period = 10)
+      initInputs(dut)
+      dut.clockDomain.waitSampling(4)
+
+      // Program: EMIT_BIT_IMM dominant (tx=00=dominant, no flags); HALT 0
+      // EMIT_BIT_IMM dominant: all zeros = 0x00000000.
+      // HALT status=0: 0x40000000.
+      // Default BUS_MODE = i2c (OD). Dominant → sclDriveLow=True.
+      val emitBitDom: Long = 0x00000000L // EMIT_BIT_IMM dominant, no flags
+      val haltZero: Long = 0x40000000L // HALT status=0
+
+      val mem = Array.fill(
+        simCfg.programWordCount + (simCfg.resultRingByteCount + 3) / 4
+      )(0L)
+      mem(0) = emitBitDom
+      mem(1) = haltZero
+      forkSpramModel(dut, mem)
+
+      var sclEverLow = false
+      fork {
+        while (true) {
+          if (dut.io.scl.driveLow.toBoolean) sclEverLow = true
+          dut.clockDomain.waitSampling()
+        }
+      }
+
+      dut.io.programLength #= 2 // EMIT_BIT + HALT
+      dut.io.engineStart #= true
+
+      waitFor(
+        dut,
+        200,
+        dut.io.halted.toBoolean,
+        "[caseEmitBitDrivesSclLow] engine did not halt"
+      )
+
+      assert(
+        sclEverLow,
+        "[caseEmitBitDrivesSclLow] EMIT_BIT_IMM never drove SCL low"
+      )
+      assert(
+        dut.io.haltStatus.toInt == 0,
+        s"[caseEmitBitDrivesSclLow] wrong halt status: ${dut.io.haltStatus.toInt}"
+      )
+
+      println("[caseEmitBitDrivesSclLow] PASS")
+    }
+  }
+
+  // --------------------------------------------------------------------------
   // Entry point
   // --------------------------------------------------------------------------
   def main(args: Array[String]): Unit = {
@@ -495,6 +556,7 @@ object EnginePipelineSim {
     caseTrapOnReservedOpcode()
     caseFetchSequence()
     caseProgramLengthZero()
-    println("EnginePipelineSim: all 6 cases passed")
+    caseEmitBitDrivesSclLow()
+    println("EnginePipelineSim: all 7 cases passed")
   }
 }

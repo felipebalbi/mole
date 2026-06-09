@@ -86,16 +86,23 @@ $(BIN): $(ASC)
 
 # Aggregate sim target. Per-block sim targets land as the project
 # grows (see TODO.md). Keep this list and .PHONY in sync.
+#
+# Phase C in flight: some v0 sims are stashed in src/attic/ pending
+# resurrection at the appropriate C.x commit. The aggregate `sim`
+# target lists only sims that exist in src/sim/ today. As stashed
+# sims come back online (C.8 CTRL → sim-engine-full, sim-engine-target,
+# sim-engine-stretch, sim-engine-jmp-boundary; C.10 end-to-end →
+# sim-top, sim-top-flow-control, sim-top-cts-violation), re-add them
+# here and to .PHONY.
 sim: sim-config sim-opendrain sim-baud-gen sim-rx-sync \
      sim-tx-shiftreg sim-rx-shiftreg sim-tx-fsm sim-rx-fsm \
      sim-uart-tx sim-uart-rx sim-uart sim-spram sim-isa \
-     sim-engine-smoke sim-engine-full sim-engine-target sim-pll \
-     sim-crc sim-iobuf sim-loader-fsm sim-drainer-fsm sim-top \
-     sim-top-flow-control sim-symbol-decoder-contention \
-     sim-engine-jmp-boundary sim-top-cts-violation \
+     sim-engine-smoke sim-pll \
+     sim-crc sim-iobuf sim-loader-fsm sim-drainer-fsm \
+     sim-symbol-decoder-contention \
      sim-engine-emit-bit-data-hold \
-     sim-engine-stretch sim-engine-stretch-role \
-     sim-regfile sim-engine-pipeline ## Run all simulations
+     sim-engine-stretch-role \
+     sim-regfile sim-engine-pipeline ## Run all simulations (Phase C in flight)
 
 # Per-block sim / gen targets land here once their hint blocks in
 # TODO.md flip from 🔲 to ✅. The naming contract is fixed:

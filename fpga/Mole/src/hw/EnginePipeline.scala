@@ -7,13 +7,15 @@ import spinal.lib.misc.pipeline._
 /** STATUS_TRAP constant (spec §11): engine trap status value 0x1F. */
 object StatusCode {
   val TRAP: Int = 0x1f
+  // STATUS_STRETCH_TIMEOUT: status 0x0D, matching v0 engine behaviour
+  // (stretch-timeout HALT, PP-class slave stretch violation).
+  val STRETCH_TIMEOUT: Int = 13
 }
 
 /** Payloads flowing through the F → D → R → X → W pipeline.
   *
   * C.6 catalog: enough to support HALT (executes) and all other opcodes (trap
-  * to STATUS_TRAP). C.7/C.8/C.9 will extend this catalog with WIRE / CTRL /
-  * DATA execution payloads.
+  * to STATUS_TRAP). C.7 extends this catalog with WIRE execution payloads.
   */
 object PipeStageables {
 
@@ -36,7 +38,8 @@ object PipeStageables {
   /** True when the decoded opcode is CTRL.HALT (group=01, sub=0000). */
   val IS_HALT = Payload(Bool())
 
-  /** True when the decoded opcode must trap (any non-HALT in C.6). */
+  /** True when the decoded opcode must trap (any unimplemented opcode in C.7).
+    */
   val IS_TRAP = Payload(Bool())
 
   /** 5-bit halt status: extracted from instruction [7:3] for HALT, or
@@ -44,10 +47,10 @@ object PipeStageables {
     */
   val HALT_STATUS = Payload(UInt(5 bits))
 
-  /** Register A read address (for future WIRE/DATA opcodes). */
+  /** Register A read address (for WIRE/DATA opcodes). */
   val READ_REG_A_ADDR = Payload(UInt(3 bits))
 
-  /** Register B read address (for future WIRE/DATA opcodes). */
+  /** Register B read address (for EMIT_BYTE: R7). */
   val READ_REG_B_ADDR = Payload(UInt(3 bits))
 
   /** True when the current instruction reads register A. */
@@ -57,7 +60,7 @@ object PipeStageables {
   val READS_REG_B = Payload(Bool())
 
   /** True when the E-stage instruction is a stall-inducing load-use producer.
-    * Always False in C.6.
+    * Always False in C.7.
     */
   val IS_LOAD_USE = Payload(Bool())
 
@@ -71,7 +74,7 @@ object PipeStageables {
 
   // ---- X → W stage ------------------------------------------------------
 
-  /** True when this instruction writes a register in W. False in C.6. */
+  /** True when this instruction writes a register in W. */
   val WRITES_REG = Payload(Bool())
 
   /** Destination register address for the W-stage register write. */
@@ -103,18 +106,35 @@ object PipeStageables {
   * → R (register read) → X (execute) → W (writeback). F1+F2 model the one-cycle
   * SPRAM read latency without hiding it in haltWhen().
   *
-  * C.6 execution: HALT executes and pushes a HALT word to the result ring;
-  * every other opcode traps to STATUS_TRAP (0x1F) with the same ring push.
+  * C.7 execution:
+  *   - HALT executes and pushes a HALT word to the result ring.
+  *   - All 9 WIRE-group opcodes execute via per-quarter mini-FSMs in X.
+  *   - CTRL/DATA opcodes still trap to STATUS_TRAP pending C.8/C.9.
   *
-  * Pipeline framework: spinal.lib.misc.pipeline — 6 CtrlLinks (f1/f2/d/r/x/w),
-  * 5 StageLinks (registered M2S between each adjacent pair), 18 Payloads,
-  * assembled with Builder(f1, f2, d, r, x, w, f1f2, f2d, dr, rx, xw).
+  * WIRE opcode execution in X stage: The X stage uses a mini-FSM (xWireState
+  * register) with haltWhen() to implement multi-cycle WIRE operations. The
+  * QuarterBitTimer paces every quarter-bit boundary. All X-stage output
+  * Payloads are assigned unconditionally as defaults (False/0), then overridden
+  * by the mini-FSM execution or the HALT/TRAP path.
   *
-  * Bus-shaped FSM idiom (AGENTS §"Bus-shaped FSM idiom"):
-  *   - Bus driver registers are `Reg(Bool())`s at component scope.
-  *   - No `releaseAll()` helper.
-  *   - Stretch-aware Q1→Q2 guard is inline on X stage (not a separate stage).
-  *     In C.6 no WIRE opcodes execute so the guard is absent; C.7 adds it.
+  * tHD;DAT SDA-pad pipeline: The engine's SDA output registers
+  * (sdaDriveLow/sdaDriveHigh) are connected to io.sda via RegNext(). SCL is
+  * unpipelined. This gives every SDA edge a one-fabric-cycle lag relative to
+  * SCL, satisfying tHD;DAT for MCXA266/RT685 LPI2C (see
+  * BitCycleEngineEmitBitDataHoldSim regression).
+  *
+  * Stretch-aware Q1→Q2 guard (AGENTS §"Quarter-bit is the timing unit"): Inline
+  * on X stage (NOT a separate pipeline stage) per the v0 Fmax finding.
+  * waitingForStretch register + haltWhen(). Only applies to EMIT_BIT_IMM and
+  * EMIT_BIT_REG in controller role under OD-class BUS_MODE. PP-class stretch →
+  * STATUS_TRAP immediately (compliance violation).
+  *
+  * Timing divider (C.7): Fixed at cfg.quarterPeriodCyclesReset - 1 for sim.
+  * LOAD_TIMING (C.8) will make the divider runtime-mutable.
+  *
+  * Sticky flags (spec §7): Written at W stage commit. One-cycle forwarding
+  * model: written at W, read from the architectural registers in D. BRANCH_ON /
+  * WAIT_ON (C.8) will consume these from the registered path.
   *
   * @param cfg
   *   Mole compile-time configuration.
@@ -135,18 +155,18 @@ case class EnginePipeline(cfg: MoleConfig) extends Component {
     val spramResp = slave Flow Bits(32 bits)
     val ringWrite = master Stream SpramWriteCmd(spramAddrWidth)
 
-    // ---- Bus observation (unused in C.6; stable port for MoleTop) --------
+    // ---- Bus observation -------------------------------------------------
     val sdaSampled = in Bool ()
     val sclSampled = in Bool ()
 
-    // ---- Bus drive (unused in C.6; idle at reset) -------------------------
+    // ---- Bus drive -------------------------------------------------------
     val sda = master(MoleBusLine())
     val scl = master(MoleBusLine())
 
-    // ---- Engine role -------------------------------------------------------
+    // ---- Engine role -----------------------------------------------------
     val role = out Bool ()
 
-    // ---- Engine status outputs --------------------------------------------
+    // ---- Engine status outputs ------------------------------------------
     val halted = out Bool ()
     val haltStatus = out UInt (5 bits)
     val mismatchFlag = out Bool ()
@@ -154,7 +174,7 @@ case class EnginePipeline(cfg: MoleConfig) extends Component {
     val startFlag = out Bool ()
     val stopFlag = out Bool ()
 
-    // ---- Loader interface --------------------------------------------------
+    // ---- Loader interface ------------------------------------------------
     val programLength = in UInt (programLenWidth bits)
     val engineStart = in Bool ()
   }
@@ -165,44 +185,62 @@ case class EnginePipeline(cfg: MoleConfig) extends Component {
 
   val haltedReg = Reg(Bool()) init False
   val haltStatusReg = Reg(UInt(5 bits)) init 0
-  // These flags are written by WIRE/CTRL opcodes in C.7+. Tag them so the
-  // SpinalHDL elaboration check does not treat the unassigned-but-init'd
-  // registers as errors. The `allowUnsetRegToAvoidLatch` annotation says
-  // "I know this register has no logic driver yet; treat the init as the
-  // only assignment."
+
+  // Sticky engine flags (spec §7).
+  // One-cycle forwarding model: written at W, read from these regs in D.
+  // mismatchFlagReg / timeoutFlagReg are written by the WIRE mini-FSM.
+  // startFlagReg / stopFlagReg are STUBBED in C.7 (no writer wired yet):
+  // bus-observer START/STOP edge detection lands in C.8 with WAIT_ON.
   val mismatchFlagReg = Reg(Bool()) init False
-  mismatchFlagReg.allowUnsetRegToAvoidLatch()
   val timeoutFlagReg = Reg(Bool()) init False
-  timeoutFlagReg.allowUnsetRegToAvoidLatch()
   val startFlagReg = Reg(Bool()) init False
   startFlagReg.allowUnsetRegToAvoidLatch()
   val stopFlagReg = Reg(Bool()) init False
   stopFlagReg.allowUnsetRegToAvoidLatch()
-  // roleReg: mutable via SET_ROLE in C.8; tag for the same reason.
-  val roleReg = Reg(Bool()) init (cfg.role == EngineRole.Controller)
+
+  // roleReg: mutable via SET_ROLE in C.8.
+  // Encoding (matching v0 BitCycleEngineCore): False=Controller, True=Target.
+  // Boot default from cfg.role. Both arms elaborate unconditionally
+  // (AGENTS §"Exception: MoleConfig.role") to support runtime role switch.
+  val roleReg = Reg(Bool()) init (cfg.role == EngineRole.Target)
   roleReg.allowUnsetRegToAvoidLatch()
+
+  // BUS_MODE register: set by SET_BUS_MODE (C.8). Default i2c on reset.
+  val busModeReg = Reg(BusMode()) init (BusMode.i2c)
+  busModeReg.allowUnsetRegToAvoidLatch()
 
   val ringPtrWidth: Int = log2Up(resultWordCount + 1)
   val ringWrPtr = Reg(UInt(ringPtrWidth bits)) init 0
   val ringOverflow = Reg(Bool()) init False
 
   // Bus driver registers (AGENTS §"Registered drivers"; no releaseAll()).
-  // Written by WIRE opcode execution in C.7. Tag unassigned to silence
-  // elaboration warnings — they are intentionally init'd to release state.
+  // Written by WIRE opcode execution. The bus-shaped FSM idiom: only the
+  // WIRE mini-FSM writes these; they hold their last value between opcodes.
   val sdaDriveLow = Reg(Bool()) init False
-  sdaDriveLow.allowUnsetRegToAvoidLatch()
   val sdaDriveHigh = Reg(Bool()) init False
-  sdaDriveHigh.allowUnsetRegToAvoidLatch()
   val sclDriveLow = Reg(Bool()) init False
-  sclDriveLow.allowUnsetRegToAvoidLatch()
   val sclDriveHigh = Reg(Bool()) init False
-  sclDriveHigh.allowUnsetRegToAvoidLatch()
 
-  io.sda.driveLow := sdaDriveLow
-  io.sda.driveHigh := sdaDriveHigh
+  // tHD;DAT SDA-pad pipeline: one-cycle delay on SDA outputs only.
+  // SCL is NOT pipelined (AGENTS §"Quarter-bit is the timing unit on the wire"
+  // and the v0 BitCycleEngineEmitBitDataHoldSim regression).
+  // Placing the pipeline at the pad boundary (not inside the FSM) keeps no
+  // extra mux levels on the critical path.
+  io.sda.driveLow := RegNext(sdaDriveLow) init False
+  io.sda.driveHigh := RegNext(sdaDriveHigh) init False
   io.scl.driveLow := sclDriveLow
   io.scl.driveHigh := sclDriveHigh
   // io.sda.read and io.scl.read are inputs: wired from pad by MoleTop.
+
+  // Defense-in-depth: bus contention asserts (sim-only per SpinalHDL).
+  assert(
+    !(sdaDriveLow && sdaDriveHigh),
+    "EnginePipeline: SDA bus contention (driveLow && driveHigh both set)"
+  )
+  assert(
+    !(sclDriveLow && sclDriveHigh),
+    "EnginePipeline: SCL bus contention (driveLow && driveHigh both set)"
+  )
 
   // --------------------------------------------------------------------------
   // Status output connections
@@ -216,9 +254,48 @@ case class EnginePipeline(cfg: MoleConfig) extends Component {
   io.role := roleReg
 
   // --------------------------------------------------------------------------
+  // Bus observer (2-FF synchronizer on SDA/SCL inputs)
+  // --------------------------------------------------------------------------
+  val observer = BusObserver(io.sda.read, io.scl.read)
+
+  // --------------------------------------------------------------------------
   // Register file
   // --------------------------------------------------------------------------
   val regFile = RegFile(width = 32, depth = 8)
+
+  // --------------------------------------------------------------------------
+  // QuarterBitTimer
+  //
+  // Sized at maxReloadValue = (1 << 9) - 1 = 511 (matching v0 design).
+  // C.7: fixed reload = cfg.quarterPeriodCyclesReset - 1 for all bus modes.
+  // C.8's LOAD_TIMING will introduce per-mode timing registers that override
+  // this default. Until then, all EMIT_*/STRETCH_SCL operate at the reset rate.
+  val timer = QuarterBitTimer(maxReloadValue = (1 << 9) - 1)
+  // timerEnable is combinatorial (driven by the mini-FSM body; no loop risk
+  // since it doesn't feed timer.io.tick back to itself).
+  // timerLoad uses a registered path to break any combinatorial loop through
+  // timer.io.tick → timerLoad → timer.io.load. The registered flag fires one
+  // cycle after the mini-FSM requests a reload; this is correct because:
+  //   - Entry-to-state loads (from WS_IDLE dispatch) fire on the cycle the
+  //     mini-FSM starts; the next cycle the timer begins counting.
+  //   - Intra-EMIT_BYTE bit-advance loads fire the cycle after the Q3 tick
+  //     (the new Q0 starts with the timer freshly loaded).
+  //   - Stretch-resume loads fire the cycle after SCL-rising is observed.
+  // The one-cycle delay is consistent with the v0 design (state transitions
+  // in the monolithic FSM always had the timerLoad in onEntry, which became
+  // effective on the same clock edge as the state register change).
+  val timerEnable = Bool()
+  timerEnable := False
+  // timerLoadReg: set by the mini-FSM; consumed by timer.io.load directly.
+  // The mini-FSM writes timerLoadReg := True to request a load; it's a
+  // registered Reg so there's no combinatorial path from tick back to load.
+  val timerLoadReg = Reg(Bool()) init False
+  // Default: auto-clear each cycle (one-cycle pulse).
+  timerLoadReg := False
+  timer.io.reload :=
+    U(cfg.quarterPeriodCyclesReset - 1, timer.counterWidth bits)
+  timer.io.load := timerLoadReg
+  timer.io.enable := timerEnable
 
   // --------------------------------------------------------------------------
   // PC register (owned by F1)
@@ -237,16 +314,74 @@ case class EnginePipeline(cfg: MoleConfig) extends Component {
   io.ringWrite.payload.data := B(0, 32 bits)
 
   // --------------------------------------------------------------------------
-  // Pipeline construction — spinal.lib.misc.pipeline
+  // X-stage WIRE mini-FSM state registers
   //
-  // Six CtrlLinks (one per pipeline stage) + five StageLinks (M2S registers
-  // between adjacent stages). Builder() assembles them all.
+  // xWireState: 0=IDLE, 1=EMIT_BIT, 2=EMIT_QUARTER, 3=EMIT_BYTE,
+  //             4=SAMPLE_BIT, 5=DRIVE_BIT, 6=STRETCH_SCL.
+  // These are component-scope Regs (not pipeline Payloads) because the WIRE
+  // mini-FSM persists across the multiple cycles that X is stalled.
   // --------------------------------------------------------------------------
+  val WS_IDLE: Int = 0
+  val WS_EMIT_BIT: Int = 1
+  val WS_EMIT_QUARTER: Int = 2
+  val WS_EMIT_BYTE: Int = 3
+  val WS_SAMPLE_BIT: Int = 4
+  val WS_DRIVE_BIT: Int = 5
+  val WS_STRETCH_SCL: Int = 6
 
-  // Six stage control nodes.
+  val xWireState = Reg(UInt(3 bits)) init WS_IDLE
+  val xQIdx = Reg(UInt(2 bits)) init 0 // quarter index: 0..3
+  val xByteIdx = Reg(UInt(4 bits)) init 0 // byte bit-index: 0..8
+  val xStretchCount = Reg(UInt(14 bits)) init 0 // STRETCH_SCL countdown
+  val xDriveBitPhase = Reg(UInt(2 bits)) init 0 // DRIVE_BIT sub-phase 0..2
+  val xByteDataReg = Reg(Bits(8 bits)) init 0 // latched R7 for EMIT_BYTE
+  val xCapturedBit = Reg(Bool()) init False // captured bit from WIRE op
+
+  // Inline stretch-wait guard registers (AGENTS §"Stretch-aware Q2 entry").
+  // Not a separate pipeline stage — inline on the X stage (preserves Fmax).
+  val waitingForStretch = Reg(Bool()) init False
+
+  // 21-bit stretch-timeout counter. Width 21 so cfg.stretchTimeoutCycles =
+  // 1<<20 fits as a literal. Init 0 = "already expired" safe default.
+  val stretchTimeoutCtr = Reg(UInt(21 bits)) init 0
+
+  // Pipelined zero-comparator for stretch timeout (preserves Fmax per v0
+  // finding: 21-input OR-reduction on FSM critical path cost ~5 MHz on
+  // UP5K-SG48 at all seeds). Init True = "already expired" safe default.
+  val stretchTimeoutCtrIsZero = Reg(Bool()) init True
+  stretchTimeoutCtrIsZero := (stretchTimeoutCtr === 0)
+
+  // X-stage pending halt/trap/capture outputs. These are combinatorial signals
+  // set by the mini-FSM body and consumed by the pipeline Payload assignments
+  // below. Using Scala Bools that drive the x.up() payloads unconditionally.
+  val xWireHaltReq = Bool()
+  val xWireHaltWord = Bits(32 bits)
+  val xWireWritesReg = Bool()
+  val xWireWriteAddr = UInt(3 bits)
+  val xWireWriteData = Bits(32 bits)
+  xWireHaltReq := False
+  xWireHaltWord := B(0, 32 bits)
+  xWireWritesReg := False
+  xWireWriteAddr := U(0, 3 bits)
+  xWireWriteData := B(0, 32 bits)
+
+  // Helper to build a HALT word (spec §11):
+  //   [31:30]=11 [29]=overflow [28]=mismatch [27:23]=status [22:0]=0
+  def makeHaltWord(status: UInt, mismatch: Bool): Bits =
+    B"11" ## ringOverflow.asBits ## mismatch.asBits ##
+      status.asBits ## B(0, 23 bits)
+
+  def makeTrapWord(): Bits =
+    makeHaltWord(U(StatusCode.TRAP, 5 bits), mismatchFlagReg)
+
+  def makeStretchTimeoutWord(forceMismatch: Bool): Bits =
+    makeHaltWord(U(StatusCode.STRETCH_TIMEOUT, 5 bits), forceMismatch)
+
+  // --------------------------------------------------------------------------
+  // Pipeline construction — spinal.lib.misc.pipeline
+  // --------------------------------------------------------------------------
   val f1, f2, d, r, x, w = CtrlLink()
 
-  // Five inter-stage registers (M2S = data + valid registers).
   val f1f2 = StageLink(f1.down, f2.up)
   val f2d = StageLink(f2.down, d.up)
   val dr = StageLink(d.down, r.up)
@@ -255,39 +390,66 @@ case class EnginePipeline(cfg: MoleConfig) extends Component {
 
   // --------------------------------------------------------------------------
   // F1: Fetch Request
-  // F1 is always valid (it's the pipeline source). Halt it when not active.
   // --------------------------------------------------------------------------
 
-  // Drive the first stage valid: always trying to produce a fetch.
   f1.up.valid := True
 
-  // Drive spramRead from F1.
   io.spramRead.valid := fetchActive
   io.spramRead.payload := pcReg.resize(spramAddrWidth bits)
 
-  // Stall F1 when:
-  //   (a) not fetch-active (halted / not started / PC out of range), or
-  //   (b) SPRAM not ready.
   f1.haltWhen(!fetchActive || !io.spramRead.ready)
 
-  // Latch PC used for the current fetch into the PC payload.
   f1.up(PipeStageables.PC) := pcReg.resize(13 bits)
 
-  // Advance PC when a fetch fires.
   when(f1.down.isFiring) {
     pcReg := pcReg + 1
   }
 
   // --------------------------------------------------------------------------
-  // F2: Fetch Response — latch SPRAM response
-  // The SPRAM delivers readResp.valid exactly 1 cycle after readCmd.fire.
-  // We halt F2 until the response arrives.
+  // F2: Fetch Response
+  //
+  // F2 must latch the SPRAM response into a register on the cycle the
+  // response arrives. The SPRAM response port (`io.spramResp.payload`) is
+  // the live SPRAM bus and changes whenever a newer F1 read issues; if F2
+  // exposes `io.spramResp.payload` combinationally as its INSTRUCTION
+  // payload, then the next F1 fetch can silently mutate F2's "held"
+  // instruction while X is stalling downstream. The result is that the
+  // instruction in D (and beyond) shifts forward in the program by however
+  // many F1 fetches happened during the stall — the program drops
+  // instructions silently.
+  //
+  // The fix: track whether THIS f2 transaction has captured its response
+  // yet. On the cycle f1 fires (the f1→f2 StageLink fills f2), schedule a
+  // pending-response. One cycle later the SPRAM response arrives and we
+  // latch it into f2InstrReg, marking f2InstrValid. F2 halts until the
+  // latch is valid; once valid, F2 holds the instruction stable for as
+  // long as downstream is stalled.
   // --------------------------------------------------------------------------
 
-  // Halt F2 while waiting for the SPRAM response.
-  f2.haltWhen(f2.isValid && !io.spramResp.valid)
+  val f2InstrReg = Reg(Bits(32 bits)) init 0
+  val f2InstrValid = Reg(Bool()) init False
+  val f2RespPending = Reg(Bool()) init False
 
-  f2.up(PipeStageables.INSTRUCTION) := io.spramResp.payload
+  // Default: hold state.
+  // f2RespPending: set when f1 fires (a SPRAM read is in flight for this
+  //                f2 transaction). Cleared when the response is latched.
+  // f2InstrValid:  True once the latch holds the response for the current
+  //                f2 transaction. Cleared on f2.down.isFiring.
+  when(f1.down.isFiring) {
+    f2RespPending := True
+  }
+  when(f2RespPending && io.spramResp.valid) {
+    f2InstrReg := io.spramResp.payload
+    f2InstrValid := True
+    f2RespPending := False
+  }
+  when(f2.down.isFiring) {
+    f2InstrValid := False
+  }
+
+  f2.haltWhen(f2.isValid && !f2InstrValid)
+
+  f2.up(PipeStageables.INSTRUCTION) := f2InstrReg
 
   // --------------------------------------------------------------------------
   // D: Decode
@@ -300,24 +462,48 @@ case class EnginePipeline(cfg: MoleConfig) extends Component {
   d.up(PipeStageables.OPCODE_GROUP) := dGroup
   d.up(PipeStageables.OPCODE_SUB) := dSub
 
-  // CTRL.HALT: group=0b01 (1), sub=0b0000 (0)
+  // CTRL.HALT: group=0b01 (1), sub=0b0000 (0).
   val dIsHalt = (dGroup === 1) && (dSub === 0)
-  d.up(PipeStageables.IS_HALT) := dIsHalt
-  d.up(PipeStageables.IS_TRAP) := !dIsHalt
+  // WIRE group: group=0b00 (0). Sub-opcodes 0x0..0x8 are live; 0x9..0xF reserved.
+  val dIsWire = (dGroup === 0)
+  val dIsWireLive = dIsWire && (dSub <= 8)
+  // SET_BUS_MODE (CTRL sub=0x3) and SET_ROLE (CTRL sub=0x4): implemented in C.7
+  // because they are required by nearly every WIRE test program. All other
+  // CTRL/DATA opcodes trap to STATUS_TRAP pending C.8/C.9.
+  val dIsSetBusMode = (dGroup === 1) && (dSub === 3)
+  val dIsSetRole = (dGroup === 1) && (dSub === 4)
+  // CTRL/DATA non-HALT non-WIRE → trap in C.7, EXCEPT SET_BUS_MODE + SET_ROLE.
+  val dIsTrap =
+    !dIsHalt && !dIsWireLive && !dIsSetBusMode && !dIsSetRole
 
-  // HALT status from instruction [7:3]; override to STATUS_TRAP for traps.
+  d.up(PipeStageables.IS_HALT) := dIsHalt
+  d.up(PipeStageables.IS_TRAP) := dIsTrap
+
+  // HALT status from instruction [7:3]; STATUS_TRAP for traps; 0 for WIRE.
   val dHaltStatus = dInsn(7 downto 3).asUInt
   d.up(PipeStageables.HALT_STATUS) := Mux(
     dIsHalt,
     dHaltStatus,
-    U(StatusCode.TRAP, 5 bits)
+    Mux(dIsTrap, U(StatusCode.TRAP, 5 bits), U(0, 5 bits))
   )
 
-  // Register operand decoding (unused in C.6; stable for C.7+).
-  d.up(PipeStageables.READ_REG_A_ADDR) := dInsn(25 downto 23).asUInt
-  d.up(PipeStageables.READ_REG_B_ADDR) := dInsn(22 downto 20).asUInt
-  d.up(PipeStageables.READS_REG_A) := False
-  d.up(PipeStageables.READS_REG_B) := False
+  // Register operand decoding.
+  // REG_A: src at [22:20] for EMIT_BIT_REG, EMIT_QUARTER_REG, STRETCH_SCL_REG,
+  //        DRIVE_BIT_ON_SCL.
+  // REG_B: always R7 (for EMIT_BYTE implicit R7 data read).
+  val dRegAAddr = dInsn(22 downto 20).asUInt
+  d.up(PipeStageables.READ_REG_A_ADDR) := dRegAAddr
+  d.up(PipeStageables.READ_REG_B_ADDR) := U(7, 3 bits)
+
+  val dEmitBitReg = dIsWire && (dSub === 1)
+  val dEmitQuarterReg = dIsWire && (dSub === 3)
+  val dEmitByte = dIsWire && (dSub === 4)
+  val dStretchSclReg = dIsWire && (dSub === 8)
+  val dDriveBitOnScl = dIsWire && (dSub === 6)
+
+  d.up(PipeStageables.READS_REG_A) :=
+    dEmitBitReg || dEmitQuarterReg || dStretchSclReg || dDriveBitOnScl
+  d.up(PipeStageables.READS_REG_B) := dEmitByte
   d.up(PipeStageables.IS_LOAD_USE) := False
 
   // --------------------------------------------------------------------------
@@ -330,51 +516,660 @@ case class EnginePipeline(cfg: MoleConfig) extends Component {
   r.up(PipeStageables.REG_A_VALUE) := regFile.io.readData0
   r.up(PipeStageables.REG_B_VALUE) := regFile.io.readData1
 
-  // Stall R on load-use hazard (always 0 in C.6; wiring stays).
   r.haltWhen(regFile.io.loadUseStall)
 
-  // RegFile E-stage signals: driven from the X stage's current content.
-  // Use isValid for reads per API convention.
   regFile.io.eValid := x.isValid && x(PipeStageables.WRITES_REG)
   regFile.io.eWriteAddr := x(PipeStageables.WRITE_REG_ADDR)
   regFile.io.eIsLoadUse := x(PipeStageables.IS_LOAD_USE)
 
   // --------------------------------------------------------------------------
   // X: Execute
-  // C.6: HALT executes; everything else traps to STATUS_TRAP.
+  //
+  // C.7: HALT executes; all 9 WIRE opcodes execute via inline mini-FSM;
+  // CTRL/DATA (non-HALT) still trap to STATUS_TRAP.
+  //
+  // WIRE mini-FSM overview:
+  //   The X stage stalls (haltWhen) while xWireState != WS_IDLE.
+  //   On the first cycle in X with a WIRE instruction (xWireState == WS_IDLE):
+  //     - The mini-FSM initialises xWireState and related state regs.
+  //     - If the mini-FSM completes in one cycle (e.g. EMIT_QUARTER), it resets
+  //       xWireState to WS_IDLE in the same cycle, so the pipeline advances
+  //       on the next cycle.
+  //     - Multi-cycle operations set xWireState to a running state; X remains
+  //       stalled until the mini-FSM resets xWireState to WS_IDLE.
+  //
+  // All X-stage output Payloads are assigned unconditionally to safe defaults
+  // first (outside any when() block). The HALT/TRAP path and the WIRE inline
+  // trap paths override them.
   // --------------------------------------------------------------------------
 
-  // Register write intent (no writers in C.6).
+  // ---- Unconditional defaults for all X-stage output Payloads ---------------
+  // These must be assigned unconditionally to avoid SpinalHDL latch detection.
   x.up(PipeStageables.WRITES_REG) := False
   x.up(PipeStageables.WRITE_REG_ADDR) := U(0, 3 bits)
   x.up(PipeStageables.WRITE_REG_DATA) := B(0, 32 bits)
+  x.up(PipeStageables.HALT_REQUEST) := False
+  x.up(PipeStageables.RING_WRITE_VALID) := False
+  x.up(PipeStageables.RING_WRITE_DATA) := B(0, 32 bits)
+  x.up(PipeStageables.PC_REDIRECT_VALID) := False
+  x.up(PipeStageables.PC_REDIRECT_TARGET) := U(0, 13 bits)
 
-  // HALT or TRAP → issue halt request.
+  // Decode helpers for X stage.
+  // xIsWire: True only for WIRE-group instructions (group=0b00).
+  // SET_BUS_MODE and SET_ROLE are CTRL group; treated separately below.
+  val xIsWire = (x(PipeStageables.OPCODE_GROUP) === 0) &&
+    !x(PipeStageables.IS_TRAP)
+  val xIsSetBusMode = (x(PipeStageables.OPCODE_GROUP) === 1) &&
+    (x(PipeStageables.OPCODE_SUB) === 3) && !x(PipeStageables.IS_TRAP)
+  val xIsSetRole = (x(PipeStageables.OPCODE_GROUP) === 1) &&
+    (x(PipeStageables.OPCODE_SUB) === 4) && !x(PipeStageables.IS_TRAP)
+  val xSub = x(PipeStageables.OPCODE_SUB)
+  val xInsn = x(PipeStageables.INSTRUCTION)
+
+  // Field decoders (combinational).
+  val xEmitBitImmTxRaw = xInsn(4 downto 3) // EMIT_BIT_IMM tx_symbol
+  val xEmitQImmSdaRaw = xInsn(4 downto 3) // EMIT_QUARTER_IMM sda
+  val xEmitQImmSclRaw = xInsn(6 downto 5) // EMIT_QUARTER_IMM scl
+  val xDriveTxRaw = xInsn(4 downto 3) // DRIVE_BIT_ON_SCL tx_symbol
+  val xStretchImmN = xInsn(16 downto 3).asUInt // STRETCH_SCL_IMM count
+  val xExpect = xInsn(Instruction.EXPECT_BIT) // flag: expect
+  val xMask = xInsn(Instruction.MASK_BIT) // flag: mask
+  val xCapture = xInsn(Instruction.CAPTURE_BIT) // flag: capture
+  val xRegAVal = x(PipeStageables.REG_A_VALUE)
+  val xRegBVal = x(PipeStageables.REG_B_VALUE) // R7 data for EMIT_BYTE
+
+  // ---- HALT / TRAP path ---------------------------------------------------
   val xHaltOrTrap = x(PipeStageables.IS_HALT) || x(PipeStageables.IS_TRAP)
-  x.up(PipeStageables.HALT_REQUEST) := xHaltOrTrap
+  val xHaltStatus = x(PipeStageables.HALT_STATUS)
+  val xHaltWord = makeHaltWord(xHaltStatus, mismatchFlagReg)
 
-  // Build HALT word (spec §11):
-  //   [31:30]=11 [29]=overflow [28]=mismatch [27:23]=status [22:0]=0
-  val xStatus = x(PipeStageables.HALT_STATUS)
-  val xHaltWord = B"11" ##
-    ringOverflow.asBits ##
-    mismatchFlagReg.asBits ##
-    xStatus.asBits ##
-    B(0, 23 bits)
+  // xWireDone: one-cycle flag set when the mini-FSM completes. Prevents
+  // re-entry into the WS_IDLE entry dispatch on the cycle after completion.
+  // Auto-clears each cycle (Reg, default := False driven unconditionally).
+  val xWireDone = Reg(Bool()) init False
+  xWireDone := False // auto-clear
 
-  x.up(PipeStageables.RING_WRITE_VALID) := xHaltOrTrap
-  x.up(PipeStageables.RING_WRITE_DATA) := xHaltWord
-  x.up(PipeStageables.PC_REDIRECT_VALID) := xHaltOrTrap
-  x.up(PipeStageables.PC_REDIRECT_TARGET) := x(PipeStageables.PC)
+  // xWireActive: True when the WIRE mini-FSM body should execute.
+  // False when xWireDone prevents re-entry.
+  val xWireActive = xIsWire && x.isValid && !xWireDone
 
-  // Stall X when ring write is back-pressured.
-  x.haltWhen(x(PipeStageables.RING_WRITE_VALID) && !io.ringWrite.ready)
+  // WIRE stall condition: the mini-FSM is running (xWireState != IDLE) OR
+  // a WIRE instruction just arrived (xWireState == IDLE but we need to start).
+  // The `xWireDone` flag prevents xWireStarting from triggering after
+  // the FSM completes (xWireDone=True suppresses xWireActive).
+  val xWireStarting = xWireActive && (xWireState === WS_IDLE)
+  val xWireRunning = xWireActive && (xWireState =/= WS_IDLE)
+  // Stall X while the WIRE mini-FSM is running or starting.
+  x.haltWhen(xWireRunning || xWireStarting || waitingForStretch)
+
+  // Stall X when ring write is back-pressured (for halt/trap path).
+  x.haltWhen(xHaltOrTrap && !io.ringWrite.ready)
+
+  // ---- HALT / TRAP outputs ------------------------------------------------
+  // Set when IS_HALT or IS_TRAP is true (non-WIRE path).
+  // The WIRE inline-trap path overrides x.up() outputs directly in the
+  // mini-FSM body below via the `xWireHaltReq` override mechanism.
+  when(xHaltOrTrap) {
+    x.up(PipeStageables.HALT_REQUEST) := True
+    x.up(PipeStageables.RING_WRITE_VALID) := True
+    x.up(PipeStageables.RING_WRITE_DATA) := xHaltWord
+    x.up(PipeStageables.PC_REDIRECT_VALID) := True
+    x.up(PipeStageables.PC_REDIRECT_TARGET) := x(PipeStageables.PC)
+  }
+
+  // ---- WIRE capture writeback (driven from component-scope xWireWritesReg) --
+  // These are combinatorial wires set by the mini-FSM body (see below).
+  // They feed the x.up() Payloads so the WIRE-completed cycle passes the
+  // capture data to W.
+  // Override the unconditional default assignments when xWireWritesReg is True.
+  when(xWireWritesReg) {
+    x.up(PipeStageables.WRITES_REG) := True
+    x.up(PipeStageables.WRITE_REG_ADDR) := xWireWriteAddr
+    x.up(PipeStageables.WRITE_REG_DATA) := xWireWriteData
+  }
+
+  // Override HALT/RING outputs for WIRE-inline traps.
+  when(xWireHaltReq) {
+    x.up(PipeStageables.HALT_REQUEST) := True
+    x.up(PipeStageables.RING_WRITE_VALID) := True
+    x.up(PipeStageables.RING_WRITE_DATA) := xWireHaltWord
+    x.up(PipeStageables.PC_REDIRECT_VALID) := True
+    x.up(PipeStageables.PC_REDIRECT_TARGET) := x(PipeStageables.PC)
+  }
+
+  // ---- SET_BUS_MODE and SET_ROLE single-cycle execution -------------------
+  // These two CTRL opcodes are implemented here (C.7) because they are
+  // required by nearly every WIRE test program. All other CTRL opcodes
+  // remain as STATUS_TRAP pending C.8.
+  //
+  // SET_BUS_MODE: mode field at [6:3] (4 bits). Valid values 0..3.
+  // Reserved values (4..15) → trap.
+  // SET_ROLE: role bit at [3]. 0=controller, 1=target.
+  //
+  // These are single-cycle operations: write the architectural register and
+  // let the pipeline advance. No haltWhen needed.
+  when(x.isValid && xIsSetBusMode && x.isReady) {
+    val modeRaw = xInsn(6 downto 3).asUInt
+    when(modeRaw <= 3) {
+      // BusMode wire encoding: i2c=0, i3cOd=1, i3cPp=2, hdrDdr=3.
+      // The SpinalEnum uses the exact same sequential encoding (set in
+      // Instruction.scala BusMode.defaultEncoding).
+      val newMode = BusMode()
+      newMode.assignFromBits(modeRaw(1 downto 0).asBits)
+      busModeReg := newMode
+    } otherwise {
+      // Invalid BUS_MODE value → STATUS_TRAP.
+      x.up(PipeStageables.HALT_REQUEST) := True
+      x.up(PipeStageables.RING_WRITE_VALID) := True
+      x.up(PipeStageables.RING_WRITE_DATA) := makeTrapWord()
+      x.up(PipeStageables.PC_REDIRECT_VALID) := True
+      x.up(PipeStageables.PC_REDIRECT_TARGET) := x(PipeStageables.PC)
+    }
+  }
+
+  when(x.isValid && xIsSetRole && x.isReady) {
+    roleReg := xInsn(3)
+    // Release bus drivers on role switch (per v0 SET_ROLE semantics).
+    sdaDriveLow := False
+    sdaDriveHigh := False
+    sclDriveLow := False
+    sclDriveHigh := False
+  }
+
+  // ---- WIRE mini-FSM body -------------------------------------------------
+  //
+  // This `when` block computes updates to the component-scope state regs and
+  // the combinatorial xWireHaltReq / xWireWritesReg / etc. signals that feed
+  // the x.up() overrides above. It runs both when a WIRE instruction is first
+  // seen (xWireState==WS_IDLE, x.isValid, xIsWire) and while running
+  // (xWireRunning).
+  //
+  // Bus-shaped FSM idiom: sdaDriveLow/sdaDriveHigh/sclDriveLow/sclDriveHigh
+  // are component-scope Reg(Bool())s. The mini-FSM only writes the lines it
+  // changes per cycle.
+
+  when(xWireActive) {
+
+    when(xWireState === WS_IDLE) {
+      // ---- Entry dispatch: first cycle with a WIRE instruction in X --------
+
+      switch(xSub) {
+
+        // ------ EMIT_BIT_IMM (sub=0x0) ------------------------------------
+        is(0) {
+          val txRaw = xEmitBitImmTxRaw
+          when(txRaw === B"11") {
+            // Reserved tx_symbol → immediate trap.
+            xWireHaltReq := True
+            xWireHaltWord := makeTrapWord()
+            xWireDone := True
+          } otherwise {
+            val sdaSym = TxSymbol()
+            sdaSym.assignFromBits(txRaw)
+            val sdaDrive = SymbolDecoder(sdaSym, busModeReg)
+            sdaDriveLow := sdaDrive.driveLow
+            sdaDriveHigh := sdaDrive.driveHigh
+            // SCL Q0: dominant per SclWaveformGen.
+            when(!roleReg) {
+              val sclQ0 =
+                SymbolDecoder(SclWaveformGen(U(0, 2 bits)), busModeReg)
+              sclDriveLow := sclQ0.driveLow
+              sclDriveHigh := sclQ0.driveHigh
+            } otherwise {
+              // Target role: release SCL entirely.
+              sclDriveLow := False
+              sclDriveHigh := False
+            }
+            xQIdx := 0
+            timerLoadReg := True
+            xWireState := WS_EMIT_BIT
+          }
+        }
+
+        // ------ EMIT_BIT_REG (sub=0x1) ------------------------------------
+        is(1) {
+          val txRaw = xRegAVal(1 downto 0)
+          when(txRaw === B"11") {
+            xWireHaltReq := True
+            xWireHaltWord := makeTrapWord()
+            xWireDone := True
+          } otherwise {
+            val sdaSym = TxSymbol()
+            sdaSym.assignFromBits(txRaw)
+            val sdaDrive = SymbolDecoder(sdaSym, busModeReg)
+            sdaDriveLow := sdaDrive.driveLow
+            sdaDriveHigh := sdaDrive.driveHigh
+            when(!roleReg) {
+              val sclQ0 =
+                SymbolDecoder(SclWaveformGen(U(0, 2 bits)), busModeReg)
+              sclDriveLow := sclQ0.driveLow
+              sclDriveHigh := sclQ0.driveHigh
+            } otherwise {
+              sclDriveLow := False
+              sclDriveHigh := False
+            }
+            xQIdx := 0
+            timerLoadReg := True
+            xWireState := WS_EMIT_BIT
+          }
+        }
+
+        // ------ EMIT_QUARTER_IMM (sub=0x2) --------------------------------
+        is(2) {
+          val sdaRaw = xEmitQImmSdaRaw
+          val sclRaw = xEmitQImmSclRaw
+          when(sdaRaw === B"11" || sclRaw === B"11") {
+            xWireHaltReq := True
+            xWireHaltWord := makeTrapWord()
+            xWireDone := True
+          } otherwise {
+            val sdaSym = TxSymbol()
+            sdaSym.assignFromBits(sdaRaw)
+            val sclSym = TxSymbol()
+            sclSym.assignFromBits(sclRaw)
+            val sdaDrive = SymbolDecoder(sdaSym, busModeReg)
+            val sclDrive = SymbolDecoder(sclSym, busModeReg)
+            sdaDriveLow := sdaDrive.driveLow
+            sdaDriveHigh := sdaDrive.driveHigh
+            sclDriveLow := sclDrive.driveLow
+            sclDriveHigh := sclDrive.driveHigh
+            timerLoadReg := True
+            xWireState := WS_EMIT_QUARTER
+          }
+        }
+
+        // ------ EMIT_QUARTER_REG (sub=0x3) --------------------------------
+        is(3) {
+          val sdaRaw = xRegAVal(1 downto 0)
+          val sclRaw = xRegAVal(3 downto 2)
+          when(sdaRaw === B"11" || sclRaw === B"11") {
+            xWireHaltReq := True
+            xWireHaltWord := makeTrapWord()
+            xWireDone := True
+          } otherwise {
+            val sdaSym = TxSymbol()
+            sdaSym.assignFromBits(sdaRaw)
+            val sclSym = TxSymbol()
+            sclSym.assignFromBits(sclRaw)
+            val sdaDrive = SymbolDecoder(sdaSym, busModeReg)
+            val sclDrive = SymbolDecoder(sclSym, busModeReg)
+            sdaDriveLow := sdaDrive.driveLow
+            sdaDriveHigh := sdaDrive.driveHigh
+            sclDriveLow := sclDrive.driveLow
+            sclDriveHigh := sclDrive.driveHigh
+            timerLoadReg := True
+            xWireState := WS_EMIT_QUARTER
+          }
+        }
+
+        // ------ EMIT_BYTE (sub=0x4) ----------------------------------------
+        is(4) {
+          // Latch R7[7:0] at entry. Drive SDA for bit 7 (MSB first).
+          xByteDataReg := xRegBVal(7 downto 0)
+          xByteIdx := 0
+          // Drive SDA for MSB.
+          val msb = xRegBVal(7)
+          val sdaSym = TxSymbol()
+          sdaSym := TxSymbol.recessive
+          when(!msb) { sdaSym := TxSymbol.dominant }
+          val sdaDrive = SymbolDecoder(sdaSym, busModeReg)
+          sdaDriveLow := sdaDrive.driveLow
+          sdaDriveHigh := sdaDrive.driveHigh
+          when(!roleReg) {
+            val sclQ0 =
+              SymbolDecoder(SclWaveformGen(U(0, 2 bits)), busModeReg)
+            sclDriveLow := sclQ0.driveLow
+            sclDriveHigh := sclQ0.driveHigh
+          } otherwise {
+            sclDriveLow := False
+            sclDriveHigh := False
+          }
+          xQIdx := 0
+          timerLoadReg := True
+          xWireState := WS_EMIT_BYTE
+        }
+
+        // ------ SAMPLE_BIT_ON_SCL (sub=0x5) --------------------------------
+        is(5) {
+          when(!roleReg) {
+            // Controller role → trap.
+            xWireHaltReq := True
+            xWireHaltWord := makeTrapWord()
+            xWireDone := True
+          } otherwise {
+            xWireState := WS_SAMPLE_BIT
+          }
+        }
+
+        // ------ DRIVE_BIT_ON_SCL (sub=0x6) ---------------------------------
+        is(6) {
+          val txRaw = xDriveTxRaw
+          when(txRaw === B"11" || !roleReg) {
+            // Reserved tx_symbol or controller role → trap.
+            xWireHaltReq := True
+            xWireHaltWord := makeTrapWord()
+            xWireDone := True
+          } otherwise {
+            // Release SDA on entry; drive after first falling SCL edge.
+            sdaDriveLow := False
+            sdaDriveHigh := False
+            xDriveBitPhase := 0
+            xWireState := WS_DRIVE_BIT
+          }
+        }
+
+        // ------ STRETCH_SCL_IMM (sub=0x7) ----------------------------------
+        is(7) {
+          val n = xStretchImmN
+          when(n === 0) {
+            // n=0 → no-op; pipeline advances this cycle.
+            xWireState := WS_IDLE
+            xWireDone := True
+          } otherwise {
+            xStretchCount := n
+            sclDriveLow := True
+            sclDriveHigh := False
+            timerLoadReg := True
+            xWireState := WS_STRETCH_SCL
+          }
+        }
+
+        // ------ STRETCH_SCL_REG (sub=0x8) ----------------------------------
+        is(8) {
+          val n = xRegAVal(13 downto 0).asUInt
+          when(n === 0) {
+            xWireState := WS_IDLE
+            xWireDone := True
+          } otherwise {
+            xStretchCount := n
+            sclDriveLow := True
+            sclDriveHigh := False
+            timerLoadReg := True
+            xWireState := WS_STRETCH_SCL
+          }
+        }
+
+        default {
+          // Unreachable for live sub-opcodes; safe fallthrough.
+          xWireState := WS_IDLE
+          xWireDone := True
+        }
+      }
+
+    } // end xWireState === WS_IDLE
+      .elsewhen(xWireState === WS_EMIT_BIT) {
+        // ---- EMIT_BIT running state -----------------------------------------
+        //
+        // Stretch-wait inline guard (AGENTS §"Stretch-aware Q2 entry on
+        // controller-role EMIT_BIT_*"):
+        //   Applied when waitingForStretch. Timer disabled (timerEnable = False
+        //   by default). Released on SCL rising or stretch-timeout.
+        //
+        // Normal operation: timer paces the 4 quarter-states.
+        // Sample at Q2→Q3 transition (xQIdx==2 on tick).
+
+        when(waitingForStretch) {
+          // Timer disabled; SDA untouched (preserves tHD;DAT hold from entry).
+          when(observer.sclRising) {
+            // SCL released: resume at Q2.
+            waitingForStretch := False
+            timerLoadReg := True
+            xQIdx := 2
+          } elsewhen (stretchTimeoutCtrIsZero) {
+            // Stretch timeout: set TIMEOUT_FLAG, MISMATCH_FLAG, HALT 0x0D.
+            timeoutFlagReg := True
+            mismatchFlagReg := True
+            waitingForStretch := False
+            xWireState := WS_IDLE
+            xWireDone := True
+            xWireHaltReq := True
+            xWireHaltWord := makeStretchTimeoutWord(forceMismatch = True)
+          } otherwise {
+            stretchTimeoutCtr := stretchTimeoutCtr - 1
+          }
+        } otherwise {
+          timerEnable := True
+
+          when(timer.io.tick) {
+            // Sample SDA at Q2 → Q3 transition (xQIdx==2 on this tick).
+            when(xQIdx === 2) {
+              when(xMask) {
+                mismatchFlagReg := (observer.sdaSampled =/= xExpect)
+              }
+              when(xCapture) {
+                xCapturedBit := observer.sdaSampled
+              }
+            }
+
+            when(xQIdx === 3) {
+              // Bit complete.
+              when(xCapture) {
+                xWireWritesReg := True
+                xWireWriteAddr := U(7, 3 bits)
+                xWireWriteData :=
+                  B(0, 31 bits) ## xCapturedBit.asBits
+              }
+              xWireState := WS_IDLE
+              xWireDone := True
+            } otherwise {
+              val nextQ = xQIdx + 1
+              // Update SCL for the new quarter.
+              when(!roleReg) {
+                val sclSym = SclWaveformGen(nextQ)
+                val sclDrive = SymbolDecoder(sclSym, busModeReg)
+                sclDriveLow := sclDrive.driveLow
+                sclDriveHigh := sclDrive.driveHigh
+              }
+
+              // Stretch-aware Q1→Q2 guard.
+              // At the Q1→Q2 tick (xQIdx==1), the SCL recessive symbol was just
+              // committed above. If SCL is still low, slave is stretching.
+              when(xQIdx === 1 && !roleReg && !observer.sclSampled) {
+                when(BusModeOps.isPpClass(busModeReg)) {
+                  // PP-class slave stretch: compliance violation → STATUS_TRAP.
+                  mismatchFlagReg := True
+                  xWireState := WS_IDLE
+                  xWireDone := True
+                  xWireHaltReq := True
+                  xWireHaltWord :=
+                    makeStretchTimeoutWord(forceMismatch = True)
+                } otherwise {
+                  // OD-class: pause inline; wait for SCL to release.
+                  waitingForStretch := True
+                  stretchTimeoutCtr :=
+                    U(cfg.stretchTimeoutCycles, 21 bits)
+                  // Force pipelined zero-flag False so the wait's first
+                  // cycle doesn't see the pre-load (0 → flag True) and HALT.
+                  stretchTimeoutCtrIsZero := False
+                  // Do NOT advance xQIdx here.
+                }
+              } otherwise {
+                xQIdx := nextQ
+              }
+            }
+          }
+        }
+      }
+      .elsewhen(xWireState === WS_EMIT_QUARTER) {
+        // ---- EMIT_QUARTER running state: single-quarter dwell ---------------
+        timerEnable := True
+        when(timer.io.tick) {
+          when(xMask) {
+            mismatchFlagReg := (observer.sdaSampled =/= xExpect)
+          }
+          when(xCapture) {
+            xCapturedBit := observer.sdaSampled
+            xWireWritesReg := True
+            xWireWriteAddr := U(7, 3 bits)
+            xWireWriteData :=
+              B(0, 31 bits) ## observer.sdaSampled.asBits
+          }
+          xWireState := WS_IDLE
+          xWireDone := True
+        }
+      }
+      .elsewhen(xWireState === WS_EMIT_BYTE) {
+        // ---- EMIT_BYTE running state: 8 data bits + ACK slot ----------------
+        // Each bit uses the same 4-quarter pattern as EMIT_BIT (no stretch guard).
+        // xByteIdx = 0..7 data bits (MSB first), 8 = ACK/NAK hiz slot.
+        timerEnable := True
+
+        when(timer.io.tick) {
+          // Sample at Q2 tick for the ACK slot (xByteIdx==8 and xQIdx==2).
+          when(xByteIdx === 8 && xQIdx === 2) {
+            when(xMask) {
+              mismatchFlagReg := (observer.sdaSampled =/= xExpect)
+            }
+            when(xCapture) {
+              xCapturedBit := observer.sdaSampled
+            }
+          }
+
+          when(xQIdx === 3) {
+            when(xByteIdx === 8) {
+              // All 9 bit-cells complete (8 data + 1 ACK).
+              when(xCapture) {
+                xWireWritesReg := True
+                xWireWriteAddr := U(7, 3 bits)
+                xWireWriteData :=
+                  B(0, 31 bits) ## xCapturedBit.asBits
+              }
+              xWireState := WS_IDLE
+              xWireDone := True
+            } otherwise {
+              // Advance to the next bit cell.
+              val nextIdx = xByteIdx + 1
+              xByteIdx := nextIdx
+              xQIdx := 0
+              timerLoadReg := True
+              // Drive SDA for the next bit (or hiz for ACK slot).
+              val nextSdaSym = TxSymbol()
+              when(nextIdx === 8) {
+                // ACK slot: SDA hiz (target drives this on real bus).
+                nextSdaSym := TxSymbol.hiz
+              } otherwise {
+                // Data bit: MSB = bit 7, then bit 6..0.
+                // Compute bit value from the latched byte.
+                // nextIdx ∈ {1..7}: bit position = 7 - nextIdx(2:0).
+                val bitVal = xByteDataReg(
+                  7 - nextIdx(2 downto 0).resize(3)
+                )
+                nextSdaSym := TxSymbol.recessive
+                when(!bitVal) { nextSdaSym := TxSymbol.dominant }
+              }
+              val nextSdaDrive = SymbolDecoder(nextSdaSym, busModeReg)
+              sdaDriveLow := nextSdaDrive.driveLow
+              sdaDriveHigh := nextSdaDrive.driveHigh
+              // SCL Q0 for the next bit cell.
+              when(!roleReg) {
+                val sclQ0 =
+                  SymbolDecoder(SclWaveformGen(U(0, 2 bits)), busModeReg)
+                sclDriveLow := sclQ0.driveLow
+                sclDriveHigh := sclQ0.driveHigh
+              }
+            }
+          } otherwise {
+            val nextQ = xQIdx + 1
+            when(!roleReg) {
+              val sclSym = SclWaveformGen(nextQ)
+              val sclDrive = SymbolDecoder(sclSym, busModeReg)
+              sclDriveLow := sclDrive.driveLow
+              sclDriveHigh := sclDrive.driveHigh
+            }
+            xQIdx := nextQ
+          }
+        }
+      }
+      .elsewhen(xWireState === WS_SAMPLE_BIT) {
+        // ---- SAMPLE_BIT_ON_SCL running state (target role) ------------------
+        // Wait for external SCL rising edge; sample SDA; flag-triple; advance.
+        when(observer.sclRising) {
+          when(xMask) {
+            mismatchFlagReg := (observer.sdaSampled =/= xExpect)
+          }
+          when(xCapture) {
+            xCapturedBit := observer.sdaSampled
+            xWireWritesReg := True
+            xWireWriteAddr := U(7, 3 bits)
+            xWireWriteData :=
+              B(0, 31 bits) ## observer.sdaSampled.asBits
+          }
+          xWireState := WS_IDLE
+          xWireDone := True
+        }
+      }
+      .elsewhen(xWireState === WS_DRIVE_BIT) {
+        // ---- DRIVE_BIT_ON_SCL running state (target role) -------------------
+        // Three sub-phases (per v0 BitCycleEngineCore):
+        //   0: wait SCL falling; drive SDA per tx_symbol.
+        //   1: wait SCL rising; sample/compare/capture.
+        //   2: wait closing SCL falling; release SDA.
+        //
+        // Three separate phase checks (not a switch) to avoid the SpinalHDL
+        // stale-read bug with per-phase state on entry (the v0 comment documents
+        // this: a register-based phase counter suffered same-cycle stale reads).
+        when(xDriveBitPhase === 0) {
+          when(observer.sclFalling) {
+            val txRaw = xDriveTxRaw
+            val sdaSym = TxSymbol()
+            sdaSym.assignFromBits(txRaw)
+            val sdaDrive = SymbolDecoder(sdaSym, busModeReg)
+            sdaDriveLow := sdaDrive.driveLow
+            sdaDriveHigh := sdaDrive.driveHigh
+            xDriveBitPhase := 1
+          }
+        } elsewhen (xDriveBitPhase === 1) {
+          when(observer.sclRising) {
+            when(xMask) {
+              mismatchFlagReg := (observer.sdaSampled =/= xExpect)
+            }
+            when(xCapture) {
+              xCapturedBit := observer.sdaSampled
+            }
+            xDriveBitPhase := 2
+          }
+        } elsewhen (xDriveBitPhase === 2) {
+          when(observer.sclFalling) {
+            // Release SDA.
+            sdaDriveLow := False
+            sdaDriveHigh := False
+            when(xCapture) {
+              xWireWritesReg := True
+              xWireWriteAddr := U(7, 3 bits)
+              xWireWriteData :=
+                B(0, 31 bits) ## xCapturedBit.asBits
+            }
+            xWireState := WS_IDLE
+            xWireDone := True
+          }
+        }
+      }
+      .elsewhen(xWireState === WS_STRETCH_SCL) {
+        // ---- STRETCH_SCL running state: count down quarter-ticks ------------
+        // SCL forced low on entry; release to recessive on the last tick.
+        timerEnable := True
+        when(timer.io.tick) {
+          when(xStretchCount === 1) {
+            // Final tick: release SCL.
+            val relSym = TxSymbol.recessive
+            val sclDrive = SymbolDecoder(relSym, busModeReg)
+            sclDriveLow := sclDrive.driveLow
+            sclDriveHigh := sclDrive.driveHigh
+            xWireState := WS_IDLE
+            xWireDone := True
+          } otherwise {
+            xStretchCount := xStretchCount - 1
+          }
+        }
+      }
+
+  } // end when(xWireActive)
 
   // --------------------------------------------------------------------------
   // W: Writeback
   // --------------------------------------------------------------------------
 
-  // Commit RegFile write (no writers in C.6; wiring stays for C.7+).
+  // Commit RegFile write.
   regFile.io.writeEnable := w.down.isFiring && w(PipeStageables.WRITES_REG)
   regFile.io.writeAddr := w(PipeStageables.WRITE_REG_ADDR)
   regFile.io.writeData := w(PipeStageables.WRITE_REG_DATA)
@@ -396,25 +1191,26 @@ case class EnginePipeline(cfg: MoleConfig) extends Component {
   // Commit halt.
   when(w.down.isFiring && w(PipeStageables.HALT_REQUEST)) {
     haltedReg := True
-    // Status lives at [27:23] of the ring word (spec §11).
+    // Status at [27:23] of the ring word (spec §11).
     haltStatusReg := w(PipeStageables.RING_WRITE_DATA)(27 downto 23).asUInt
   }
 
-  // Stall W when ring write is back-pressured (commit point must not advance).
+  // Stall W when ring write is back-pressured.
   w.haltWhen(w(PipeStageables.RING_WRITE_VALID) && !io.ringWrite.ready)
 
-  // Flush pipeline on commit of a halt: squash F1/F2/D/R/X bubbles.
-  // haltedReg gates F1 from issuing new reads after the flush resolves.
-  //
-  // CPU-style flush pattern (spinal.lib.misc.pipeline):
-  //   Component-scope `flush` register raised from W's HALT commit path;
-  //   all upstream CtrlLinks receive throwWhen(flush, usingReady=true).
+  // Flush pipeline on halt commit.
   val flush = False
   when(w.down.isFiring && w(PipeStageables.HALT_REQUEST)) {
     flush := True
   }
   for (upstream <- List(f1, f2, d, r, x)) {
     upstream.throwWhen(flush, usingReady = true)
+  }
+
+  // Reset WIRE mini-FSM state on halt so the next run starts clean.
+  when(flush) {
+    xWireState := WS_IDLE
+    waitingForStretch := False
   }
 
   // --------------------------------------------------------------------------

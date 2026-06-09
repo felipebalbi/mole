@@ -4,34 +4,28 @@ import spinal.core._
 import spinal.core.sim._
 import spinal.lib._
 
-/** Role-gating coverage for the stretch-aware `EMIT_BIT` guard.
+/** Role-gating coverage for the stretch-aware `EMIT_BIT_*` guard.
   *
-  * The new auto-sync at the Q1->Q2 boundary is supposed to fire ONLY in
-  * controller role; target-role `EMIT_BIT` must bypass it (the engine does not
+  * The auto-sync at the Q1→Q2 boundary is supposed to fire ONLY in controller
+  * role; target-role `EMIT_BIT_IMM` must bypass it (the engine does not
   * generate SCL there --- there's nothing to wait for).
-  *
-  * NOTE: This sim is a REGRESSION GUARD, not a TDD-red test. Both cases will
-  * pass on the current head (pre-stretch-aware engine); they exist to catch the
-  * case where the coder accidentally makes the new guard fire in target role,
-  * or breaks the runtime SET_ROLE path.
   *
   * ==Cases==
   *
   *   1. `targetRole_emitBitNoStretchGuard` --- boot with `cfg.role = Target`;
-  *      EMIT_BIT with SCL held low must complete quickly (no spin in the
-  *      stretch wait state).
-  *   2. `midProgramSetRole_switchesPathCleanly` --- Controller EMIT_BIT (with
-  *      stretch + release), then SET_ROLE target, then SAMPLE_BIT_ON_SCL paced
-  *      by an external SCL rising edge; both arms work in one bitstream.
+  *      EMIT_BIT_IMM with external SCL held low must complete quickly (no spin
+  *      in the stretch wait state).
+  *   2. `midProgramSetRole_switchesPathCleanly` --- Controller EMIT_BIT_IMM
+  *      (with stretch + release), then SET_ROLE target, then SAMPLE_BIT_ON_SCL
+  *      paced by an external SCL rising edge; both arms work in one bitstream.
   *
   * Run: `sbt "runMain mole.BitCycleEngineStretchRoleSim"`
   */
 object BitCycleEngineStretchRoleSim extends App {
 
-  // Two distinct boot-roles -> two separate compiles. Keep both
-  // configs small so SPRAM elaboration is cheap.
+  // v0.2 default 48 MHz fabric, 24 MHz uart.
   private val cfgController = MoleConfig(
-    fabricFreqHz = 24 MHz,
+    fabricFreqHz = 48 MHz,
     quarterPeriodCyclesReset = 6,
     programWordCount = 64,
     resultRingByteCount = 64,
@@ -44,7 +38,7 @@ object BitCycleEngineStretchRoleSim extends App {
 
   private val resultBase: Int = cfgController.programWordCount
   private val resultWordCount: Int =
-    (cfgController.resultRingByteCount + 1) / 2
+    (cfgController.resultRingByteCount + 3) / 4
   private val resultLimit: Int = resultBase + resultWordCount - 1
 
   private lazy val compiledTarget =
@@ -58,14 +52,15 @@ object BitCycleEngineStretchRoleSim extends App {
   // --------------------------------------------------------------
 
   private def quiet(dut: BitCycleEngineTargetDut): Unit = {
-    dut.io.start #= false
+    dut.io.engineStart #= false
+    dut.io.programLength #= 0
     dut.io.loaderWrite.valid #= false
     dut.io.loaderWrite.payload.addr #= 0
     dut.io.loaderWrite.payload.data #= 0
     dut.io.debugReadCmd.valid #= false
     dut.io.debugReadCmd.payload #= 0
-    dut.io.bus.sda.read #= true
-    dut.io.bus.scl.read #= true
+    dut.io.sda.read #= true
+    dut.io.scl.read #= true
   }
 
   private def loaderWrite(
@@ -100,35 +95,53 @@ object BitCycleEngineStretchRoleSim extends App {
       status: Int
   )
 
+  /** Decode a v0.2 32-bit HALT ring word per spec §11: [31:30] = 0b11 (tag)
+    * [29] = overflow [28] = mismatch [27:23] = status (5 bits) [22:0] =
+    * reserved
+    */
   private def readHalt(dut: BitCycleEngineTargetDut): HaltWord = {
-    val w = debugRead(dut, resultLimit)
+    // C.7 NOTE: the v0.2 engine writes HALT at the current ringWrPtr
+    // position (not at resultLimit as v0 did). For a program that emits
+    // no CAPTURE/MARK records, ringWrPtr is 0 at HALT, so the HALT word
+    // lands at resultBase. Scan the ring to find the HALT-tagged word.
+    var foundAt = -1
+    var halt: Int = 0
+    var i = 0
+    while (i < resultWordCount && foundAt < 0) {
+      val w = debugRead(dut, resultBase + i)
+      if (((w >>> 30) & 0x3) == 0x3) {
+        foundAt = resultBase + i
+        halt = w
+      }
+      i += 1
+    }
     require(
-      (w >>> 14) == 0x3,
-      f"word at $resultLimit%d (0x$w%04x) is not a HALT tag"
+      foundAt >= 0,
+      f"no HALT tag found in ring [$resultBase, $resultLimit]"
     )
     HaltWord(
-      overflow = ((w >> 13) & 1) != 0,
-      mismatch = ((w >> 12) & 1) != 0,
-      status = (w >> 8) & 0xf
+      overflow = ((halt >> 29) & 1) != 0,
+      mismatch = ((halt >> 28) & 1) != 0,
+      status = (halt >> 23) & 0x1f
     )
   }
 
   import Instruction._
 
   private def emitBit(s: TxSymbol.E): Int =
-    encode(EmitBit(s, expect = false, mask = false, capture = false))
+    encode(EmitBitImm(s, expect = false, mask = false, capture = false))
   private def sampleBit(): Int =
     encode(SampleBitOnScl(expect = false, mask = false, capture = false))
   private def setMode(m: BusMode.E): Int = encode(SetBusMode(m))
   private def setRoleOp(target: Boolean): Int = encode(SetRole(target))
   private def halt(status: Int): Int = encode(Halt(status))
 
-  private def waitDoneOrLimit(
+  private def waitHaltedOrLimit(
       dut: BitCycleEngineTargetDut,
       safetyLimit: Int
   ): Int = {
     var c = 0
-    while (!dut.io.done.toBoolean && c < safetyLimit) {
+    while (!dut.io.halted.toBoolean && c < safetyLimit) {
       dut.clockDomain.waitSampling()
       c += 1
     }
@@ -154,22 +167,18 @@ object BitCycleEngineStretchRoleSim extends App {
       )
       load(dut, program)
 
-      dut.io.start #= true
-      dut.clockDomain.waitSamplingWhere(!dut.io.done.toBoolean)
-      dut.io.start #= false
-
       // Hold SCL low throughout. In target role the engine does
-      // NOT generate SCL and must NOT consult the stretch guard
-      // --- otherwise it would spin until the stretch timeout
-      // (~44 ms) and the safety limit would trip.
-      dut.io.bus.scl.read #= false
+      // NOT generate SCL and must NOT consult the stretch guard.
+      dut.io.scl.read #= false
 
-      // Generous budget: fetch + 4 quarter ticks (~24 cycles) +
-      // HALT fetch + ring write. 300 cycles is comfortable.
-      val cycles = waitDoneOrLimit(dut, safetyLimit = 300)
+      dut.io.programLength #= program.length
+      dut.io.engineStart #= true
+
+      val cycles = waitHaltedOrLimit(dut, safetyLimit = 300)
+      dut.io.engineStart #= false
       assert(
-        dut.io.done.toBoolean,
-        s"$label: engine never halted within 300 cycles --- the " +
+        dut.io.halted.toBoolean,
+        s"$label: engine never halted within $cycles cycles --- the " +
           "stretch guard may be firing in target role"
       )
       val h = readHalt(dut)
@@ -182,7 +191,7 @@ object BitCycleEngineStretchRoleSim extends App {
         !h.mismatch,
         s"$label: unexpected MISMATCH_FLAG in target role"
       )
-      println(s"$label OK")
+      println(s"$label OK ($cycles cycles)")
     }
   }
 
@@ -207,30 +216,30 @@ object BitCycleEngineStretchRoleSim extends App {
       )
       load(dut, program)
 
-      dut.io.start #= true
-      dut.clockDomain.waitSamplingWhere(!dut.io.done.toBoolean)
-      dut.io.start #= false
+      dut.io.programLength #= program.length
+      dut.io.engineStart #= true
 
       // Phase 1: stretch SCL low for ~20 cycles during the
-      // Controller EMIT_BIT, then release.
+      // Controller EMIT_BIT_IMM, then release.
       fork {
         dut.clockDomain.waitSampling(10)
-        dut.io.bus.scl.read #= false
+        dut.io.scl.read #= false
         dut.clockDomain.waitSampling(20)
-        dut.io.bus.scl.read #= true
+        dut.io.scl.read #= true
 
         // Phase 2: SAMPLE_BIT_ON_SCL paces off external SCL.
         // Give the engine a moment to fetch SET_ROLE +
         // SAMPLE_BIT_ON_SCL, then drive a single SCL rising edge.
         dut.clockDomain.waitSampling(60)
-        dut.io.bus.scl.read #= false
+        dut.io.scl.read #= false
         dut.clockDomain.waitSampling(20)
-        dut.io.bus.scl.read #= true
+        dut.io.scl.read #= true
       }
 
-      val cycles = waitDoneOrLimit(dut, safetyLimit = 5000)
+      val cycles = waitHaltedOrLimit(dut, safetyLimit = 5000)
+      dut.io.engineStart #= false
       assert(
-        dut.io.done.toBoolean,
+        dut.io.halted.toBoolean,
         s"$label: engine never halted (ran $cycles cycles)"
       )
       val h = readHalt(dut)
@@ -243,7 +252,7 @@ object BitCycleEngineStretchRoleSim extends App {
         !h.mismatch,
         s"$label: unexpected MISMATCH_FLAG after clean role switch"
       )
-      println(s"$label OK")
+      println(s"$label OK ($cycles cycles)")
     }
   }
 

@@ -1,0 +1,301 @@
+package mole
+
+import spinal.core._
+import spinal.core.sim._
+import spinal.lib._
+
+/** Smoke sim for [[EnginePipeline]] WIRE-group opcodes --- EMIT_BIT_IMM under
+  * i3c-OD and i3c-PP bus modes.
+  *
+  * Resurrected from `attic/BitCycleEngineSmokeSim.scala.v0-stash` for C.7. The
+  * v0 sim wrapped [[BitCycleEngineCore]]; this version wraps [[EnginePipeline]]
+  * (the v0.2 5-stage pipeline) via the [[BitCycleEngineSmokeDut]] wrapper.
+  *
+  * ==What changed from v0==
+  *
+  *   - Instruction encoding: v0.2 32-bit words via `Instruction.encode(...)`.
+  *     `EmitBit(...)` → `EmitBitImm(...)`, `SetBusMode(...)` unchanged.
+  *   - IO: `io.start`/`io.done` → `io.engineStart`/`io.halted`; bus split into
+  *     `io.sda` + `io.scl` (both `MoleBusLine`).
+  *   - HALT word: v0.2 32-bit; status at `[27:23]`, mismatch at `[28]`,
+  *     overflow at `[29]`, tag at `[31:30]`.
+  *   - Bus drivers observed are on `io.sda.driveLow` / `io.sda.driveHigh` /
+  *     `io.scl.driveLow` / `io.scl.driveHigh`.
+  *
+  * ==Program==
+  *
+  * `SET_BUS_MODE mode; EMIT_BIT_IMM(bit0..bit7 of 0x55); EMIT_BIT_IMM hiz; HALT
+  * 0`
+  *
+  * Run: `sbt "runMain mole.BitCycleEngineSmokeSim"`
+  */
+object BitCycleEngineSmokeSim {
+
+  // --------------------------------------------------------------
+  // Types
+  // --------------------------------------------------------------
+
+  private case class BusSample(
+      sdaLow: Boolean,
+      sdaHigh: Boolean,
+      sclLow: Boolean,
+      sclHigh: Boolean
+  )
+
+  private case class LowInterval(start: Int, end: Int, midSda: BusSample)
+
+  // --------------------------------------------------------------
+  // Config
+  // --------------------------------------------------------------
+
+  private def smallCfg = MoleConfig(
+    fabricFreqHz = 48 MHz, // use 48 MHz (production default); uartFreqHz=24 MHz
+    quarterPeriodCyclesReset = 6,
+    programWordCount = 64,
+    resultRingByteCount = 64,
+    captureMaxBits = 65536,
+    uartBaud = 1_000_000
+  )
+
+  // --------------------------------------------------------------
+  // Program builder (v0.2 encoding)
+  // --------------------------------------------------------------
+
+  /** Build the 9-bit "byte 0x55 + ACK hiz + HALT" program. */
+  private def buildProgram(mode: BusMode.E): Seq[Int] = {
+    import Instruction._
+    val dataBits = (0 until 8).map { i =>
+      val isOne = ((0x55 >> (7 - i)) & 1) != 0
+      val sym = if (isOne) TxSymbol.recessive else TxSymbol.dominant
+      encode(EmitBitImm(sym, expect = false, mask = false, capture = false))
+    }
+    val ackBit = encode(EmitBitImm(TxSymbol.hiz, false, false, false))
+    Seq(encode(SetBusMode(mode))) ++ dataBits ++ Seq(ackBit, encode(Halt(0)))
+  }
+
+  private def expectedSda(
+      sym: TxSymbol.E,
+      mode: BusMode.E
+  ): (Boolean, Boolean) =
+    (sym, mode) match {
+      case (TxSymbol.dominant, _)               => (true, false)
+      case (TxSymbol.recessive, BusMode.i2c)    => (false, false)
+      case (TxSymbol.recessive, BusMode.i3cOd)  => (false, false)
+      case (TxSymbol.recessive, BusMode.i3cPp)  => (false, true)
+      case (TxSymbol.recessive, BusMode.hdrDdr) => (false, true)
+      case (TxSymbol.hiz, _)                    => (false, false)
+      case (TxSymbol.reserved, _)               => (false, false)
+    }
+
+  private def isPpClass(mode: BusMode.E): Boolean = mode match {
+    case BusMode.i3cPp | BusMode.hdrDdr => true
+    case _                              => false
+  }
+
+  // --------------------------------------------------------------
+  // Sim helpers
+  // --------------------------------------------------------------
+
+  private def loaderWrite(
+      dut: BitCycleEngineSmokeDut,
+      addr: Int,
+      word: Int
+  ): Unit = {
+    dut.io.loaderWrite.valid #= true
+    dut.io.loaderWrite.payload.addr #= addr
+    dut.io.loaderWrite.payload.data #= word
+    dut.clockDomain.waitSamplingWhere(dut.io.loaderWrite.ready.toBoolean)
+    dut.io.loaderWrite.valid #= false
+  }
+
+  private def sampleBus(dut: BitCycleEngineSmokeDut): BusSample =
+    BusSample(
+      sdaLow = dut.io.sda.driveLow.toBoolean,
+      sdaHigh = dut.io.sda.driveHigh.toBoolean,
+      sclLow = dut.io.scl.driveLow.toBoolean,
+      sclHigh = dut.io.scl.driveHigh.toBoolean
+    )
+
+  private def quiet(dut: BitCycleEngineSmokeDut): Unit = {
+    dut.io.engineStart #= false
+    dut.io.programLength #= 0
+    dut.io.loaderWrite.valid #= false
+    dut.io.loaderWrite.payload.addr #= 0
+    dut.io.loaderWrite.payload.data #= 0
+    dut.io.debugReadCmd.valid #= false
+    dut.io.debugReadCmd.payload #= 0
+    // Pull-up modeled bus reads as high (recessive idle).
+    dut.io.sda.read #= true
+    dut.io.scl.read #= true
+  }
+
+  private def findSclLowIntervals(trace: Seq[BusSample]): Seq[LowInterval] = {
+    val out = collection.mutable.ArrayBuffer.empty[LowInterval]
+    var start = -1
+    for ((s, idx) <- trace.zipWithIndex) {
+      if (s.sclLow && start < 0) {
+        start = idx
+      } else if (!s.sclLow && start >= 0) {
+        val end = idx - 1
+        val mid = trace((start + end) / 2)
+        out += LowInterval(start, end, mid)
+        start = -1
+      }
+    }
+    if (start >= 0) {
+      val end = trace.size - 1
+      val mid = trace((start + end) / 2)
+      out += LowInterval(start, end, mid)
+    }
+    out.toSeq
+  }
+
+  // --------------------------------------------------------------
+  // DUT compile
+  // --------------------------------------------------------------
+
+  private def compileDut() =
+    SimConfig.withWave.compile(BitCycleEngineSmokeDut(smallCfg))
+
+  // --------------------------------------------------------------
+  // Per-mode run
+  // --------------------------------------------------------------
+
+  private def runMode(label: String, mode: BusMode.E): Unit = {
+    println(s"--- BitCycleEngineSmokeSim: $label ---")
+    compileDut().doSim(label) { dut =>
+      dut.clockDomain.forkStimulus(period = 10)
+      quiet(dut)
+      dut.clockDomain.waitSampling(5)
+
+      // 1. Load program.
+      val program = buildProgram(mode)
+      for ((word, idx) <- program.zipWithIndex) {
+        loaderWrite(dut, idx, word)
+      }
+      dut.clockDomain.waitSampling(2)
+
+      // 2. Start engine and capture bus trace.
+      // engineStart must stay high throughout execution; programLength
+      // bounds the PC (engine stops fetching when PC >= programLength).
+      dut.io.programLength #= program.length
+      dut.io.engineStart #= true
+
+      val trace = collection.mutable.ArrayBuffer.empty[BusSample]
+      val safetyLimit = 4000
+      while (!dut.io.halted.toBoolean && trace.size < safetyLimit) {
+        trace += sampleBus(dut)
+        dut.clockDomain.waitSampling()
+      }
+      dut.io.engineStart #= false
+      // Debug: check halt status at trace end.
+      println(
+        s"$label: halted=${dut.io.halted.toBoolean} status=${dut.io.haltStatus.toInt} mismatch=${dut.io.mismatchFlag.toBoolean}"
+      )
+      assert(
+        dut.io.halted.toBoolean,
+        s"$label: engine never halted (ran $safetyLimit cycles)"
+      )
+      assert(
+        dut.io.haltStatus.toInt == 0,
+        s"$label: unexpected halt status 0x${dut.io.haltStatus.toInt.toHexString} " +
+          s"(expected 0; 0x1F = trap; trace size=${trace.size})"
+      )
+
+      // 3. Structural assertions.
+      val intervals = findSclLowIntervals(trace.toSeq)
+      if (intervals.size != 9) {
+        println(s"$label: trace length ${trace.size} cycles, dumping first 40:")
+        for ((s, c) <- trace.zipWithIndex.take(40)) {
+          println(
+            f"  cycle $c%3d: sdaLow=${s.sdaLow}%5b sdaHigh=${s.sdaHigh}%5b " +
+              f"sclLow=${s.sclLow}%5b sclHigh=${s.sclHigh}%5b"
+          )
+        }
+        val ivStr =
+          intervals.map(iv => s"[${iv.start},${iv.end}]").mkString(", ")
+        println(s"$label: found intervals at: $ivStr")
+        println(s"$label: trace size = ${trace.size}")
+        // Show trace from cycle 190 onward
+        println(s"$label: cycles 190+ detail:")
+        for ((s, c) <- trace.zipWithIndex.drop(190)) {
+          println(
+            f"  cycle $c%3d: sdaLow=${s.sdaLow}%5b sclLow=${s.sclLow}%5b"
+          )
+        }
+      }
+      assert(
+        intervals.size == 9,
+        s"$label: expected 9 SCL-low intervals, got ${intervals.size}"
+      )
+
+      // Q0 + Q1 = 2 × quarterPeriodCyclesReset fabric cycles.
+      val widthLo = 2 * smallCfg.quarterPeriodCyclesReset - 2
+      val widthHi = 2 * smallCfg.quarterPeriodCyclesReset + 2
+      for ((iv, i) <- intervals.zipWithIndex) {
+        val width = iv.end - iv.start + 1
+        assert(
+          width >= widthLo && width <= widthHi,
+          s"$label: bit $i SCL-low width $width outside [$widthLo, $widthHi] cycles"
+        )
+      }
+
+      // Per-bit SDA matches the expected symbol decode.
+      val expectedSyms: Seq[TxSymbol.E] = {
+        val data = (0 until 8).map { i =>
+          if (((0x55 >> (7 - i)) & 1) != 0) TxSymbol.recessive
+          else TxSymbol.dominant
+        }
+        data :+ TxSymbol.hiz
+      }
+      for (((iv, sym), i) <- intervals.zip(expectedSyms).zipWithIndex) {
+        val (eLow, eHigh) = expectedSda(sym, mode)
+        assert(
+          iv.midSda.sdaLow == eLow && iv.midSda.sdaHigh == eHigh,
+          f"$label: bit $i SDA mismatch: expected (low=$eLow, high=$eHigh), " +
+            f"saw (low=${iv.midSda.sdaLow}, high=${iv.midSda.sdaHigh})"
+        )
+      }
+
+      // Between consecutive SCL-low intervals: sclDriveHigh matches PP class.
+      val expectSclHigh = isPpClass(mode)
+      for (i <- 0 until intervals.size - 1) {
+        val gapStart = intervals(i).end + 1
+        val gapEnd = intervals(i + 1).start - 1
+        for (c <- gapStart to gapEnd) {
+          val s = trace(c)
+          assert(
+            s.sclHigh == expectSclHigh && !s.sclLow,
+            f"$label: between bit $i and ${i + 1}, cycle $c: expected SCL " +
+              f"(low=false, high=$expectSclHigh), saw (low=${s.sclLow}, " +
+              f"high=${s.sclHigh})"
+          )
+        }
+      }
+
+      // Bus contention: never both drivers high.
+      for ((s, c) <- trace.zipWithIndex) {
+        assert(
+          !(s.sdaLow && s.sdaHigh),
+          s"$label: cycle $c: SDA contention"
+        )
+        assert(
+          !(s.sclLow && s.sclHigh),
+          s"$label: cycle $c: SCL contention"
+        )
+      }
+
+      val widths = intervals.map(iv => iv.end - iv.start + 1).mkString(",")
+      println(
+        s"$label: ${intervals.size} bits emitted, SCL-low widths [$widths] " +
+          s"cycles, between-bit sclDriveHigh=$expectSclHigh"
+      )
+    }
+  }
+
+  def main(args: Array[String]): Unit = {
+    runMode("i3c-OD", BusMode.i3cOd)
+    runMode("i3c-PP", BusMode.i3cPp)
+    println("BitCycleEngineSmokeSim OK")
+  }
+}
