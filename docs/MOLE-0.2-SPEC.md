@@ -154,8 +154,9 @@ On **all non-bearer opcodes** `[2:0]` is reserved-must-be-zero. The
 hardware decoder checks this bit-triple on every instruction not in the
 WIRE-bearer set; reserved-non-zero encodes to a trap. Bearer opcodes ---
 EMIT_BIT_IMM, EMIT_BIT_REG, EMIT_QUARTER_IMM, EMIT_QUARTER_REG,
-EMIT_BYTE, SAMPLE_BIT_ON_SCL, DRIVE_BIT_ON_SCL --- use `[2:0]` for the
-flag triple as documented above. All other opcodes (every CTRL opcode,
+EMIT_BYTE_IMM, EMIT_BYTE_REG, SAMPLE_BIT_ON_SCL, DRIVE_BIT_ON_SCL ---
+use `[2:0]` for the flag triple as documented above. All other opcodes
+(every CTRL opcode,
 every DATA opcode, plus STRETCH_SCL_IMM and STRETCH_SCL_REG in the WIRE
 group) have `[2:0]` = reserved-must-be-zero.
 
@@ -177,7 +178,7 @@ an opcode's encoding are reserved-must-be-zero on that opcode.
 
 ### 4.1 WIRE group (`group = 0b00`)
 
-Wire-emission and sampling opcodes. Nine live sub-opcodes; seven
+Wire-emission and sampling opcodes. Ten live sub-opcodes; six
 reserved.
 
 | Sub (`[29:26]`) | Mnemonic           | Live? |
@@ -186,12 +187,13 @@ reserved.
 | `0b0001`         | EMIT_BIT_REG       | yes   |
 | `0b0010`         | EMIT_QUARTER_IMM   | yes   |
 | `0b0011`         | EMIT_QUARTER_REG   | yes   |
-| `0b0100`         | EMIT_BYTE          | yes   |
+| `0b0100`         | EMIT_BYTE_REG      | yes   |
 | `0b0101`         | SAMPLE_BIT_ON_SCL  | yes   |
 | `0b0110`         | DRIVE_BIT_ON_SCL   | yes   |
 | `0b0111`         | STRETCH_SCL_IMM    | yes   |
 | `0b1000`         | STRETCH_SCL_REG    | yes   |
-| `0b1001`–`0b1111`| (reserved)         | no    |
+| `0b1001`         | EMIT_BYTE_IMM      | yes   |
+| `0b1010`–`0b1111`| (reserved)         | no    |
 
 ### 4.2 CTRL group (`group = 0b01`)
 
@@ -427,7 +429,7 @@ fields as above; remainder identical to EMIT_QUARTER_IMM.
 
 ---
 
-### 5.5 WIRE.EMIT_BYTE
+### 5.5 WIRE.EMIT_BYTE_REG
 
 Emit eight consecutive SDA bits from R7[7:0], MSB first, each with a
 full SCL pulse. Equivalent to eight sequential EMIT_BIT_IMM operations
@@ -446,17 +448,19 @@ bit: 0 → dominant, 1 → recessive.
 The flags apply to the **ninth bit** (ACK/NAK slot): after the eighth
 data bit the engine clocks one more SCL pulse with SDA driven to `hiz`,
 sampling the line against `expect`/`mask`/`capture`. This means
-`capture=1` on EMIT_BYTE captures the ACK/NAK into R7[0] (and the data
-byte is consumed from R7 before the ACK sample overwrites it; if the
-caller needs the data byte after ACK capture, copy it before issuing
-EMIT_BYTE).
+`capture=1` on EMIT_BYTE_REG captures the ACK/NAK into R7[0] (and the
+data byte is consumed from R7 before the ACK sample overwrites it; if
+the caller needs the data byte after ACK capture, copy it before
+issuing EMIT_BYTE_REG).
 
 **Operands (moleasm):**
 
 ```moleasm
-EMIT_BYTE
-EMIT_BYTE expect=0 mask=1 capture=1
+EMIT_BYTE_REG
+EMIT_BYTE_REG expect=0 mask=1 capture=1
 ```
+
+The bare mnemonic `EMIT_BYTE` is sugar for `EMIT_BYTE_REG` (see §12.3).
 
 **Stage behaviour:** D decodes flags. E iterates eight SCL pulses
 shifting out R7[7:0] MSB first, then one ACK-slot pulse with `hiz` SDA.
@@ -469,22 +473,79 @@ the prior sticky value is preserved. If `mask=1`, `MISMATCH_FLAG` is
 written on the ACK slot (set if sampled bit ≠ `expect`, cleared
 otherwise). `capture=1` writes ACK sample to R7[0]; R7[31:1] zeroed.
 
-**ACK pairing rule:** Every `EMIT_BYTE` with `mask=1` MUST be followed
-textually (in program-counter order, ignoring labels) by one of:
+**ACK pairing rule:** Every `EMIT_BYTE_REG` with `mask=1` MUST be
+followed textually (in program-counter order, ignoring labels) by one
+of:
 
 1. `BRANCH_ON MISMATCH, <target>` — to handle a NAK, OR
 2. `FLAG_CLEAR <mask>` where bit 0 of `<mask>` is set (i.e.
    `mask=0b00001` or any mask with bit 0 = 1) — to discard the ACK
    result.
 
-`EMIT_BYTE` with `mask=0` (fire-and-forget transmit, typical of probe
-traffic where ACK is intentionally ignored) is exempt from this
+`EMIT_BYTE_REG` with `mask=0` (fire-and-forget transmit, typical of
+probe traffic where ACK is intentionally ignored) is exempt from this
 requirement; no follow-up is required.
 
-Labels between the EMIT_BYTE and the pairing instruction do not break
-the pairing analysis (the assembler walks past labels). A program
+Labels between the EMIT_BYTE_REG and the pairing instruction do not
+break the pairing analysis (the assembler walks past labels). A program
 declaring `(use-raw-primitives)` at the top of the source is exempt
 from this check regardless of mask; the engine performs no enforcement.
+
+The same pairing rule applies to `EMIT_BYTE_IMM` (§5.5b) under the
+same conditions; the assembler check (E-WIRE-003) treats both opcodes
+uniformly.
+
+---
+
+### 5.5b WIRE.EMIT_BYTE_IMM
+
+Emit eight consecutive SDA bits from an 8-bit immediate encoded in the
+instruction word, MSB first, each with a full SCL pulse. Functionally
+identical to EMIT_BYTE_REG (§5.5) except the payload comes from the
+instruction rather than R7[7:0]; R7 is **not read** by this opcode.
+
+The motivation is to halve the instruction count of typical
+transactions: a bare `EMIT_BYTE_REG` requires a preceding
+`LOAD_IMM R7, <byte>` (two instructions per byte, plus a load-use
+stall), while `EMIT_BYTE_IMM imm=<byte>` is a single instruction with
+no R7 hazard.
+
+**Encoding:**
+
+```text
+[31:30] group  = 0b00
+[29:26] sub    = 0b1001
+[25:11] reserved = 0
+[10: 3] imm    = payload byte (MSB on SDA first)
+[ 2: 0] flags  (expect[2], mask[1], capture[0])
+```
+
+The payload byte occupies `[10:3]`; the MSB (`[10]`) is shifted out
+first onto SDA. The 15-bit reserved field `[25:11]` is
+reserved-must-be-zero (non-zero → `STATUS_TRAP`).
+
+**Operands (moleasm):**
+
+```moleasm
+EMIT_BYTE_IMM imm=0x48
+EMIT_BYTE_IMM imm=0x48 expect=0 mask=1 capture=1
+```
+
+`imm` is required. Accepted range: `0..255` (decimal, hex `0x...`, or
+binary `0b...`). Out-of-range raises E-RNG-001.
+
+**Stage behaviour:** Identical to EMIT_BYTE_REG except the byte source
+is the instruction's `imm` field, latched in D and consumed in E. R7 is
+not read; no load-use hazard against a prior `LOAD_IMM R7, ...`. Total:
+9 bit periods × 4 quarter-bit clocks per bit = 36 quarter-bit clocks.
+
+**Flag effects:** Identical to EMIT_BYTE_REG. `capture=1` writes the
+ACK sample to R7[0] with R7[31:1] zeroed; because the immediate payload
+is not in R7, there is no data-byte-lost subtlety — the capture is a
+clean overwrite.
+
+**ACK pairing rule:** Identical to EMIT_BYTE_REG (§5.5). The E-WIRE-003
+check treats `EMIT_BYTE_IMM` and `EMIT_BYTE_REG` uniformly.
 
 ---
 
@@ -1318,7 +1379,8 @@ halt entry (see §11).
 (where applicable to the opcode) is treated as a non-write and does
 not affect the prior sticky value of `MISMATCH_FLAG`. Specifically,
 EMIT_BIT_IMM, EMIT_BIT_REG, EMIT_QUARTER_IMM, EMIT_QUARTER_REG,
-EMIT_BYTE, SAMPLE_BIT_ON_SCL, and DRIVE_BIT_ON_SCL with `mask=0`
+EMIT_BYTE_IMM, EMIT_BYTE_REG, SAMPLE_BIT_ON_SCL, and DRIVE_BIT_ON_SCL
+with `mask=0`
 pass through without touching the flag register.
 
 ---
@@ -1514,7 +1576,8 @@ STATUS_RESERVED_HIGH < STATUS_TRAP`.
 - Register names: `R0`–`R7` or `r0`–`r7` (case-insensitive).
 
 **raw/ pragma:** A source file that uses off-spec features (raw register
-capture, reserved `tx_symbol=0b11`, suppressed EMIT_BYTE pairing checks)
+capture, reserved `tx_symbol=0b11`, suppressed EMIT_BYTE_REG /
+EMIT_BYTE_IMM pairing checks)
 must declare the pragma as the first non-comment line:
 
 ```moleasm
@@ -1565,6 +1628,7 @@ rejects it.
 |----------------------|-------------------------|-----------------------------------|
 | `JMP <label>`        | `BRANCH_ON ALWAYS, <label>` | Unconditional jump            |
 | `LOAD_LOOP n`        | `LOAD_IMM R6, n`        | Prime loop counter in R6          |
+| `EMIT_BYTE [...]`    | `EMIT_BYTE_REG [...]`   | Backwards-compat: bare mnemonic   |
 | `HALT`               | `HALT status=0`         | Default status 0                  |
 
 `LOAD_LOOP n` is sugar only. It does not expose a reg argument; the
@@ -1597,10 +1661,16 @@ EMIT_QUARTER_IMM sda=dominant scl=hiz
 EMIT_QUARTER_REG src=R1
 ; word = 0x0C10_0000
 
-; §5.5  EMIT_BYTE  expect=0 mask=1 capture=1
+; §5.5  EMIT_BYTE_REG  expect=0 mask=1 capture=1
 ;   group=00 sub=0100, flags=0b011=3
-EMIT_BYTE expect=0 mask=1 capture=1
+EMIT_BYTE_REG expect=0 mask=1 capture=1
 ; word = 0x1000_0003
+
+; §5.5b EMIT_BYTE_IMM  imm=0x48 (no flags)
+;   group=00 sub=1001 → top 6 bits = 001001 → 0x2400_0000
+;   imm=0x48 at [10:3] → 0x48<<3 = 0x240
+EMIT_BYTE_IMM imm=0x48
+; word = 0x2400_0240
 
 ; §5.6  SAMPLE_BIT_ON_SCL  capture=1
 ;   group=00 sub=0101, dst=R7 at [25:23]=0b111 → 7<<23=0x0380_0000; flags=0b001
@@ -1756,7 +1826,7 @@ stable contract; gaps may appear when codes are removed (noted below).
 | E-REG-001  | Capture steered to non-R7 without raw/ pragma  | `capture must write to R7; use raw/ pragma to override`                       |
 | E-WIRE-001 | `tx_symbol = 0b11` (reserved) used directly    | `tx=reserved (0b11) requires raw/ pragma; use .dw or declare raw/`            |
 | E-WIRE-002 | PP-class target: `scl=recessive` in EMIT_QTR   | `EMIT_QUARTER scl=recessive is illegal in target role under PP-class`         |
-| E-WIRE-003 | `EMIT_BYTE` with `mask=1` not followed by `BRANCH_ON MISMATCH` or `FLAG_CLEAR` with bit 0 set | `EMIT_BYTE mask=1 at line N must be followed by BRANCH_ON MISMATCH or FLAG_CLEAR mask=0b00001; declare '(use-raw-primitives)' to suppress` |
+| E-WIRE-003 | `EMIT_BYTE_IMM` or `EMIT_BYTE_REG` with `mask=1` not followed by `BRANCH_ON MISMATCH` or `FLAG_CLEAR` with bit 0 set | `<OPCODE> mask=1 at line N must be followed by BRANCH_ON MISMATCH or FLAG_CLEAR mask=0b00001; declare '(use-raw-primitives)' to suppress` |
 | E-CTRL-001 | Reserved cond-code value 12–15 in source       | `cond code <N> is reserved; values 12..15 require raw/ pragma`                |
 | E-RAW-001  | Raw feature used without `(use-raw-primitives)` pragma | `use of '<feature>' requires '(use-raw-primitives)' declared at top of source` |
 | E-RAW-002  | `(use-raw-primitives)` pragma appears after first instruction | `raw pragma must be the first non-comment line`                  |
@@ -1788,10 +1858,11 @@ EMIT_BIT_IMM tx=0b11
 SAMPLE_BIT_ON_SCL capture=1     ; OK (defaults to R7)
 ; To steer elsewhere: (use-raw-primitives) pragma required.
 
-; E-WIRE-003: unpaired EMIT_BYTE with mask=1 (no raw/ pragma)
-EMIT_BYTE expect=0 mask=1 capture=1
+; E-WIRE-003: unpaired EMIT_BYTE_REG with mask=1 (no raw/ pragma)
+EMIT_BYTE_REG expect=0 mask=1 capture=1
 HALT                            ; must be preceded by BRANCH_ON MISMATCH
                                 ; or FLAG_CLEAR mask=0b00001
+                                ; (same rule applies to EMIT_BYTE_IMM)
 
 ; E-RAW-001: raw feature without pragma
 SAMPLE_BIT_ON_SCL dst=R3 capture=1   ; capture-to-non-R7 without (use-raw-primitives)
@@ -1829,7 +1900,8 @@ EMIT_BIT_REG src=R2    ; one stall cycle inserted by hardware
 | LOAD_IMM Rd                   | Rd          | EMIT_BIT_REG (src), EMIT_QUARTER_REG (src),      |
 |                               |             | STRETCH_SCL_REG (src), MOV (src), ADD_IMM (src), |
 |                               |             | DEC (src), AND_IMM (src), OR_IMM (src),          |
-|                               |             | XOR_IMM (src), SHIFT (src), EMIT_BYTE (reads R7) |
+|                               |             | XOR_IMM (src), SHIFT (src),                      |
+|                               |             | EMIT_BYTE_REG (reads R7)                         |
 | MOV Rd, Rs                    | Rd          | (same reader set as LOAD_IMM)                    |
 | ADD_IMM Rd, Rs, imm           | Rd          | (same)                                           |
 | DEC Rd                        | Rd          | (same)                                           |
@@ -1839,25 +1911,45 @@ EMIT_BIT_REG src=R2    ; one stall cycle inserted by hardware
 | SHIFT Rd, Rs, dir, amt        | Rd          | (same)                                           |
 | SAMPLE_BIT_ON_SCL (capture=1) | R7          | (same reader set, with src=R7)                   |
 | DRIVE_BIT_ON_SCL (capture=1)  | R7          | (same reader set, with src=R7)                   |
-| EMIT_BIT_* (capture=1)        | R7          | (same, including EMIT_BYTE as writer when cap=1) |
+| EMIT_BIT_* (capture=1)        | R7          | (same, including EMIT_BYTE_REG as writer when cap=1) |
 | EMIT_QUARTER_* (capture=1)    | R7          | (same)                                           |
-| EMIT_BYTE (capture=1)         | R7          | (capture writes ACK bit to R7[0]; same readers)  |
+| EMIT_BYTE_REG (capture=1)     | R7          | (capture writes ACK bit to R7[0]; same readers)  |
+| EMIT_BYTE_IMM (capture=1)     | R7          | (capture writes ACK bit to R7[0]; same readers)  |
 
-**EMIT_BYTE hazard notes:**
+**EMIT_BYTE_REG hazard notes:**
 
-- *As a reader of R7:* EMIT_BYTE always reads R7[7:0] as the payload
-  byte. The load-use hazard applies: `LOAD_IMM R7, 0xAB; EMIT_BYTE`
-  requires one stall cycle (inserted by hardware). The bypass resolves
-  any other write-then-read within the in-flight window.
-- *As a writer of R7:* When `capture=1`, EMIT_BYTE writes the ACK bit
-  to R7[0] at W stage, with the same write timing as SAMPLE_BIT_ON_SCL
-  / DRIVE_BIT_ON_SCL. The bypass operates on the W tick that follows
-  the atomic E loop's final quarter-bit clock; subsequent register
-  reads see the ACK value with zero additional latency.
+- *As a reader of R7:* EMIT_BYTE_REG always reads R7[7:0] as the
+  payload byte. The load-use hazard applies:
+  `LOAD_IMM R7, 0xAB; EMIT_BYTE_REG` requires one stall cycle
+  (inserted by hardware). The bypass resolves any other write-then-read
+  within the in-flight window.
+- *As a writer of R7:* When `capture=1`, EMIT_BYTE_REG writes the ACK
+  bit to R7[0] at W stage, with the same write timing as
+  SAMPLE_BIT_ON_SCL / DRIVE_BIT_ON_SCL. The bypass operates on the W
+  tick that follows the atomic E loop's final quarter-bit clock;
+  subsequent register reads see the ACK value with zero additional
+  latency.
 
 ```moleasm
 LOAD_IMM R7, 0xAB
-EMIT_BYTE                ; one stall cycle: LOAD_IMM R7 → EMIT_BYTE reads R7
+EMIT_BYTE_REG            ; one stall: LOAD_IMM R7 → EMIT_BYTE_REG reads R7
+```
+
+**EMIT_BYTE_IMM hazard notes:**
+
+- *As a reader of R7:* EMIT_BYTE_IMM does **not** read R7; the payload
+  byte is encoded in the instruction's `imm` field. There is no
+  load-use hazard against a prior `LOAD_IMM R7, ...`. This is the
+  primary throughput advantage of EMIT_BYTE_IMM over the
+  `LOAD_IMM R7 + EMIT_BYTE_REG` pair.
+- *As a writer of R7:* When `capture=1`, EMIT_BYTE_IMM writes the ACK
+  bit to R7[0] with identical timing to EMIT_BYTE_REG. Because the
+  payload byte is not in R7, the capture is a clean overwrite — no
+  data-byte-lost subtlety applies.
+
+```moleasm
+LOAD_IMM R0, 0xAB
+EMIT_BYTE_IMM imm=0x48   ; no stall: EMIT_BYTE_IMM does not read R7
 ```
 
 All entries are resolved by the W-to-R bypass network with zero stall
@@ -2052,9 +2144,9 @@ amended in Phase A2 before any v0.2 implementation work is merged:
    (EMIT_QUARTER_IMM), etc. Additionally, the entry "there are four
    bearer opcodes with the flag triple" must be updated: v0.2 has
    **eight** WIRE bearer opcodes (EMIT_BIT_IMM, EMIT_BIT_REG,
-   EMIT_QUARTER_IMM, EMIT_QUARTER_REG, EMIT_BYTE, SAMPLE_BIT_ON_SCL,
-   DRIVE_BIT_ON_SCL, and the stretch pair uses reserved=0 at `[2:0]`
-   so the hardware check still passes).
+   EMIT_QUARTER_IMM, EMIT_QUARTER_REG, EMIT_BYTE_IMM, EMIT_BYTE_REG,
+   SAMPLE_BIT_ON_SCL, DRIVE_BIT_ON_SCL; the stretch pair uses
+   reserved=0 at `[2:0]` so the hardware check still passes).
 
 3. **§3.16 (moleasm syntax locked):** States the v0 syntax is locked.
    Must be updated to permit the v0.2 grammar additions:
