@@ -20,7 +20,7 @@ import spinal.core._
   * width is fixed at **32 bits**. The **opcode field is 6 bits wide** at
   * `{group[31:30], sub[29:26]}` --- 64 slots total across 4 groups of 16
   * sub-opcodes each. The flag triple `{expect[2], mask[1], capture[0]}` is
-  * locked at `[2:0]` on every bearer opcode. All 25 live opcodes: 9 WIRE, 8
+  * locked at `[2:0]` on every bearer opcode. All 26 live opcodes: 10 WIRE, 8
   * CTRL, 8 DATA; LOOP group fully reserved.
   *
   * Wire-format stability. Pre-Phase-0 the binary encoding is still mutable
@@ -45,7 +45,7 @@ import spinal.core._
 
 /** Opcode field --- the 6-bit value `{group[31:30], sub[29:26]}`.
   *
-  * 64 total slots across 4 groups. 25 are live (9 WIRE + 8 CTRL + 8 DATA); 39
+  * 64 total slots across 4 groups. 26 are live (10 WIRE + 8 CTRL + 8 DATA); 38
   * are reserved. The LOOP group (`group=0b11`) is fully reserved.
   *
   * Each element's `.position` is the 6-bit opcode word value:
@@ -60,12 +60,12 @@ object Opcode extends SpinalEnum {
   val emitBitReg = newElement() // 0x01  WIRE sub=0x1
   val emitQuarterImm = newElement() // 0x02  WIRE sub=0x2
   val emitQuarterReg = newElement() // 0x03  WIRE sub=0x3
-  val emitByte = newElement() // 0x04  WIRE sub=0x4
+  val emitByteReg = newElement() // 0x04  WIRE sub=0x4
   val sampleBitOnScl = newElement() // 0x05  WIRE sub=0x5
   val driveBitOnScl = newElement() // 0x06  WIRE sub=0x6
   val stretchSclImm = newElement() // 0x07  WIRE sub=0x7
   val stretchSclReg = newElement() // 0x08  WIRE sub=0x8
-  val wireRes9 = newElement() // 0x09  WIRE reserved
+  val emitByteImm = newElement() // 0x09  WIRE sub=0x9
   val wireResA = newElement() // 0x0A  WIRE reserved
   val wireResB = newElement() // 0x0B  WIRE reserved
   val wireResC = newElement() // 0x0C  WIRE reserved
@@ -127,13 +127,13 @@ object Opcode extends SpinalEnum {
   val loopResE = newElement() // 0x3E  LOOP reserved
   val loopResF = newElement() // 0x3F  LOOP reserved
 
-  /** `true` iff the opcode slot is a live v0.2 opcode (one of the 25 defined in
+  /** `true` iff the opcode slot is a live v0.2 opcode (one of the 26 defined in
     * spec §4). `false` for every reserved slot.
     */
   def isLive(op: Opcode.E): Boolean = op match {
     case `emitBitImm` | `emitBitReg` | `emitQuarterImm` | `emitQuarterReg` |
-        `emitByte` | `sampleBitOnScl` | `driveBitOnScl` | `stretchSclImm` |
-        `stretchSclReg` =>
+        `emitByteReg` | `sampleBitOnScl` | `driveBitOnScl` | `stretchSclImm` |
+        `stretchSclReg` | `emitByteImm` =>
       true
     case `halt` | `branchOn` | `waitOn` | `setBusMode` | `setRole` |
         `flagClear` | `mark` | `loadTiming` =>
@@ -359,7 +359,11 @@ object Instruction {
       capture: Boolean
   ) extends Instruction
 
-  /** WIRE.EMIT_BYTE (spec §5.5)
+  /** WIRE.EMIT_BYTE_REG (spec §5.5)
+    *
+    * Shifts out R7[7:0] MSB first, then clocks an ACK/NAK slot with `hiz` SDA.
+    * The flag triple applies to the ACK slot only (the data bits are not
+    * checked).
     *
     * {{{
     *   [31:26] opcode = group=0b00 sub=0b0100
@@ -367,7 +371,28 @@ object Instruction {
     *   [ 2: 0] flags (applied to the ACK/NAK ninth-bit slot)
     * }}}
     */
-  case class EmitByte(
+  case class EmitByteReg(
+      expect: Boolean,
+      mask: Boolean,
+      capture: Boolean
+  ) extends Instruction
+
+  /** WIRE.EMIT_BYTE_IMM (spec §5.5b)
+    *
+    * Shifts out `imm[7:0]` MSB first, then clocks an ACK/NAK slot with `hiz`
+    * SDA. Single-instruction byte emit --- no `LOAD_IMM R7, ...` setup
+    * required, no load-use hazard on R7. The flag triple applies to the ACK
+    * slot only.
+    *
+    * {{{
+    *   [31:26] opcode = group=0b00 sub=0b1001
+    *   [25:11] reserved = 0
+    *   [10: 3] imm8 (data byte, shifted MSB first on SDA)
+    *   [ 2: 0] flags (applied to the ACK/NAK ninth-bit slot)
+    * }}}
+    */
+  case class EmitByteImm(
+      imm: Int,
       expect: Boolean,
       mask: Boolean,
       capture: Boolean
@@ -680,8 +705,17 @@ object Instruction {
         (src << 20) |
         flagTripleBits(expect, mask, capture)
 
-    case EmitByte(expect, mask, capture) =>
-      opcodeWord(Opcode.emitByte) |
+    case EmitByteReg(expect, mask, capture) =>
+      opcodeWord(Opcode.emitByteReg) |
+        flagTripleBits(expect, mask, capture)
+
+    case EmitByteImm(imm, expect, mask, capture) =>
+      require(
+        imm >= 0 && imm <= 0xff,
+        s"EMIT_BYTE_IMM imm must be 0..255, got $imm"
+      )
+      opcodeWord(Opcode.emitByteImm) |
+        (imm << 3) |
         flagTripleBits(expect, mask, capture)
 
     case SampleBitOnScl(expect, mask, capture) =>
@@ -910,8 +944,16 @@ object Instruction {
           capture = bitSet(word, CAPTURE_BIT)
         )
 
-      case Opcode.emitByte =>
-        EmitByte(
+      case Opcode.emitByteReg =>
+        EmitByteReg(
+          expect = bitSet(word, EXPECT_BIT),
+          mask = bitSet(word, MASK_BIT),
+          capture = bitSet(word, CAPTURE_BIT)
+        )
+
+      case Opcode.emitByteImm =>
+        EmitByteImm(
+          imm = (word >>> 3) & 0xff,
           expect = bitSet(word, EXPECT_BIT),
           mask = bitSet(word, MASK_BIT),
           capture = bitSet(word, CAPTURE_BIT)

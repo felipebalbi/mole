@@ -276,31 +276,81 @@ object InstructionSim extends App {
   )
 
   // ------------------------------------------------------------------
-  // §5.5  EMIT_BYTE
+  // §5.5  EMIT_BYTE_REG
   // ------------------------------------------------------------------
 
-  println("--- InstructionSim: EMIT_BYTE round-trip ---")
+  println("--- InstructionSim: EMIT_BYTE_REG round-trip ---")
 
   for ((expect, mask, capture) <- allFlagTriples) {
-    val insn = EmitByte(expect, mask, capture)
+    val insn = EmitByteReg(expect, mask, capture)
     val word = roundTrip(insn)
-    assertOpcode(word, Opcode.emitByte, "EMIT_BYTE")
-    assertReservedZero(word, 25, 3, "EMIT_BYTE")
-    assertFlagTriple(word, expect, mask, capture, "EMIT_BYTE")
+    assertOpcode(word, Opcode.emitByteReg, "EMIT_BYTE_REG")
+    assertReservedZero(word, 25, 3, "EMIT_BYTE_REG")
+    assertFlagTriple(word, expect, mask, capture, "EMIT_BYTE_REG")
   }
-  // Golden §12.4: EMIT_BYTE expect=0 mask=1 capture=1 → 0x1000_0003
+  // Golden §12.4: EMIT_BYTE_REG expect=0 mask=1 capture=1 → 0x1000_0003
   assertGolden(
-    encode(EmitByte(false, true, true)),
+    encode(EmitByteReg(false, true, true)),
     0x1000_0003L,
-    "EMIT_BYTE expect=0 mask=1 capture=1 golden"
+    "EMIT_BYTE_REG expect=0 mask=1 capture=1 golden"
   )
-  // Additional: EMIT_BYTE (no flags) → 0x1000_0000
+  // Additional: EMIT_BYTE_REG (no flags) → 0x1000_0000
   assertGolden(
-    encode(EmitByte(false, false, false)),
+    encode(EmitByteReg(false, false, false)),
     0x1000_0000L,
-    "EMIT_BYTE no-flags golden"
+    "EMIT_BYTE_REG no-flags golden"
   )
-  println(s"  EMIT_BYTE: ${allFlagTriples.size} round-trips OK")
+  println(s"  EMIT_BYTE_REG: ${allFlagTriples.size} round-trips OK")
+
+  // ------------------------------------------------------------------
+  // §5.5b  EMIT_BYTE_IMM
+  // ------------------------------------------------------------------
+
+  println("--- InstructionSim: EMIT_BYTE_IMM round-trip ---")
+
+  // Exhaustive round-trip across all 256 imm values × all flag triples.
+  for (imm <- 0 to 0xff; (expect, mask, capture) <- allFlagTriples) {
+    val insn = EmitByteImm(imm, expect, mask, capture)
+    val word = roundTrip(insn)
+    assertOpcode(word, Opcode.emitByteImm, "EMIT_BYTE_IMM")
+    assertReservedZero(word, 25, 11, "EMIT_BYTE_IMM")
+    // imm field lives at [10:3]
+    val immField = (word >>> 3) & 0xff
+    assert(
+      immField == imm,
+      f"EMIT_BYTE_IMM: imm field 0x$immField%02X != expected 0x$imm%02X" +
+        f" (word=0x${word.toLong & 0xffffffffL}%08X)"
+    )
+    assertFlagTriple(word, expect, mask, capture, "EMIT_BYTE_IMM")
+  }
+  // Golden §12.4: EMIT_BYTE_IMM imm=0x48 (no flags) → 0x2400_0240
+  assertGolden(
+    encode(EmitByteImm(0x48, false, false, false)),
+    0x2400_0240L,
+    "EMIT_BYTE_IMM imm=0x48 no-flags golden"
+  )
+  // Additional: matches Rust encoder unit tests (mole-asm/src/encoder.rs).
+  //   EMIT_BYTE_IMM imm=0xAB expect=1 mask=1 capture=0 → 0x2400_055E
+  assertGolden(
+    encode(EmitByteImm(0xab, true, true, false)),
+    0x2400_055eL,
+    "EMIT_BYTE_IMM imm=0xAB expect=1 mask=1 golden"
+  )
+  //   EMIT_BYTE_IMM imm=0xFF all flags → 0x2400_07FF
+  assertGolden(
+    encode(EmitByteImm(0xff, true, true, true)),
+    0x2400_07ffL,
+    "EMIT_BYTE_IMM imm=0xFF all-flags golden"
+  )
+  //   EMIT_BYTE_IMM imm=0x00 no flags → 0x2400_0000
+  assertGolden(
+    encode(EmitByteImm(0x00, false, false, false)),
+    0x2400_0000L,
+    "EMIT_BYTE_IMM imm=0x00 no-flags golden"
+  )
+  println(
+    s"  EMIT_BYTE_IMM: ${256 * allFlagTriples.size} round-trips OK"
+  )
 
   // ------------------------------------------------------------------
   // §5.6  SAMPLE_BIT_ON_SCL
@@ -1029,7 +1079,7 @@ object InstructionSim extends App {
   } catch { case _: IllegalArgumentException => () }
   // Payload overflow
   try {
-    ReservedV05(Opcode.wireRes9, 1 << 26)
+    ReservedV05(Opcode.wireResA, 1 << 26)
     sys.error("ReservedV05 payload overflow should have thrown")
   } catch { case _: IllegalArgumentException => () }
   println(
@@ -1061,7 +1111,8 @@ object InstructionSim extends App {
         "EMIT_QUARTER_REG",
         (e, m, c) => EmitQuarterReg(0, e, m, c)
       ),
-      ("EMIT_BYTE", (e, m, c) => EmitByte(e, m, c)),
+      ("EMIT_BYTE_REG", (e, m, c) => EmitByteReg(e, m, c)),
+      ("EMIT_BYTE_IMM", (e, m, c) => EmitByteImm(0, e, m, c)),
       ("SAMPLE_BIT_ON_SCL", (e, m, c) => SampleBitOnScl(e, m, c)),
       (
         "DRIVE_BIT_ON_SCL",
