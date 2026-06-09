@@ -1174,17 +1174,44 @@ case class EnginePipeline(cfg: MoleConfig) extends Component {
   regFile.io.writeAddr := w(PipeStageables.WRITE_REG_ADDR)
   regFile.io.writeData := w(PipeStageables.WRITE_REG_DATA)
 
-  // Commit ring push and advance ring pointer.
+  // Commit ring push.
+  //
+  // Ring layout (spec §11 / mole-abi):
+  //   resultBase                       — first record-stream slot
+  //   resultBase + ringWrPtr           — next free record slot
+  //   recordLimit = resultLimit - 1    — last writable record slot
+  //   resultLimit = resultBase + resultWordCount - 1  — HALT reserved slot
+  //
+  // HALT writes always land at resultLimit and do NOT advance ringWrPtr.
+  // Non-HALT writes (CAPTURE today; MARK in C.8) write at
+  // resultBase + ringWrPtr and advance ringWrPtr, but only while the
+  // new pointer would still leave HALT's reserved slot untouched
+  // (ringWrPtr <= resultWordCount - 2). Beyond that, set ringOverflow
+  // and drop the write so the HALT slot can never be overwritten.
   when(w.down.isFiring && w(PipeStageables.RING_WRITE_VALID)) {
-    io.ringWrite.valid := True
-    io.ringWrite.payload.addr :=
-      (U(resultBase, spramAddrWidth bits) +
-        ringWrPtr.resize(spramAddrWidth bits)).resized
-    io.ringWrite.payload.data := w(PipeStageables.RING_WRITE_DATA)
-    when(ringWrPtr < U(resultWordCount - 1, ringPtrWidth bits)) {
-      ringWrPtr := ringWrPtr + 1
+    when(w(PipeStageables.HALT_REQUEST)) {
+      // HALT: address fixed at resultLimit, no pointer advance.
+      io.ringWrite.valid := True
+      io.ringWrite.payload.addr := U(
+        resultBase + resultWordCount - 1,
+        spramAddrWidth bits
+      )
+      io.ringWrite.payload.data := w(PipeStageables.RING_WRITE_DATA)
     } otherwise {
-      ringOverflow := True
+      // Non-HALT record: only commit while there is still room before
+      // the reserved HALT slot. recordLimit ringWrPtr range is
+      // 0 .. resultWordCount - 2 inclusive.
+      when(ringWrPtr < U(resultWordCount - 1, ringPtrWidth bits)) {
+        io.ringWrite.valid := True
+        io.ringWrite.payload.addr :=
+          (U(resultBase, spramAddrWidth bits) +
+            ringWrPtr.resize(spramAddrWidth bits)).resized
+        io.ringWrite.payload.data := w(PipeStageables.RING_WRITE_DATA)
+        ringWrPtr := ringWrPtr + 1
+      } otherwise {
+        // No room before HALT slot: drop the record, latch overflow.
+        ringOverflow := True
+      }
     }
   }
 
@@ -1195,8 +1222,19 @@ case class EnginePipeline(cfg: MoleConfig) extends Component {
     haltStatusReg := w(PipeStageables.RING_WRITE_DATA)(27 downto 23).asUInt
   }
 
-  // Stall W when ring write is back-pressured.
-  w.haltWhen(w(PipeStageables.RING_WRITE_VALID) && !io.ringWrite.ready)
+  // Stall W when a ring write must actually issue but is back-pressured.
+  // We must stall when the W payload requests a ring write AND we are
+  // actually driving io.ringWrite.valid this cycle. Specifically, HALT
+  // always issues (we always set valid for HALT_REQUEST), and non-HALT
+  // issues only when ringWrPtr is below the reserved-HALT-slot
+  // threshold. If the non-HALT write is being dropped (overflow), no
+  // back-pressure stall is needed — we silently discard.
+  val wWillIssueRingWrite =
+    w(PipeStageables.RING_WRITE_VALID) && (
+      w(PipeStageables.HALT_REQUEST) ||
+        (ringWrPtr < U(resultWordCount - 1, ringPtrWidth bits))
+    )
+  w.haltWhen(wWillIssueRingWrite && !io.ringWrite.ready)
 
   // Flush pipeline on halt commit.
   val flush = False

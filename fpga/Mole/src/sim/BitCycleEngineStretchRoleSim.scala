@@ -95,29 +95,18 @@ object BitCycleEngineStretchRoleSim extends App {
       status: Int
   )
 
-  /** Decode a v0.2 32-bit HALT ring word per spec §11: [31:30] = 0b11 (tag)
+  /** Decode the v0.2 32-bit HALT ring word per spec §11: [31:30] = 0b11 (tag)
     * [29] = overflow [28] = mismatch [27:23] = status (5 bits) [22:0] =
     * reserved
+    *
+    * HALT always lands at `resultLimit`, the reserved last slot of the ring
+    * (non-HALT records can never overwrite it). Read it directly.
     */
   private def readHalt(dut: BitCycleEngineTargetDut): HaltWord = {
-    // C.7 NOTE: the v0.2 engine writes HALT at the current ringWrPtr
-    // position (not at resultLimit as v0 did). For a program that emits
-    // no CAPTURE/MARK records, ringWrPtr is 0 at HALT, so the HALT word
-    // lands at resultBase. Scan the ring to find the HALT-tagged word.
-    var foundAt = -1
-    var halt: Int = 0
-    var i = 0
-    while (i < resultWordCount && foundAt < 0) {
-      val w = debugRead(dut, resultBase + i)
-      if (((w >>> 30) & 0x3) == 0x3) {
-        foundAt = resultBase + i
-        halt = w
-      }
-      i += 1
-    }
+    val halt = debugRead(dut, resultLimit)
     require(
-      foundAt >= 0,
-      f"no HALT tag found in ring [$resultBase, $resultLimit]"
+      ((halt >>> 30) & 0x3) == 0x3,
+      f"word at resultLimit=$resultLimit is not a HALT tag (=0x$halt%08x)"
     )
     HaltWord(
       overflow = ((halt >> 29) & 1) != 0,
