@@ -18,8 +18,8 @@
 //! [ 2: 0] flags   (3 bits: flag triple on bearer opcodes; else 0)
 //! ```
 //!
-//! `opcode` = `{group[31:30], sub[29:26]}`.  All 25 live opcodes:
-//! 9 WIRE, 8 CTRL, 8 DATA.
+//! `opcode` = `{group[31:30], sub[29:26]}`.  All 26 live opcodes:
+//! 10 WIRE, 8 CTRL, 8 DATA.
 
 // -----------------------------------------------------------------------
 // Group / sub constants
@@ -34,11 +34,12 @@ const S_EMIT_BIT_IMM: u32 = 0b0000;
 const S_EMIT_BIT_REG: u32 = 0b0001;
 const S_EMIT_QUARTER_IMM: u32 = 0b0010;
 const S_EMIT_QUARTER_REG: u32 = 0b0011;
-const S_EMIT_BYTE: u32 = 0b0100;
+const S_EMIT_BYTE_REG: u32 = 0b0100;
 const S_SAMPLE_BIT_ON_SCL: u32 = 0b0101;
 const S_DRIVE_BIT_ON_SCL: u32 = 0b0110;
 const S_STRETCH_SCL_IMM: u32 = 0b0111;
 const S_STRETCH_SCL_REG: u32 = 0b1000;
+const S_EMIT_BYTE_IMM: u32 = 0b1001;
 
 // CTRL sub-opcodes
 const S_HALT: u32 = 0b0000;
@@ -202,7 +203,7 @@ pub(crate) fn enc_emit_quarter_reg(
         | flag_triple(expect, mask, capture))
 }
 
-/// WIRE.EMIT_BYTE (§5.5)
+/// WIRE.EMIT_BYTE_REG (§5.5)
 ///
 /// ```text
 /// [31:30] group  = 0b00
@@ -210,8 +211,31 @@ pub(crate) fn enc_emit_quarter_reg(
 /// [25: 3] reserved = 0
 /// [ 2: 0] flags
 /// ```
-pub(crate) fn enc_emit_byte(expect: bool, mask: bool, capture: bool) -> u32 {
-    opcode(G_WIRE, S_EMIT_BYTE) | flag_triple(expect, mask, capture)
+///
+/// Reads payload byte from R7[7:0] at E stage.
+pub(crate) fn enc_emit_byte_reg(expect: bool, mask: bool, capture: bool) -> u32 {
+    opcode(G_WIRE, S_EMIT_BYTE_REG) | flag_triple(expect, mask, capture)
+}
+
+/// WIRE.EMIT_BYTE_IMM (§5.5b)
+///
+/// ```text
+/// [31:30] group  = 0b00
+/// [29:26] sub    = 0b1001
+/// [25:11] reserved = 0
+/// [10: 3] imm    = payload byte (MSB on SDA first)
+/// [ 2: 0] flags
+/// ```
+///
+/// The 8-bit payload occupies `[10:3]`; the MSB (`[10]`) is shifted
+/// out first onto SDA. Unlike EMIT_BYTE_REG, this opcode does not
+/// read R7 — the payload is encoded in the instruction word, so a
+/// preceding `LOAD_IMM R7, ...` introduces no load-use hazard. The
+/// range check on `imm` is trivially satisfied by the `u8` argument
+/// type (caller is responsible for E-RNG-001 reporting on overflow
+/// from a wider source-level literal).
+pub(crate) fn enc_emit_byte_imm(imm: u8, expect: bool, mask: bool, capture: bool) -> u32 {
+    opcode(G_WIRE, S_EMIT_BYTE_IMM) | (u32::from(imm) << 3) | flag_triple(expect, mask, capture)
 }
 
 /// WIRE.SAMPLE_BIT_ON_SCL (§5.6)
@@ -736,11 +760,30 @@ mod tests {
     }
 
     #[test]
-    fn spec_5_5_emit_byte_expect_0_mask_1_capture_1() {
-        // §5.5  EMIT_BYTE  expect=0 mask=1 capture=1
+    fn spec_5_5_emit_byte_reg_expect_0_mask_1_capture_1() {
+        // §5.5  EMIT_BYTE_REG  expect=0 mask=1 capture=1
         //   group=00 sub=0100, flags=0b011=3
         // word = 0x1000_0003
-        assert_eq!(enc_emit_byte(false, true, true), 0x1000_0003);
+        assert_eq!(enc_emit_byte_reg(false, true, true), 0x1000_0003);
+    }
+
+    #[test]
+    fn spec_5_5b_emit_byte_imm_0x48_no_flags() {
+        // §5.5b EMIT_BYTE_IMM  imm=0x48 (no flags)
+        //   group=00 sub=1001 → top 6 bits = 001001 → 0x2400_0000
+        //   imm=0x48 at [10:3] → 0x48<<3 = 0x240
+        // word = 0x2400_0240
+        assert_eq!(enc_emit_byte_imm(0x48, false, false, false), 0x2400_0240);
+    }
+
+    #[test]
+    fn spec_5_5b_emit_byte_imm_with_flags() {
+        // EMIT_BYTE_IMM imm=0xAB expect=1 mask=1 capture=0
+        //   group=00 sub=1001 → 0x2400_0000
+        //   imm=0xAB at [10:3] → 0xAB<<3 = 0x558
+        //   flags = 0b110 = 6
+        // word = 0x2400_055E
+        assert_eq!(enc_emit_byte_imm(0xAB, true, true, false), 0x2400_055E);
     }
 
     #[test]
@@ -1064,8 +1107,24 @@ mod tests {
     }
 
     #[test]
-    fn emit_byte_no_flags() {
-        // EMIT_BYTE (no flags): group=00 sub=0100 → 0x1000_0000
-        assert_eq!(enc_emit_byte(false, false, false), 0x1000_0000);
+    fn emit_byte_reg_no_flags() {
+        // EMIT_BYTE_REG (no flags): group=00 sub=0100 → 0x1000_0000
+        assert_eq!(enc_emit_byte_reg(false, false, false), 0x1000_0000);
+    }
+
+    #[test]
+    fn emit_byte_imm_zero_payload_no_flags() {
+        // EMIT_BYTE_IMM imm=0 (no flags): group=00 sub=1001 → 0x2400_0000
+        assert_eq!(enc_emit_byte_imm(0, false, false, false), 0x2400_0000);
+    }
+
+    #[test]
+    fn emit_byte_imm_full_payload_all_flags() {
+        // EMIT_BYTE_IMM imm=0xFF expect=1 mask=1 capture=1
+        //   group=00 sub=1001 → 0x2400_0000
+        //   imm=0xFF<<3 = 0x7F8
+        //   flags = 0b111 = 7
+        // word = 0x2400_07FF
+        assert_eq!(enc_emit_byte_imm(0xFF, true, true, true), 0x2400_07FF);
     }
 }

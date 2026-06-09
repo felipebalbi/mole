@@ -87,7 +87,9 @@ pub(crate) const MNEMONICS: &[&str] = &[
     "EMIT_BIT_REG",
     "EMIT_QUARTER_IMM",
     "EMIT_QUARTER_REG",
-    "EMIT_BYTE",
+    "EMIT_BYTE_IMM",
+    "EMIT_BYTE_REG",
+    "EMIT_BYTE", // sugar → EMIT_BYTE_REG (§12.3)
     "SAMPLE_BIT_ON_SCL",
     "DRIVE_BIT_ON_SCL",
     "STRETCH_SCL_IMM",

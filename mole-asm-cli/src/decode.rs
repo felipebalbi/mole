@@ -22,11 +22,12 @@ const S_EMIT_BIT_IMM: u32 = 0b0000;
 const S_EMIT_BIT_REG: u32 = 0b0001;
 const S_EMIT_QUARTER_IMM: u32 = 0b0010;
 const S_EMIT_QUARTER_REG: u32 = 0b0011;
-const S_EMIT_BYTE: u32 = 0b0100;
+const S_EMIT_BYTE_REG: u32 = 0b0100;
 const S_SAMPLE_BIT_ON_SCL: u32 = 0b0101;
 const S_DRIVE_BIT_ON_SCL: u32 = 0b0110;
 const S_STRETCH_SCL_IMM: u32 = 0b0111;
 const S_STRETCH_SCL_REG: u32 = 0b1000;
+const S_EMIT_BYTE_IMM: u32 = 0b1001;
 
 // CTRL sub-opcodes
 const S_HALT: u32 = 0b0000;
@@ -210,15 +211,24 @@ fn decode_wire(word: u32, sub: u32) -> Decoded {
                 known: true,
             }
         }
-        S_EMIT_BYTE => {
-            // [2:0] flags only
+        S_EMIT_BYTE_REG => {
+            // [2:0] flags only; payload comes from R7[7:0] at runtime.
             let flags = fmt_flags(word);
             let text = if flags.is_empty() {
-                "EMIT_BYTE".to_string()
+                "EMIT_BYTE_REG".to_string()
             } else {
-                format!("EMIT_BYTE{flags}")
+                format!("EMIT_BYTE_REG{flags}")
             };
             Decoded { text, known: true }
+        }
+        S_EMIT_BYTE_IMM => {
+            // [10:3] imm payload (MSB on SDA first); [2:0] flags.
+            let imm = (word >> 3) & 0xFF;
+            let flags = fmt_flags(word);
+            Decoded {
+                text: format!("EMIT_BYTE_IMM imm=0x{imm:02X}{flags}"),
+                known: true,
+            }
         }
         S_SAMPLE_BIT_ON_SCL => {
             // [25:23] dst, [2:0] flags
@@ -549,31 +559,71 @@ mod tests {
         assert!(d.text.contains("R1"), "{}", d.text);
     }
 
-    // §5.5 EMIT_BYTE with flags — the assembler requires a paired
+    // §5.5 EMIT_BYTE_REG with flags — the assembler requires a paired
     // BRANCH_ON MISMATCH when mask=1, so we supply one.  We verify
-    // the body word at index 2 (the EMIT_BYTE itself).
+    // the body word at index 2 (the EMIT_BYTE_REG itself). Bare
+    // `EMIT_BYTE` source still works (sugar → EMIT_BYTE_REG, §12.3).
     #[test]
-    fn decode_emit_byte() {
-        // Pair EMIT_BYTE mask=1 with BRANCH_ON MISMATCH per E-WIRE-003.
-        let src = "EMIT_BYTE expect=0 mask=1 capture=1\nBRANCH_ON MISMATCH, 0\n";
+    fn decode_emit_byte_reg() {
+        // Pair EMIT_BYTE_REG mask=1 with BRANCH_ON MISMATCH per E-WIRE-003.
+        let src = "EMIT_BYTE_REG expect=0 mask=1 capture=1\nBRANCH_ON MISMATCH, 0\n";
         let words = mole_asm::assemble(src, "<test>").unwrap();
-        // words[0]=magic, [1]=length, [2]=EMIT_BYTE, [3]=BRANCH_ON
+        // words[0]=magic, [1]=length, [2]=EMIT_BYTE_REG, [3]=BRANCH_ON
         let w = words[2];
         assert_eq!(w, 0x1000_0003);
         let d = decode_word(w);
         assert!(d.known);
-        assert!(d.text.contains("EMIT_BYTE"), "{}", d.text);
+        assert!(d.text.contains("EMIT_BYTE_REG"), "{}", d.text);
         assert!(d.text.contains("mask=1"), "{}", d.text);
     }
 
-    // §5.5 EMIT_BYTE no flags
+    // §5.5 bare `EMIT_BYTE` source is sugar for EMIT_BYTE_REG;
+    // round-trip should still print the canonical EMIT_BYTE_REG name.
     #[test]
-    fn decode_emit_byte_no_flags() {
+    fn decode_emit_byte_sugar_round_trip() {
         let w = asm_body("EMIT_BYTE\n");
         assert_eq!(w, 0x1000_0000);
         let d = decode_word(w);
         assert!(d.known);
-        assert_eq!(d.text.trim(), "EMIT_BYTE");
+        assert_eq!(d.text.trim(), "EMIT_BYTE_REG");
+    }
+
+    // §5.5 EMIT_BYTE_REG no flags
+    #[test]
+    fn decode_emit_byte_reg_no_flags() {
+        let w = asm_body("EMIT_BYTE_REG\n");
+        assert_eq!(w, 0x1000_0000);
+        let d = decode_word(w);
+        assert!(d.known);
+        assert_eq!(d.text.trim(), "EMIT_BYTE_REG");
+    }
+
+    // §5.5b EMIT_BYTE_IMM imm=0x48 (no flags)
+    //   group=00 sub=1001 → 0x2400_0000
+    //   imm=0x48 at [10:3] → 0x48<<3 = 0x240
+    #[test]
+    fn decode_emit_byte_imm_no_flags() {
+        let w = asm_body("EMIT_BYTE_IMM imm=0x48\n");
+        assert_eq!(w, 0x2400_0240);
+        let d = decode_word(w);
+        assert!(d.known);
+        assert!(d.text.contains("EMIT_BYTE_IMM"), "{}", d.text);
+        assert!(d.text.contains("imm=0x48"), "{}", d.text);
+    }
+
+    // §5.5b EMIT_BYTE_IMM with full flag triple and ACK-pairing follow-up.
+    #[test]
+    fn decode_emit_byte_imm_with_flags() {
+        let src = "EMIT_BYTE_IMM imm=0xAB expect=1 mask=1 capture=1\n\
+                   BRANCH_ON MISMATCH, 0\n";
+        let words = mole_asm::assemble(src, "<test>").unwrap();
+        // words[0]=magic, [1]=length, [2]=EMIT_BYTE_IMM, [3]=BRANCH_ON
+        let w = words[2];
+        let d = decode_word(w);
+        assert!(d.known);
+        assert!(d.text.contains("EMIT_BYTE_IMM"), "{}", d.text);
+        assert!(d.text.contains("imm=0xAB"), "{}", d.text);
+        assert!(d.text.contains("mask=1"), "{}", d.text);
     }
 
     // §5.6 SAMPLE_BIT_ON_SCL
@@ -880,7 +930,7 @@ mod tests {
 
     // Round-trip test: assemble → decode → verify mnemonic name preserved
     #[test]
-    fn roundtrip_all_25_opcodes() {
+    fn roundtrip_all_26_opcodes() {
         let programs = [
             ("EMIT_BIT_IMM", "EMIT_BIT_IMM tx=dominant\n"),
             ("EMIT_BIT_REG", "EMIT_BIT_REG src=R0\n"),
@@ -889,7 +939,8 @@ mod tests {
                 "EMIT_QUARTER_IMM sda=recessive scl=recessive\n",
             ),
             ("EMIT_QUARTER_REG", "EMIT_QUARTER_REG src=R1\n"),
-            ("EMIT_BYTE", "EMIT_BYTE\n"),
+            ("EMIT_BYTE_REG", "EMIT_BYTE_REG\n"),
+            ("EMIT_BYTE_IMM", "EMIT_BYTE_IMM imm=0x48\n"),
             ("SAMPLE_BIT_ON_SCL", "SAMPLE_BIT_ON_SCL capture=1\n"),
             ("DRIVE_BIT_ON_SCL", "DRIVE_BIT_ON_SCL tx=hiz\n"),
             ("STRETCH_SCL_IMM", "STRETCH_SCL_IMM 4\n"),

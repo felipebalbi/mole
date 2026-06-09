@@ -67,11 +67,12 @@ S_EMIT_BIT_IMM:     int = 0b0000
 S_EMIT_BIT_REG:     int = 0b0001
 S_EMIT_QUARTER_IMM: int = 0b0010
 S_EMIT_QUARTER_REG: int = 0b0011
-S_EMIT_BYTE:        int = 0b0100
+S_EMIT_BYTE_REG:    int = 0b0100
 S_SAMPLE_BIT_ON_SCL: int = 0b0101
 S_DRIVE_BIT_ON_SCL: int = 0b0110
 S_STRETCH_SCL_IMM:  int = 0b0111
 S_STRETCH_SCL_REG:  int = 0b1000
+S_EMIT_BYTE_IMM:    int = 0b1001
 
 # CTRL sub-opcodes
 S_HALT:         int = 0b0000
@@ -161,7 +162,8 @@ MNEMONICS = frozenset([
     # WIRE group
     "EMIT_BIT_IMM", "EMIT_BIT_REG",
     "EMIT_QUARTER_IMM", "EMIT_QUARTER_REG",
-    "EMIT_BYTE",
+    "EMIT_BYTE_IMM", "EMIT_BYTE_REG",
+    "EMIT_BYTE",  # sugar → EMIT_BYTE_REG (§12.3)
     "SAMPLE_BIT_ON_SCL", "DRIVE_BIT_ON_SCL",
     "STRETCH_SCL_IMM", "STRETCH_SCL_REG",
     # CTRL group
@@ -316,12 +318,33 @@ def enc_emit_quarter_reg(src: int, expect: bool, mask: bool, capture: bool,
             | _flag_triple(expect, mask, capture))
 
 
-def enc_emit_byte(expect: bool, mask: bool, capture: bool) -> int:
-    """WIRE.EMIT_BYTE (§5.5).
+def enc_emit_byte_reg(expect: bool, mask: bool, capture: bool) -> int:
+    """WIRE.EMIT_BYTE_REG (§5.5).
 
     [31:30]=00 [29:26]=0100 [25:3]=0 [2:0]=flags
+    Payload comes from R7[7:0] at runtime.
     """
-    return _opcode(GROUP_WIRE, S_EMIT_BYTE) | _flag_triple(expect, mask, capture)
+    return (_opcode(GROUP_WIRE, S_EMIT_BYTE_REG)
+            | _flag_triple(expect, mask, capture))
+
+
+def enc_emit_byte_imm(imm: int, expect: bool, mask: bool, capture: bool,
+                       line: int = 0, filename: str = "<unknown>") -> int:
+    """WIRE.EMIT_BYTE_IMM (§5.5b).
+
+    [31:30]=00 [29:26]=1001 [25:11]=0 [10:3]=imm [2:0]=flags
+
+    The 8-bit payload is encoded in the instruction word; the engine
+    does not read R7. Caller is responsible for range-checking `imm`
+    to 0..255 (E-RNG-001 site lives in the dispatcher).
+    """
+    if not (0 <= imm <= 255):
+        raise AsmError("E-RNG-001",
+                       f"EMIT_BYTE_IMM imm must be 0..255, got {imm}",
+                       line, filename)
+    return (_opcode(GROUP_WIRE, S_EMIT_BYTE_IMM)
+            | ((imm & 0xFF) << 3)
+            | _flag_triple(expect, mask, capture))
 
 
 def enc_sample_bit_on_scl(dst: int, expect: bool, mask: bool, capture: bool,
@@ -1366,19 +1389,49 @@ def _encode_mnemonic(mne: str, stmt: Statement, pc: int,
         return enc_emit_quarter_reg(src, e, mk, c, ln, fn)
 
     # ------------------------------------------------------------------
-    if mne == "EMIT_BYTE":
+    # EMIT_BYTE_REG (canonical). Bare `EMIT_BYTE` is sugar for
+    # EMIT_BYTE_REG (§12.3); both forms hit this branch.
+    if mne in ("EMIT_BYTE", "EMIT_BYTE_REG"):
         kv = _parse_kv_operands(stmt, ["expect", "mask", "capture"])
         e, mk, c = _resolve_flag_triple(kv, stmt)
         # §5.5 E-WIRE-003: mask=1 must be followed by pairing instruction.
         if mk and not raw_mode:
             if not _find_emit_byte_pair(pc_stmts, stmt_idx + 1, syms):
                 raise AsmError("E-WIRE-003",
-                               f"EMIT_BYTE mask=1 at line {ln} must be "
+                               f"EMIT_BYTE_REG mask=1 at line {ln} must be "
                                f"followed by BRANCH_ON MISMATCH or "
                                f"FLAG_CLEAR with bit 0 set; declare "
                                f"'(use-raw-primitives)' to suppress",
                                ln, fn)
-        return enc_emit_byte(e, mk, c)
+        return enc_emit_byte_reg(e, mk, c)
+
+    # ------------------------------------------------------------------
+    # EMIT_BYTE_IMM imm=<byte> [expect=... mask=... capture=...]
+    # Single-instruction byte emit with the payload in the instruction
+    # word (§5.5b); does not read R7. Same ACK-pairing rule as
+    # EMIT_BYTE_REG.
+    if mne == "EMIT_BYTE_IMM":
+        kv = _parse_kv_operands(stmt, ["imm", "expect", "mask", "capture"])
+        if "imm" not in kv:
+            raise AsmError("E-OP-001",
+                           "EMIT_BYTE_IMM requires imm=<byte>", ln, fn)
+        imm_val = _parse_int(kv["imm"], ln, fn)
+        if not (0 <= imm_val <= 255):
+            raise AsmError("E-RNG-001",
+                           f"EMIT_BYTE_IMM imm must be 0..255, "
+                           f"got {imm_val}",
+                           ln, fn)
+        e, mk, c = _resolve_flag_triple(kv, stmt)
+        # §5.5b inherits §5.5 E-WIRE-003 pairing rule.
+        if mk and not raw_mode:
+            if not _find_emit_byte_pair(pc_stmts, stmt_idx + 1, syms):
+                raise AsmError("E-WIRE-003",
+                               f"EMIT_BYTE_IMM mask=1 at line {ln} must be "
+                               f"followed by BRANCH_ON MISMATCH or "
+                               f"FLAG_CLEAR with bit 0 set; declare "
+                               f"'(use-raw-primitives)' to suppress",
+                               ln, fn)
+        return enc_emit_byte_imm(imm_val, e, mk, c, ln, fn)
 
     # ------------------------------------------------------------------
     if mne == "SAMPLE_BIT_ON_SCL":
@@ -1795,13 +1848,14 @@ def _self_check() -> int:
           f"got {crc16_xmodem(b''):#06x}")
 
     # ------------------------------------------------------------------
-    # 3. §12.4 worked examples (25 total)
+    # 3. §12.4 worked examples (26 total: 25 live opcodes + §5.5b EMIT_BYTE_IMM)
     #
     # §5.11: the example uses a label "loop_top" that is 4 words before
     # the BRANCH_ON.  We lay out the source to produce exactly offset=-4.
     # For each example we record (source, expected_first_body_word, section).
     # For single-instruction sources words[2] IS the target opcode.
-    # §5.5 needs a pairing suffix (BRANCH_ON MISMATCH); words[2] is EMIT_BYTE.
+    # §5.5 needs a pairing suffix (BRANCH_ON MISMATCH); words[2] is
+    # EMIT_BYTE_REG (or EMIT_BYTE_IMM for §5.5b).
     # §5.11 encodes a numeric offset directly so the source is single-insn.
     SPEC_12_4_EXAMPLES = [
         # (source, expected_first_body_word, spec_section)
@@ -1817,10 +1871,14 @@ def _self_check() -> int:
         # §5.4
         ("EMIT_QUARTER_REG src=R1\n",
          0x0C10_0000, "§5.4"),
-        # §5.5 - EMIT_BYTE needs pairing; suffix with BRANCH_ON MISMATCH.
-        # words[2] is the EMIT_BYTE (the opcode under test).
-        ("EMIT_BYTE expect=0 mask=1 capture=1\nBRANCH_ON MISMATCH, done\ndone: HALT\n",
+        # §5.5 - EMIT_BYTE_REG needs pairing; suffix with BRANCH_ON
+        # MISMATCH. words[2] is the EMIT_BYTE_REG (the opcode under test).
+        ("EMIT_BYTE_REG expect=0 mask=1 capture=1\nBRANCH_ON MISMATCH, done\ndone: HALT\n",
          0x1000_0003, "§5.5"),
+        # §5.5b - EMIT_BYTE_IMM imm=0x48, no flags (single-insn source).
+        # group=00 sub=1001 → 0x2400_0000; imm=0x48 at [10:3] → 0x240.
+        ("EMIT_BYTE_IMM imm=0x48\n",
+         0x2400_0240, "§5.5b"),
         # §5.6
         ("SAMPLE_BIT_ON_SCL capture=1\n",
          0x1780_0001, "§5.6"),
@@ -1969,26 +2027,69 @@ def _self_check() -> int:
         fail("raw .dw", str(e))
 
     # ------------------------------------------------------------------
-    # 8. EMIT_BYTE pairing check error
+    # 8. EMIT_BYTE_REG pairing check error (bare EMIT_BYTE = sugar form;
+    # E-WIRE-003 fires for the lowered EMIT_BYTE_REG mnemonic).
     raised_e_wire_003 = False
     try:
         assemble("EMIT_BYTE expect=0 mask=1\nHALT\n", "<inline>")
     except AsmError as e:
         if "E-WIRE-003" in e.code or "E-WIRE-003" in str(e):
             raised_e_wire_003 = True
-    check("E-WIRE-003 raised for unpaired EMIT_BYTE mask=1",
+    check("E-WIRE-003 raised for unpaired EMIT_BYTE_REG mask=1",
           raised_e_wire_003,
           "expected AsmError with code E-WIRE-003")
 
+    # 8b. EMIT_BYTE_IMM pairing check (same E-WIRE-003 rule).
+    raised_e_wire_003_imm = False
+    try:
+        assemble("EMIT_BYTE_IMM imm=0x55 expect=0 mask=1\nHALT\n", "<inline>")
+    except AsmError as e:
+        if "E-WIRE-003" in e.code or "E-WIRE-003" in str(e):
+            raised_e_wire_003_imm = True
+    check("E-WIRE-003 raised for unpaired EMIT_BYTE_IMM mask=1",
+          raised_e_wire_003_imm,
+          "expected AsmError with code E-WIRE-003")
+
     # ------------------------------------------------------------------
-    # 9. EMIT_BYTE mask=0 exemption (no error)
+    # 9. EMIT_BYTE_REG mask=0 exemption (no error).
     try:
         words = assemble("EMIT_BYTE expect=0 mask=0\nHALT\n", "<inline>")
-        check("EMIT_BYTE mask=0 exempt from pairing check",
+        check("EMIT_BYTE_REG mask=0 exempt from pairing check",
               len(words) >= 3,
               "unexpectedly got empty result")
     except AsmError as e:
-        fail("EMIT_BYTE mask=0 exemption", f"raised {e!r}")
+        fail("EMIT_BYTE_REG mask=0 exemption", f"raised {e!r}")
+
+    # 9b. EMIT_BYTE_IMM mask=0 exemption.
+    try:
+        words = assemble("EMIT_BYTE_IMM imm=0xAA\nHALT\n", "<inline>")
+        check("EMIT_BYTE_IMM mask=0 exempt from pairing check",
+              len(words) >= 3,
+              "unexpectedly got empty result")
+    except AsmError as e:
+        fail("EMIT_BYTE_IMM mask=0 exemption", f"raised {e!r}")
+
+    # 9c. EMIT_BYTE_IMM imm out-of-range → E-RNG-001.
+    raised_e_rng_001 = False
+    try:
+        assemble("EMIT_BYTE_IMM imm=256\nHALT\n", "<inline>")
+    except AsmError as e:
+        if "E-RNG-001" in e.code or "E-RNG-001" in str(e):
+            raised_e_rng_001 = True
+    check("E-RNG-001 raised for EMIT_BYTE_IMM imm=256",
+          raised_e_rng_001,
+          "expected AsmError with code E-RNG-001")
+
+    # 9d. EMIT_BYTE sugar lowers to EMIT_BYTE_REG (byte-identical).
+    try:
+        sugar = assemble("EMIT_BYTE\nHALT\n", "<inline>")
+        canon = assemble("EMIT_BYTE_REG\nHALT\n", "<inline>")
+        check("bare EMIT_BYTE is sugar for EMIT_BYTE_REG (byte-identical)",
+              sugar == canon,
+              f"sugar={[f'{w:#010x}' for w in sugar]} "
+              f"canon={[f'{w:#010x}' for w in canon]}")
+    except AsmError as e:
+        fail("EMIT_BYTE sugar round-trip", f"raised {e!r}")
 
     # ------------------------------------------------------------------
     # 10. Case-insensitive MISMATCH pairing (regression M1)

@@ -921,20 +921,26 @@ fn encode_mnemonic(
         }
 
         // -----------------------------------------------------------------
-        "EMIT_BYTE" => {
+        // EMIT_BYTE_REG (canonical). Bare `EMIT_BYTE` is sugar for
+        // EMIT_BYTE_REG (§12.3) and lands on the same arm — both forms
+        // produce byte-identical encodings, so legacy fixtures
+        // continue to assemble unchanged.
+        "EMIT_BYTE" | "EMIT_BYTE_REG" => {
             let kv = parse_kv_operands(stmt, &["expect", "mask", "capture"])?;
             let (e, mk, c) = resolve_flag_triple(&kv, loc)?;
 
-            // §5.5 E-WIRE-003: every EMIT_BYTE with mask=1 must be
-            // followed by BRANCH_ON MISMATCH or FLAG_CLEAR bit-0-set.
+            // §5.5 E-WIRE-003: every EMIT_BYTE_REG with mask=1 must
+            // be followed by BRANCH_ON MISMATCH or FLAG_CLEAR
+            // bit-0-set. The same rule applies to EMIT_BYTE_IMM
+            // (handled by its own arm below).
             if mk && !raw_mode {
                 let paired = find_emit_byte_pair(pc_stmts, stmt_idx + 1, syms);
                 if paired.is_none() {
                     return Err(AsmError::operand(
                         loc,
                         format!(
-                            "E-WIRE-003: EMIT_BYTE mask=1 at line {} must \
-                             be followed by BRANCH_ON MISMATCH or \
+                            "E-WIRE-003: EMIT_BYTE_REG mask=1 at line {} \
+                             must be followed by BRANCH_ON MISMATCH or \
                              FLAG_CLEAR with bit 0 set; declare \
                              '(use-raw-primitives)' to suppress",
                             loc.line
@@ -942,7 +948,47 @@ fn encode_mnemonic(
                     ));
                 }
             }
-            Ok(encoder::enc_emit_byte(e, mk, c))
+            Ok(encoder::enc_emit_byte_reg(e, mk, c))
+        }
+
+        // -----------------------------------------------------------------
+        // EMIT_BYTE_IMM imm=<byte> [expect=... mask=... capture=...]
+        //
+        // Single-instruction byte emit with the payload encoded in
+        // the instruction word (§5.5b). Does not read R7, so no
+        // load-use hazard against a prior LOAD_IMM R7. The same
+        // E-WIRE-003 ACK-pairing rule as EMIT_BYTE_REG applies.
+        "EMIT_BYTE_IMM" => {
+            let kv = parse_kv_operands(stmt, &["imm", "expect", "mask", "capture"])?;
+            let imm_tok = kv.get("imm").ok_or_else(|| {
+                AsmError::operand(loc, "E-OP-001: EMIT_BYTE_IMM requires imm=<byte>")
+            })?;
+            let imm_val = parse_int(imm_tok, loc)?;
+            if !(0..=255).contains(&imm_val) {
+                return Err(AsmError::range(
+                    loc,
+                    format!("E-RNG-001: EMIT_BYTE_IMM imm must be 0..255, got {imm_val}"),
+                ));
+            }
+            let (e, mk, c) = resolve_flag_triple(&kv, loc)?;
+
+            // §5.5b inherits the §5.5 E-WIRE-003 pairing rule.
+            if mk && !raw_mode {
+                let paired = find_emit_byte_pair(pc_stmts, stmt_idx + 1, syms);
+                if paired.is_none() {
+                    return Err(AsmError::operand(
+                        loc,
+                        format!(
+                            "E-WIRE-003: EMIT_BYTE_IMM mask=1 at line {} \
+                             must be followed by BRANCH_ON MISMATCH or \
+                             FLAG_CLEAR with bit 0 set; declare \
+                             '(use-raw-primitives)' to suppress",
+                            loc.line
+                        ),
+                    ));
+                }
+            }
+            Ok(encoder::enc_emit_byte_imm(imm_val as u8, e, mk, c))
         }
 
         // -----------------------------------------------------------------
