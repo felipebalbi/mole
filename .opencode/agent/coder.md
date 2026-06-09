@@ -1,7 +1,7 @@
 ---
 description: Use when there is a clear specification or well-scoped change to implement: writing new code, refactoring, fixing a known bug, translating a spec into a patch, or making mechanical edits across files. Optimised for forward progress on small, focused patches. Trigger for "implement", "write", "refactor", "fix", "port", "apply", "translate spec".
 mode: subagent
-model: github-copilot/claude-sonnet-4.6
+model: github-copilot/claude-opus-4.7-high
 permission:
   edit: allow
   bash: ask
