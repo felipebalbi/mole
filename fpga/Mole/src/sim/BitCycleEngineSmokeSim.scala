@@ -24,8 +24,12 @@ import spinal.lib._
   *
   * ==Program==
   *
-  * `SET_BUS_MODE mode; EMIT_BIT_IMM(bit0..bit7 of 0x55); EMIT_BIT_IMM hiz; HALT
-  * 0`
+  * Four runs, all driving the byte 0x55 + ACK + HALT through the engine:
+  *   - `i3c-OD`, `i3c-PP`: bit-by-bit via 8 × `EMIT_BIT_IMM` + 1 hiz ACK.
+  *   - `i3c-OD/byte-imm`, `i3c-PP/byte-imm`: single `EMIT_BYTE_IMM(0x55)`.
+  *
+  * The byte-imm runs assert byte-identical on-wire waveform to the bit-by-bit
+  * runs. New in v0.2 with the EMIT_BYTE_IMM opcode.
   *
   * Run: `sbt "runMain mole.BitCycleEngineSmokeSim"`
   */
@@ -71,6 +75,24 @@ object BitCycleEngineSmokeSim {
     }
     val ackBit = encode(EmitBitImm(TxSymbol.hiz, false, false, false))
     Seq(encode(SetBusMode(mode))) ++ dataBits ++ Seq(ackBit, encode(Halt(0)))
+  }
+
+  /** Build the byte-IMM equivalent: a single EMIT_BYTE_IMM(0x55) emits the same
+    * 8 data bits (MSB first) followed by the engine-generated ACK slot (hiz
+    * SDA), then HALT.
+    *
+    * This is the entire point of the EMIT_BYTE_IMM opcode: replace 8
+    * EMIT_BIT_IMMs (plus 1 ACK EMIT_BIT_IMM) with one instruction, with no
+    * LOAD_IMM R7 setup needed. The on-wire waveform MUST be byte-identical to
+    * [[buildProgram]], which is what [[runModeEmitByteImm]] asserts below.
+    */
+  private def buildProgramEmitByteImm(mode: BusMode.E): Seq[Int] = {
+    import Instruction._
+    Seq(
+      encode(SetBusMode(mode)),
+      encode(EmitByteImm(0x55, expect = false, mask = false, capture = false)),
+      encode(Halt(0))
+    )
   }
 
   private def expectedSda(
@@ -161,7 +183,23 @@ object BitCycleEngineSmokeSim {
   // Per-mode run
   // --------------------------------------------------------------
 
-  private def runMode(label: String, mode: BusMode.E): Unit = {
+  private def runMode(label: String, mode: BusMode.E): Unit =
+    runWithProgram(label, mode, buildProgram(mode))
+
+  /** Same structural assertions as [[runMode]], but driven by an
+    * EMIT_BYTE_IMM(0x55) program instead of 8 explicit EMIT_BIT_IMMs. Proves
+    * the X-stage WS_EMIT_BYTE IMM-entry produces a byte- identical on-wire
+    * waveform to the bit-by-bit path. New in v0.2 with the EMIT_BYTE_IMM opcode
+    * (commit chain: spec → asm → engine → this test).
+    */
+  private def runModeEmitByteImm(label: String, mode: BusMode.E): Unit =
+    runWithProgram(label, mode, buildProgramEmitByteImm(mode))
+
+  private def runWithProgram(
+      label: String,
+      mode: BusMode.E,
+      program: Seq[Int]
+  ): Unit = {
     println(s"--- BitCycleEngineSmokeSim: $label ---")
     compileDut().doSim(label) { dut =>
       dut.clockDomain.forkStimulus(period = 10)
@@ -169,7 +207,6 @@ object BitCycleEngineSmokeSim {
       dut.clockDomain.waitSampling(5)
 
       // 1. Load program.
-      val program = buildProgram(mode)
       for ((word, idx) <- program.zipWithIndex) {
         loaderWrite(dut, idx, word)
       }
@@ -296,6 +333,10 @@ object BitCycleEngineSmokeSim {
   def main(args: Array[String]): Unit = {
     runMode("i3c-OD", BusMode.i3cOd)
     runMode("i3c-PP", BusMode.i3cPp)
+    // EMIT_BYTE_IMM byte-identical-waveform parity. Same DUT, same
+    // assertions; only the program shape differs (1 instruction vs 10).
+    runModeEmitByteImm("i3c-OD/byte-imm", BusMode.i3cOd)
+    runModeEmitByteImm("i3c-PP/byte-imm", BusMode.i3cPp)
     println("BitCycleEngineSmokeSim OK")
   }
 }
