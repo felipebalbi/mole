@@ -31,7 +31,7 @@ model, and the compile-time error-injection contract.
 
 A small **bit-cycle engine** in the FPGA ("Layer 0") executes a
 **25-opcode ISA** (32-bit fixed-width instructions, opcode
-`{group[31:30], sub[29:26]}`; 9 WIRE + 8 CTRL + 8 DATA + LOOP
+`{group[31:30], sub[29:26]}`; 10 WIRE + 8 CTRL + 8 DATA + LOOP
 group reserved) over quarter-bit-resolution SDA/SCL patterns. The
 engine is **literally bus-agnostic**: per-bit / per-quarter drive
 fields are 2-bit `tx_symbol = {dominant, recessive, hiz,
@@ -128,16 +128,17 @@ don't co-exist cleanly in one workspace. Do not merge them.
    the DCO.
 9. **Instruction width is fixed 32 bits.** Opcode is the 6-bit
    field `{group[31:30], sub[29:26]}` (4 groups × 16 sub-slots
-   = 64 slots; 25 live + 39 reserved in v0.2: 9 WIRE, 8 CTRL,
+    = 64 slots; 26 live + 38 reserved in v0.2: 10 WIRE, 8 CTRL,
    8 DATA, and the LOOP group fully reserved). Don't widen
    instructions, don't relocate the opcode field, don't add a
    multi-word opcode form. See `docs/MOLE-0.2-SPEC.md` §3, §4
    for the full layout.
 10. **The flag triple is at `[2:0]`.** On every opcode that
     carries `expect`/`mask`/`capture` --- in v0.2 that is the
-    seven WIRE bearers `EMIT_BIT_IMM`, `EMIT_BIT_REG`,
-    `EMIT_QUARTER_IMM`, `EMIT_QUARTER_REG`, `EMIT_BYTE`,
-    `SAMPLE_BIT_ON_SCL`, `DRIVE_BIT_ON_SCL` --- the bits are at
+    eight WIRE bearers `EMIT_BIT_IMM`, `EMIT_BIT_REG`,
+    `EMIT_QUARTER_IMM`, `EMIT_QUARTER_REG`, `EMIT_BYTE_IMM`,
+    `EMIT_BYTE_REG`, `SAMPLE_BIT_ON_SCL`, `DRIVE_BIT_ON_SCL` ---
+    the bits are at
     fixed positions: `[2]=expect`, `[1]=mask`, `[0]=capture`.
     Symbol fields sit in the low-mid bits above the triple (e.g.
     `tx_symbol` at `[4:3]` for `EMIT_BIT_IMM`, `sda` at `[4:3]`

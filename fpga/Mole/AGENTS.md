@@ -46,8 +46,8 @@ rule in `../../AGENTS.md` §3.4.
 
 ## ISA is a stable contract
 
-The **in-development format is v0.2**: a **25-opcode ISA** (32-bit
-fixed-width instructions, opcode `{group[31:30], sub[29:26]}`; 9
+The **in-development format is v0.2**: a **26-opcode ISA** (32-bit
+fixed-width instructions, opcode `{group[31:30], sub[29:26]}`; 10
 WIRE + 8 CTRL + 8 DATA opcodes; LOOP group fully reserved) with
 magic `0x0002_4D4C` and format version `0x0002`. The normative
 encoding is `docs/MOLE-0.2-SPEC.md`; that file wins whenever
@@ -86,7 +86,7 @@ Mole. From that point:
 
 | Group | Bits `[31:30]` | Live opcodes | Notes                   |
 |-------|----------------|--------------|-------------------------|
-| WIRE  | `0b00`         | 9            | Emit/sample/stretch     |
+| WIRE  | `0b00`         | 10           | Emit/sample/stretch     |
 | CTRL  | `0b01`         | 8            | Branch, wait, config    |
 | DATA  | `0b10`         | 8            | ALU, load, move         |
 | LOOP  | `0b11`         | 0            | Fully reserved          |
@@ -115,14 +115,33 @@ width with opcode at `[15:11]`. All of these are retired in v0.2:
 
 ### EMIT_BYTE and byte-level emits
 
-`EMIT_BYTE` is a **live opcode in v0.2** (WIRE group, sub
-`0b0100`). It shifts out R7[7:0] MSB first with full SCL pulses,
-then clocks an ACK/NAK slot with `hiz` SDA, applying
-`expect`/`mask`/`capture` to that ninth bit. See spec §5.5.
+Byte emission is **two live opcodes in v0.2**, both in the WIRE
+group, sharing a 9-cell running state in the X stage:
+
+- **`EMIT_BYTE_REG`** (sub `0b0100`) shifts out `R7[7:0]` MSB
+  first with full SCL pulses, then clocks an ACK/NAK slot with
+  `hiz` SDA. See spec §5.5.
+- **`EMIT_BYTE_IMM`** (sub `0b1001`) carries its 8-bit payload
+  in the instruction word (`[10:3]`) and otherwise behaves
+  identically: same shift order, same ACK slot, same flag
+  triple semantics. No `R7` load is required. See spec §5.5b.
+
+The motivation for the IMM variant is the common SDK case of
+emitting a known byte (address, CCC, register pointer): without
+IMM, every byte costs `LOAD_IMM R7, <byte>; EMIT_BYTE_REG`
+(two instructions and a load-use hazard window); a typical I2C
+write of 3–6 bytes thus pays 6–12 instructions of glue. With
+IMM the same write is 3–6 instructions flat with no R7 traffic.
+
+In moleasm, bare `EMIT_BYTE` is **sugar for `EMIT_BYTE_REG`**
+(backwards compatibility with v0.1 source). The bare form
+appears in the goldens and existing fixtures; new sources should
+prefer the explicit `_IMM` / `_REG` form per the v0.2 convention
+that mirrors `EMIT_BIT_*`, `EMIT_QUARTER_*`, and `STRETCH_SCL_*`.
 
 Any review proposing a higher-level byte emit beyond what §5.5
-already defines should be treated as a sign the SDK needs a new
-macro, not the engine a new opcode.
+and §5.5b already define should be treated as a sign the SDK
+needs a new macro, not the engine a new opcode.
 
 ### tx_symbol and BUS_MODE are separate
 
