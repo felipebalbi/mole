@@ -89,11 +89,11 @@ $(BIN): $(ASC)
 #
 # Phase C in flight: some v0 sims are stashed in src/attic/ pending
 # resurrection at the appropriate C.x commit. The aggregate `sim`
-# target lists only sims that exist in src/sim/ today. As stashed
-# sims come back online (C.8 CTRL → sim-engine-full, sim-engine-target,
-# sim-engine-stretch, sim-engine-jmp-boundary; C.10 end-to-end →
-# sim-top, sim-top-flow-control, sim-top-cts-violation), re-add them
-# here and to .PHONY.
+# target lists only sims that exist in src/sim/ today. C.8 brought
+# back sim-engine-full, sim-engine-target, sim-engine-stretch, and
+# sim-engine-jmp-boundary. Still pending: C.10 end-to-end → sim-top,
+# sim-top-flow-control, sim-top-cts-violation. As stashed sims come
+# back online, re-add them here and to .PHONY.
 sim: sim-config sim-opendrain sim-baud-gen sim-rx-sync \
      sim-tx-shiftreg sim-rx-shiftreg sim-tx-fsm sim-rx-fsm \
      sim-uart-tx sim-uart-rx sim-uart sim-spram sim-isa \
@@ -103,6 +103,7 @@ sim: sim-config sim-opendrain sim-baud-gen sim-rx-sync \
      sim-engine-emit-bit-data-hold \
      sim-engine-stretch-role \
      sim-engine-jmp-boundary \
+     sim-engine-stretch sim-engine-target sim-engine-full \
      sim-regfile sim-engine-pipeline ## Run all simulations (Phase C in flight)
 
 # Per-block sim / gen targets land here once their hint blocks in

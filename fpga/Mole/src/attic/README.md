@@ -15,11 +15,11 @@ the non-engine sims keep passing.
 | `BitCycleEngineCore.scala.v0-stash` | `src/hw/BitCycleEngineCore.scala` | **REPLACED** by the new `EnginePipeline.scala` in C.6 and the v0.2 `BitCycleEngineCore` wrapper at the same commit |
 | `MoleTop.scala.v0-stash` | `src/hw/MoleTop.scala` | Resurrected with v0.2 wiring in C.6 |
 | `MoleTopVerilog.scala.v0-stash` | `src/hw/MoleTopVerilog.scala` | Resurrected with v0.2 wiring in C.6 |
-| `BitCycleEngineSim.scala.v0-stash` | `src/sim/BitCycleEngineSim.scala` | Re-encoded with v0.2 test programs in C.8 (CTRL — depends on JMP/BRANCH_ON/LOAD_TIMING) |
+| `BitCycleEngineSim.scala.v0-stash` | `src/sim/BitCycleEngineSim.scala` | **Resurrected in C.8** (re-encoded with v0.2 test programs — CTRL coverage: BRANCH_ON, WAIT_ON, FLAG_CLEAR, SET_BUS_MODE, SET_ROLE, LOAD_TIMING) |
 | `BitCycleEngineSmokeSim.scala.v0-stash` | `src/sim/BitCycleEngineSmokeSim.scala` | **Resurrected in C.7** |
-| `BitCycleEngineStretchSim.scala.v0-stash` | `src/sim/BitCycleEngineStretchSim.scala` | Resurrected in C.8 (depends on LOAD_TIMING) |
+| `BitCycleEngineStretchSim.scala.v0-stash` | `src/sim/BitCycleEngineStretchSim.scala` | **Resurrected in C.8** (rewritten as a LOAD_TIMING divider-swap audit) |
 | `BitCycleEngineStretchRoleSim.scala.v0-stash` | `src/sim/BitCycleEngineStretchRoleSim.scala` | **Resurrected in C.7** |
-| `BitCycleEngineTargetSim.scala.v0-stash` | `src/sim/BitCycleEngineTargetSim.scala` | Resurrected in C.8 (depends on MARK) |
+| `BitCycleEngineTargetSim.scala.v0-stash` | `src/sim/BitCycleEngineTargetSim.scala` | **Resurrected in C.8** (MARK format + monotonicity + SAMPLE_BIT_ON_SCL match / mismatch) |
 | `BitCycleEngineTargetDut.scala.v0-stash` | `src/sim/BitCycleEngineTargetDut.scala` | **Resurrected in C.7** |
 | `BitCycleEngineTwoTargetDut.scala.v0-stash` | `src/sim/BitCycleEngineTwoTargetDut.scala` | **Resurrected in C.7** |
 | `BitCycleEngineJmpBoundarySim.scala.v0-stash` | `src/sim/BitCycleEngineJmpBoundarySim.scala` | **Resurrected in C.8** |
