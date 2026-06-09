@@ -86,7 +86,7 @@ object PipeStageables {
   /** Register A read address (for WIRE/DATA opcodes). */
   val READ_REG_A_ADDR = Payload(UInt(3 bits))
 
-  /** Register B read address (for EMIT_BYTE: R7). */
+  /** Register B read address (for EMIT_BYTE_REG: R7). */
   val READ_REG_B_ADDR = Payload(UInt(3 bits))
 
   /** True when the current instruction reads register A. */
@@ -94,6 +94,16 @@ object PipeStageables {
 
   /** True when the current instruction reads register B. */
   val READS_REG_B = Payload(Bool())
+
+  /** True for EMIT_BYTE_IMM (WIRE sub=0x9). Lets the X-stage WIRE entry
+    * distinguish IMM (data from instruction word) from REG (data from R7).
+    */
+  val IS_EMIT_BYTE_IMM = Payload(Bool())
+
+  /** EMIT_BYTE_IMM data byte: `dInsn[10:3]`. Valid only when `IS_EMIT_BYTE_IMM`
+    * is set; otherwise undefined.
+    */
+  val EMIT_BYTE_IMM_DATA = Payload(Bits(8 bits))
 
   /** True when the E-stage instruction is a stall-inducing load-use producer.
     * Always False in C.7.
@@ -434,7 +444,8 @@ case class EnginePipeline(cfg: MoleConfig) extends Component {
   // --------------------------------------------------------------------------
   // X-stage WIRE mini-FSM state registers
   //
-  // xWireState: 0=IDLE, 1=EMIT_BIT, 2=EMIT_QUARTER, 3=EMIT_BYTE,
+  // xWireState: 0=IDLE, 1=EMIT_BIT, 2=EMIT_QUARTER, 3=EMIT_BYTE (both REG
+  //             at sub=0x4 and IMM at sub=0x9 reuse the same running state),
   //             4=SAMPLE_BIT, 5=DRIVE_BIT, 6=STRETCH_SCL.
   // These are component-scope Regs (not pipeline Payloads) because the WIRE
   // mini-FSM persists across the multiple cycles that X is stalled.
@@ -452,7 +463,8 @@ case class EnginePipeline(cfg: MoleConfig) extends Component {
   val xByteIdx = Reg(UInt(4 bits)) init 0 // byte bit-index: 0..8
   val xStretchCount = Reg(UInt(14 bits)) init 0 // STRETCH_SCL countdown
   val xDriveBitPhase = Reg(UInt(2 bits)) init 0 // DRIVE_BIT sub-phase 0..2
-  val xByteDataReg = Reg(Bits(8 bits)) init 0 // latched R7 for EMIT_BYTE
+  val xByteDataReg =
+    Reg(Bits(8 bits)) init 0 // EMIT_BYTE data: R7 (REG) or imm (IMM)
   val xCapturedBit = Reg(Bool()) init False // captured bit from WIRE op
 
   // --------------------------------------------------------------------------
@@ -614,9 +626,10 @@ case class EnginePipeline(cfg: MoleConfig) extends Component {
 
   // CTRL.HALT: group=0b01 (1), sub=0b0000 (0).
   val dIsHalt = (dGroup === 1) && (dSub === 0)
-  // WIRE group: group=0b00 (0). Sub-opcodes 0x0..0x8 are live; 0x9..0xF reserved.
+  // WIRE group: group=0b00 (0). Sub-opcodes 0x0..0x9 are live (10 total:
+  // the 9 from spec §4 plus EMIT_BYTE_IMM at sub=0x9); 0xA..0xF reserved.
   val dIsWire = (dGroup === 0)
-  val dIsWireLive = dIsWire && (dSub <= 8)
+  val dIsWireLive = dIsWire && (dSub <= 9)
   // SET_BUS_MODE (CTRL sub=0x3) and SET_ROLE (CTRL sub=0x4): implemented in C.7
   // because they are required by nearly every WIRE test program.
   val dIsSetBusMode = (dGroup === 1) && (dSub === 3)
@@ -667,21 +680,29 @@ case class EnginePipeline(cfg: MoleConfig) extends Component {
   // Register operand decoding.
   // REG_A: src at [22:20] for EMIT_BIT_REG, EMIT_QUARTER_REG, STRETCH_SCL_REG,
   //        DRIVE_BIT_ON_SCL.
-  // REG_B: always R7 (for EMIT_BYTE implicit R7 data read).
+  // REG_B: always R7 (for EMIT_BYTE_REG implicit R7 data read).
   val dRegAAddr = dInsn(22 downto 20).asUInt
   d.up(PipeStageables.READ_REG_A_ADDR) := dRegAAddr
   d.up(PipeStageables.READ_REG_B_ADDR) := U(7, 3 bits)
 
   val dEmitBitReg = dIsWire && (dSub === 1)
   val dEmitQuarterReg = dIsWire && (dSub === 3)
-  val dEmitByte = dIsWire && (dSub === 4)
+  val dEmitByteReg = dIsWire && (dSub === 4)
+  val dEmitByteImm = dIsWire && (dSub === 9)
   val dStretchSclReg = dIsWire && (dSub === 8)
   val dDriveBitOnScl = dIsWire && (dSub === 6)
 
   d.up(PipeStageables.READS_REG_A) :=
     dEmitBitReg || dEmitQuarterReg || dStretchSclReg || dDriveBitOnScl
-  d.up(PipeStageables.READS_REG_B) := dEmitByte
+  // EMIT_BYTE_REG (sub=0x4) implicitly reads R7 for the data byte.
+  // EMIT_BYTE_IMM (sub=0x9) does NOT read R7 — data is in dInsn[10:3] —
+  // so it bypasses the load-use hazard path.
+  d.up(PipeStageables.READS_REG_B) := dEmitByteReg
   d.up(PipeStageables.IS_LOAD_USE) := False
+
+  // EMIT_BYTE_IMM cross-stage info: detect + data byte from [10:3].
+  d.up(PipeStageables.IS_EMIT_BYTE_IMM) := dEmitByteImm
+  d.up(PipeStageables.EMIT_BYTE_IMM_DATA) := dInsn(10 downto 3)
 
   // --------------------------------------------------------------------------
   // R: Register Read
@@ -761,7 +782,7 @@ case class EnginePipeline(cfg: MoleConfig) extends Component {
   val xMask = xInsn(Instruction.MASK_BIT) // flag: mask
   val xCapture = xInsn(Instruction.CAPTURE_BIT) // flag: capture
   val xRegAVal = x(PipeStageables.REG_A_VALUE)
-  val xRegBVal = x(PipeStageables.REG_B_VALUE) // R7 data for EMIT_BYTE
+  val xRegBVal = x(PipeStageables.REG_B_VALUE) // R7 data for EMIT_BYTE_REG
 
   // ---- Cond-code evaluator (C.8, spec §6) --------------------------------
   // Shared between BRANCH_ON and WAIT_ON. Combinational function on the
@@ -1263,13 +1284,21 @@ case class EnginePipeline(cfg: MoleConfig) extends Component {
           }
         }
 
-        // ------ EMIT_BYTE (sub=0x4) ----------------------------------------
-        is(4) {
-          // Latch R7[7:0] at entry. Drive SDA for bit 7 (MSB first).
-          xByteDataReg := xRegBVal(7 downto 0)
+        // ------ EMIT_BYTE (REG sub=0x4, IMM sub=0x9) -----------------------
+        // Both variants share the entire WS_EMIT_BYTE running state: 8 data
+        // bits + ACK slot. They differ only in the source of the latched
+        // data byte at entry.
+        //   REG: byte comes from R7[7:0] (forwarded REG_B_VALUE).
+        //   IMM: byte comes from the instruction word at [10:3]; R7 is not
+        //        read, so the load-use hazard does not apply.
+        //
+        // Helper closure captures the entry sequence so both arms stay in
+        // lockstep — any future change to one MUST also change the other.
+        def emitByteEntry(byteData: Bits): Unit = {
+          xByteDataReg := byteData
           xByteIdx := 0
           // Drive SDA for MSB.
-          val msb = xRegBVal(7)
+          val msb = byteData(7)
           val sdaSym = TxSymbol()
           sdaSym := TxSymbol.recessive
           when(!msb) { sdaSym := TxSymbol.dominant }
@@ -1288,6 +1317,16 @@ case class EnginePipeline(cfg: MoleConfig) extends Component {
           xQIdx := 0
           timerLoadReg := True
           xWireState := WS_EMIT_BYTE
+        }
+
+        is(4) {
+          // EMIT_BYTE_REG: data from R7[7:0].
+          emitByteEntry(xRegBVal(7 downto 0))
+        }
+
+        is(9) {
+          // EMIT_BYTE_IMM: data from dInsn[10:3] (forwarded as Stageable).
+          emitByteEntry(x(PipeStageables.EMIT_BYTE_IMM_DATA))
         }
 
         // ------ SAMPLE_BIT_ON_SCL (sub=0x5) --------------------------------
