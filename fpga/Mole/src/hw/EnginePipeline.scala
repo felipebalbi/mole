@@ -585,7 +585,25 @@ case class EnginePipeline(cfg: MoleConfig) extends Component {
   val f1, f2, d, r, x, w = CtrlLink()
 
   val f1f2 = StageLink(f1.down, f2.up)
-  val f2d = StageLink(f2.down, d.up)
+  // Skid buffer at the F2 → D boundary (Phase X.4).
+  //
+  // Replaces the StageLink that previously bridged f2.down → d.up.
+  // Motivation: the ready-propagation chain (w.haltWhen → x.haltWhen →
+  // r.haltWhen → d.up.ready → f2.down.ready → ...) became the structural
+  // Fmax limiter across X.1/X.2 — each fix shifted the path but the
+  // chain length stayed roughly constant. S2MLink registers the ready
+  // path (`up.ready := !rValid`), so f2.down.ready is now a function of
+  // a local skid-occupancy register rather than the live r/x/w halt
+  // soup. Forward data is bypassed combinationally when the skid is
+  // empty (no extra register stage in the streaming case): f2InstrReg
+  // → S2MLink bypass → d.up(INSTRUCTION). On back-pressure the skid
+  // parks the in-flight word in its rData reg and f2.down.ready drops
+  // for exactly one cycle of latency. The flush mechanism (throwWhen on
+  // f1/f2/d/r/x) correctly drains the skid: d's `throwWhen(flush,
+  // usingReady=true)` asserts d.up.ready via ignoresReady, which clears
+  // the S2MLink's rValid the same cycle, so no stale word survives a
+  // taken-branch flush.
+  val f2d = S2MLink(f2.down, d.up)
   val dr = StageLink(d.down, r.up)
   val rx = StageLink(r.down, x.up)
   val xw = StageLink(x.down, w.up)
