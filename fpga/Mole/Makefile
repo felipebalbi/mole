@@ -55,21 +55,19 @@ $(JSON): $(V)
 
 # 3. Place & route (JSON -> ASC) -- iCE40 UP5K, SG48 package.
 #
-# `--seed 3` is pinned deliberately. On UP5K-SG48 at 24 MHz the design
-# is right at the timing edge: a 16-seed sweep against the current
-# netlist passes timing on only ~37 % of seeds (best Fmax 24.48 MHz,
-# worst 23.08 MHz). The critical path migrates across the engine FSM,
-# the loader CRC, the UART RX shift register, and the engine timer
-# depending on placement, so no single cut closes the gap on all
-# seeds. Seed 3 is chosen because:
-#   - it is the lowest-numbered seed that passes timing,
-#   - it produces the best observed Fmax (24.48 MHz, ~2 % margin),
-#   - it is deterministic so bring-up bitstreams are reproducible.
-# If a future change moves the criticality and seed 3 stops passing,
-# re-run a seed sweep (`for s in $(seq 0 15); do nextpnr-ice40 ... \
-# --seed 3$s; done`) and pick a passing seed. The deeper fix lives on
-# the `timing-closure` branch; this seed pin is the interim guarantee
-# that every build of `master` produces a working bitstream.
+# Phase C target Fmax is 48 MHz (engineClk), per sub-tree AGENTS.md
+# "Fabric frequency targets". The v0 engine ran at 24 MHz on UP5K;
+# v0.2 doubles the target because the 5-stage pipeline plus the
+# stretch-aware Q1→Q2 guard, byte-emit FSM, and DATA ALU all need
+# the headroom. uartClk stays at 24 MHz regardless of engineClk.
+#
+# The v0 `--seed 3` pin was chosen at 24 MHz on the v0 single-stage
+# engine — it does not generalise to the v0.2 5-stage pipeline at
+# 48 MHz. The C.9 closeout includes a fresh nextpnr seed sweep at
+# 48 MHz against the post-DATA-opcode netlist to pick a current
+# best-Fmax seed; see TODO.md / the C.9 commit chain for the sweep
+# results. Until that sweep selects a new pin, `--seed 0` (the
+# nextpnr default) is left explicit so the value is auditable.
 $(ASC): $(JSON) $(PCF)
 	$(NEXTPNR) \
 		--up5k          \
@@ -77,8 +75,8 @@ $(ASC): $(JSON) $(PCF)
 		--pcf $(PCF)    \
 		--json $< \
 		--asc $@  \
-		--freq 24 \
-		--seed 3
+		--freq 48 \
+		--seed 0
 
 # 4. Pack (ASC -> BIN)
 $(BIN): $(ASC)
