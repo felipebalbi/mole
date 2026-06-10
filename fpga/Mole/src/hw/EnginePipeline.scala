@@ -596,7 +596,28 @@ case class EnginePipeline(cfg: MoleConfig) extends Component {
 
   f1.up.valid := True
 
-  io.spramRead.valid := fetchActive
+  // Gate spramRead.valid on f1.down.isFiring (the cycle F1 actually
+  // commits a fetch downstream) rather than on the always-on
+  // fetchActive. With SpramController's port-input m2sPipe (C.X.1),
+  // the pipe stage's payload-capture register samples pcReg whenever
+  // its input handshake fires; if spramRead.valid stayed high every
+  // cycle while fetchActive, then on the cycle a BRANCH_ON taken at W
+  // flushes the pipeline, the m2sPipe would latch the pre-flush pcReg
+  // (pcReg only updates at end-of-cycle) and present that stale
+  // address to the SPRAM one cycle later. The flushed-then-refetched
+  // f2 transaction would then capture the wrong instruction word
+  // exactly the same shape as the C.8 stale-f2InstrReg bug.
+  //
+  // Edge-driving the valid (only assert on the cycle a fetch actually
+  // fires through the F1→F2 link) keeps the m2sPipe's capture aligned
+  // with the cycle pcReg holds the correct address, and the flush
+  // cycle (which cancels F1) leaves rValid=False so no stale read is
+  // ever issued. Safe with the m2sPipe in front of the controller:
+  // io.spramRead.ready is now combinational only on m2sPipe-local
+  // registers, so the ready→valid dependency does not form an
+  // algebraic loop the way it would have against the pre-pipe direct
+  // arbiter ready path.
+  io.spramRead.valid := f1.down.isFiring
   io.spramRead.payload := pcReg.resize(spramAddrWidth bits)
 
   f1.haltWhen(!fetchActive || !io.spramRead.ready)
