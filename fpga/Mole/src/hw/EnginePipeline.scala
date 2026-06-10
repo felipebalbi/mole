@@ -106,9 +106,49 @@ object PipeStageables {
   val EMIT_BYTE_IMM_DATA = Payload(Bits(8 bits))
 
   /** True when the E-stage instruction is a stall-inducing load-use producer.
-    * Always False in C.7.
+    * Per spec §14: any DATA writer (LOAD_IMM, MOV, ADD_IMM, DEC, AND_IMM,
+    * OR_IMM, XOR_IMM, SHIFT).
     */
   val IS_LOAD_USE = Payload(Bool())
+
+  // ---- DATA-group decode (C.9) -----------------------------------------
+
+  /** True when the decoded opcode is in the DATA group (group=0b10). */
+  val IS_DATA = Payload(Bool())
+
+  /** DATA sub-opcode (`[29:26]`, low 3 bits sufficient since live subs occupy
+    * 0x0..0x7).
+    */
+  val DATA_SUB = Payload(UInt(3 bits))
+
+  /** DATA destination register `[25:23]`. */
+  val DATA_DST = Payload(UInt(3 bits))
+
+  /** DATA source register `[22:20]`. */
+  val DATA_SRC = Payload(UInt(3 bits))
+
+  /** DATA signed 14-bit immediate `[16:3]` (for ADD_IMM). */
+  val DATA_IMM14_S = Payload(SInt(14 bits))
+
+  /** DATA unsigned 14-bit immediate `[16:3]` (for LOAD_IMM / AND_IMM / OR_IMM /
+    * XOR_IMM).
+    */
+  val DATA_IMM14_U = Payload(UInt(14 bits))
+
+  /** SHIFT arith bit `[19]` (0=logical, 1=arithmetic). */
+  val DATA_SHIFT_ARITH = Payload(Bool())
+
+  /** SHIFT direction bit `[18]` (0=left, 1=right). */
+  val DATA_SHIFT_DIR = Payload(Bool())
+
+  /** SHIFT amount `[7:3]` (5 bits, 0..31). */
+  val DATA_SHIFT_AMT = Payload(UInt(5 bits))
+
+  /** True when X commits a REG_ZERO_FLAG update at W. */
+  val REG_ZERO_FLAG_WRITE_EN = Payload(Bool())
+
+  /** New REG_ZERO_FLAG value to commit at W. */
+  val REG_ZERO_FLAG_VALUE = Payload(Bool())
 
   // ---- R → X/W stages ---------------------------------------------------
 
@@ -640,12 +680,32 @@ case class EnginePipeline(cfg: MoleConfig) extends Component {
   val dIsFlagClear = (dGroup === 1) && (dSub === 5)
   val dIsMark = (dGroup === 1) && (dSub === 6)
   val dIsLoadTiming = (dGroup === 1) && (dSub === 7)
-  // CTRL/DATA non-HALT non-WIRE → trap, EXCEPT the live CTRL opcodes above.
-  // DATA group implementation lands in C.9; for now traps to STATUS_TRAP.
+  // C.9 DATA opcodes: group=0b10, sub=0..7 are the 8 live opcodes;
+  // sub=8..15 are reserved (trap).
+  val dIsData = (dGroup === 2) && (dSub <= 7)
+  val dIsLoadImm = dIsData && (dSub === 0)
+  val dIsMov = dIsData && (dSub === 1)
+  val dIsAddImm = dIsData && (dSub === 2)
+  val dIsDec = dIsData && (dSub === 3)
+  val dIsAndImm = dIsData && (dSub === 4)
+  val dIsOrImm = dIsData && (dSub === 5)
+  val dIsXorImm = dIsData && (dSub === 6)
+  val dIsShift = dIsData && (dSub === 7)
+  // SHIFT aleft (arith=1, dir=0) is rejected by the assembler per spec
+  // §5.25. Defense-in-depth: trap if encountered in a raw bitstream.
+  //
+  // SPEC GAP (v0.2 §5.25): "aleft is an assembler error (arithmetic
+  // left = logical left; use left)" — spec is silent on engine
+  // behaviour for a raw .dw with arith=1 + dir=0. Implementation
+  // choice: trap with STATUS_TRAP (consistent with reserved-cond and
+  // reserved-BUS_MODE traps elsewhere). Track as docs(spec) follow-up.
+  val dIsShiftAleft = dIsShift && dInsn(19) && !dInsn(18)
+  // CTRL/DATA non-HALT non-WIRE → trap, EXCEPT the live CTRL opcodes above
+  // and the 8 live DATA opcodes (C.9). SHIFT aleft is treated as trap.
   val dIsTrap =
-    !dIsHalt && !dIsWireLive && !dIsSetBusMode && !dIsSetRole &&
+    (!dIsHalt && !dIsWireLive && !dIsSetBusMode && !dIsSetRole &&
       !dIsBranchOn && !dIsWaitOn && !dIsFlagClear && !dIsMark &&
-      !dIsLoadTiming
+      !dIsLoadTiming && !dIsData) || dIsShiftAleft
 
   d.up(PipeStageables.IS_HALT) := dIsHalt
   d.up(PipeStageables.IS_TRAP) := dIsTrap
@@ -693,16 +753,35 @@ case class EnginePipeline(cfg: MoleConfig) extends Component {
   val dDriveBitOnScl = dIsWire && (dSub === 6)
 
   d.up(PipeStageables.READS_REG_A) :=
-    dEmitBitReg || dEmitQuarterReg || dStretchSclReg || dDriveBitOnScl
+    dEmitBitReg || dEmitQuarterReg || dStretchSclReg || dDriveBitOnScl ||
+      (dIsData && !dIsLoadImm)
   // EMIT_BYTE_REG (sub=0x4) implicitly reads R7 for the data byte.
   // EMIT_BYTE_IMM (sub=0x9) does NOT read R7 — data is in dInsn[10:3] —
   // so it bypasses the load-use hazard path.
   d.up(PipeStageables.READS_REG_B) := dEmitByteReg
-  d.up(PipeStageables.IS_LOAD_USE) := False
+  // C.9: all DATA writers are stall-inducing producers per spec §14.
+  d.up(PipeStageables.IS_LOAD_USE) := dIsData
 
   // EMIT_BYTE_IMM cross-stage info: detect + data byte from [10:3].
   d.up(PipeStageables.IS_EMIT_BYTE_IMM) := dEmitByteImm
   d.up(PipeStageables.EMIT_BYTE_IMM_DATA) := dInsn(10 downto 3)
+
+  // ---- DATA-group cross-stage info (C.9) -------------------------------
+  d.up(PipeStageables.IS_DATA) := dIsData
+  d.up(PipeStageables.DATA_SUB) := dSub(2 downto 0)
+  d.up(PipeStageables.DATA_DST) := dInsn(25 downto 23).asUInt
+  d.up(PipeStageables.DATA_SRC) := dInsn(22 downto 20).asUInt
+  d.up(PipeStageables.DATA_IMM14_S) := dInsn(16 downto 3).asSInt
+  d.up(PipeStageables.DATA_IMM14_U) := dInsn(16 downto 3).asUInt
+  d.up(PipeStageables.DATA_SHIFT_ARITH) := dInsn(19)
+  d.up(PipeStageables.DATA_SHIFT_DIR) := dInsn(18)
+  d.up(PipeStageables.DATA_SHIFT_AMT) := dInsn(7 downto 3).asUInt
+
+  // DATA src register goes through the read port (READ_REG_A) so the
+  // RegFile load-use stall fires on a true RAW hazard. LOAD_IMM does not
+  // read a source, so READS_REG_A is gated on !dIsLoadImm above; the
+  // address is still driven (harmless) so the read port has a valid value.
+  // The actual src field is at [22:20]; route it as READ_REG_A_ADDR.
 
   // --------------------------------------------------------------------------
   // R: Register Read
@@ -751,6 +830,8 @@ case class EnginePipeline(cfg: MoleConfig) extends Component {
   x.up(PipeStageables.RING_WRITE_DATA) := B(0, 32 bits)
   x.up(PipeStageables.PC_REDIRECT_VALID) := False
   x.up(PipeStageables.PC_REDIRECT_TARGET) := U(0, 13 bits)
+  x.up(PipeStageables.REG_ZERO_FLAG_WRITE_EN) := False
+  x.up(PipeStageables.REG_ZERO_FLAG_VALUE) := False
 
   // Decode helpers for X stage.
   // xIsWire: True only for WIRE-group instructions (group=0b00).
@@ -769,6 +850,8 @@ case class EnginePipeline(cfg: MoleConfig) extends Component {
   val xIsMark = x(PipeStageables.IS_MARK) && !x(PipeStageables.IS_TRAP)
   val xIsLoadTiming =
     x(PipeStageables.IS_LOAD_TIMING) && !x(PipeStageables.IS_TRAP)
+  // C.9 DATA opcode handle.
+  val xIsData = x(PipeStageables.IS_DATA) && !x(PipeStageables.IS_TRAP)
   val xSub = x(PipeStageables.OPCODE_SUB)
   val xInsn = x(PipeStageables.INSTRUCTION)
 
@@ -1058,6 +1141,75 @@ case class EnginePipeline(cfg: MoleConfig) extends Component {
     when(mask(2)) { startFlagReg := False }
     when(mask(3)) { stopFlagReg := False }
     when(mask(4)) { regZeroFlagReg := False }
+  }
+
+  // ---- C.9 DATA-group single-cycle execution -----------------------------
+  //
+  // All 8 DATA opcodes execute in a single X cycle: compute the result,
+  // drive WRITES_REG / WRITE_REG_ADDR / WRITE_REG_DATA so the W stage
+  // commits the regfile write, and set REG_ZERO_FLAG_WRITE_EN/_VALUE so
+  // W also updates regZeroFlagReg. Load-use hazards are handled by the
+  // RegFile's R-stage stall (IS_LOAD_USE is True for every DATA opcode,
+  // per spec §14).
+  //
+  // SHIFT(arith=1, dir=0) "aleft" is rejected at D as a trap (see the
+  // dIsShiftAleft block above); xIsData is False on those words, so the
+  // dispatch below never fires for them and the existing HALT/TRAP path
+  // takes over with STATUS_TRAP.
+  val xDataSrc = x(PipeStageables.REG_A_VALUE)
+  val xDataImmU = x(PipeStageables.DATA_IMM14_U).resize(32 bits)
+  val xDataImmS = x(PipeStageables.DATA_IMM14_S).resize(32 bits).asBits
+  val xDataSub = x(PipeStageables.DATA_SUB)
+  val xShiftArith = x(PipeStageables.DATA_SHIFT_ARITH)
+  val xShiftDir = x(PipeStageables.DATA_SHIFT_DIR)
+  val xShiftAmt = x(PipeStageables.DATA_SHIFT_AMT)
+
+  val xDataResult = Bits(32 bits)
+  xDataResult := B(0, 32 bits)
+  switch(xDataSub) {
+    is(0) { // LOAD_IMM: zero-extend imm14
+      xDataResult := xDataImmU.asBits
+    }
+    is(1) { // MOV
+      xDataResult := xDataSrc
+    }
+    is(2) { // ADD_IMM: sign-extend imm14, add
+      xDataResult := (xDataSrc.asSInt + xDataImmS.asSInt).asBits
+    }
+    is(3) { // DEC: src - 1 with 32-bit unsigned wrap
+      xDataResult := (xDataSrc.asUInt - 1).asBits
+    }
+    is(4) { // AND_IMM (zero-extended)
+      xDataResult := xDataSrc & xDataImmU.asBits
+    }
+    is(5) { // OR_IMM
+      xDataResult := xDataSrc | xDataImmU.asBits
+    }
+    is(6) { // XOR_IMM
+      xDataResult := xDataSrc ^ xDataImmU.asBits
+    }
+    is(7) { // SHIFT (aleft handled by D-stage trap, not reachable here)
+      val srcU = xDataSrc.asUInt
+      val srcS = xDataSrc.asSInt
+      when(!xShiftDir) {
+        // left logical
+        xDataResult := (srcU |<< xShiftAmt).asBits
+      } otherwise {
+        when(xShiftArith) {
+          xDataResult := (srcS |>> xShiftAmt).asBits
+        } otherwise {
+          xDataResult := (srcU |>> xShiftAmt).asBits
+        }
+      }
+    }
+  }
+
+  when(x.isValid && xIsData) {
+    x.up(PipeStageables.WRITES_REG) := True
+    x.up(PipeStageables.WRITE_REG_ADDR) := x(PipeStageables.DATA_DST)
+    x.up(PipeStageables.WRITE_REG_DATA) := xDataResult
+    x.up(PipeStageables.REG_ZERO_FLAG_WRITE_EN) := True
+    x.up(PipeStageables.REG_ZERO_FLAG_VALUE) := (xDataResult === 0)
   }
 
   // ---- C.8 MARK 3-cycle inline mini-FSM ---------------------------------
@@ -1673,6 +1825,16 @@ case class EnginePipeline(cfg: MoleConfig) extends Component {
   regFile.io.writeEnable := w.down.isFiring && w(PipeStageables.WRITES_REG)
   regFile.io.writeAddr := w(PipeStageables.WRITE_REG_ADDR)
   regFile.io.writeData := w(PipeStageables.WRITE_REG_DATA)
+
+  // C.9: Commit REG_ZERO_FLAG update for DATA opcodes. The flag is write-
+  // once-overwritten per spec §7 / AGENTS §3.15 — every flag-writing DATA
+  // opcode unconditionally drives the new value (set if result=0, cleared
+  // otherwise). FLAG_CLEAR (X-stage) and DATA-W on the same cycle is
+  // structurally impossible (only one opcode in X at a time, and FLAG_CLEAR
+  // would be in W one cycle later than the DATA op it follows).
+  when(w.down.isFiring && w(PipeStageables.REG_ZERO_FLAG_WRITE_EN)) {
+    regZeroFlagReg := w(PipeStageables.REG_ZERO_FLAG_VALUE)
+  }
 
   // Commit ring push.
   //
