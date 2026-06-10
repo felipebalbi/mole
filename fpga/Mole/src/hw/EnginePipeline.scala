@@ -147,8 +147,20 @@ object PipeStageables {
   /** True when X commits a REG_ZERO_FLAG update at W. */
   val REG_ZERO_FLAG_WRITE_EN = Payload(Bool())
 
-  /** New REG_ZERO_FLAG value to commit at W. */
-  val REG_ZERO_FLAG_VALUE = Payload(Bool())
+  // X.5: The REG_ZERO_FLAG_VALUE payload was removed. Pre-X.5 the X
+  // stage computed `(xDataResult === 0)` combinationally and wrote it
+  // into a 1-bit X→W stage flop. The X-side path
+  //
+  //   _zz_xDataResult (R→X regA Reg) → ALU LUTs → ===0 carry chain
+  //     → X→W stage flop.D
+  //
+  // was the post-X.4 critical path on UP5K-SG48 (≈35.89 ns, seed 8).
+  // The fix moves the zero-detect into the W stage, sourced from the
+  // already-registered `w(WRITE_REG_DATA)` (the X→W flop's Q). The W
+  // stage commit and the W→X bypass both consume the same `wDataIsZero`
+  // expression — see the W-stage commit block and `xRegZeroFlagFwd`
+  // below. Latency to `regZeroFlagReg` is unchanged (commit still
+  // fires the cycle the DATA op is in W).
 
   // ---- R → X/W stages ---------------------------------------------------
 
@@ -898,7 +910,6 @@ case class EnginePipeline(cfg: MoleConfig) extends Component {
   x.up(PipeStageables.PC_REDIRECT_VALID) := False
   x.up(PipeStageables.PC_REDIRECT_TARGET) := U(0, 13 bits)
   x.up(PipeStageables.REG_ZERO_FLAG_WRITE_EN) := False
-  x.up(PipeStageables.REG_ZERO_FLAG_VALUE) := False
 
   // Decode helpers for X stage.
   // xIsWire: True only for WIRE-group instructions (group=0b00).
@@ -960,9 +971,21 @@ case class EnginePipeline(cfg: MoleConfig) extends Component {
   // those are written in X and visible to a subsequent X two cycles
   // later (the program-order gap is at least one fetch, and the existing
   // pipeline has at least one stage between back-to-back X cycles).
+  //
+  // X.5: zero-detect moved from X to W. `wDataIsZero` is computed once
+  // in the W stage from the already-X→W-registered `WRITE_REG_DATA` and
+  // is shared by the W commit (see W-stage block below) and this W→X
+  // bypass. The bypass-into-X comb path is now
+  //
+  //   _zz_WRITE_REG_DATA.Q (X→W flop) → ===0 → bypass Mux → xCondTrue
+  //
+  // which is shorter than the pre-X.5 ALU+===0 chain that was the
+  // post-X.4 critical path. See the comment on REG_ZERO_FLAG_VALUE
+  // (now removed) for the path topology being broken.
+  val wDataIsZero = w(PipeStageables.WRITE_REG_DATA) === 0
   val xRegZeroFlagFwd = Mux(
     w.isValid && w(PipeStageables.REG_ZERO_FLAG_WRITE_EN),
-    w(PipeStageables.REG_ZERO_FLAG_VALUE),
+    wDataIsZero,
     regZeroFlagReg
   )
 
@@ -1297,7 +1320,12 @@ case class EnginePipeline(cfg: MoleConfig) extends Component {
     x.up(PipeStageables.WRITE_REG_ADDR) := x(PipeStageables.DATA_DST)
     x.up(PipeStageables.WRITE_REG_DATA) := xDataResult
     x.up(PipeStageables.REG_ZERO_FLAG_WRITE_EN) := True
-    x.up(PipeStageables.REG_ZERO_FLAG_VALUE) := (xDataResult === 0)
+    // X.5: the zero-detect itself is computed in W from
+    // `w(WRITE_REG_DATA)` — see `wDataIsZero` near the cond evaluator
+    // and the W-stage commit block below. The 32-bit WRITE_REG_DATA
+    // payload is the X→W flop boundary the zero-detect now sources
+    // from, so the long X-side ALU+===0 carry-chain no longer feeds
+    // a stage flop's D-input.
   }
 
   // ---- C.8 MARK 3-cycle inline mini-FSM ---------------------------------
@@ -1920,8 +1948,13 @@ case class EnginePipeline(cfg: MoleConfig) extends Component {
   // otherwise). FLAG_CLEAR (X-stage) and DATA-W on the same cycle is
   // structurally impossible (only one opcode in X at a time, and FLAG_CLEAR
   // would be in W one cycle later than the DATA op it follows).
+  //
+  // X.5: the zero-detect is computed here (W stage) from the registered
+  // `w(WRITE_REG_DATA)` via the shared `wDataIsZero` expression declared
+  // up near the cond evaluator. See that block's comment for the path
+  // topology being broken.
   when(w.down.isFiring && w(PipeStageables.REG_ZERO_FLAG_WRITE_EN)) {
-    regZeroFlagReg := w(PipeStageables.REG_ZERO_FLAG_VALUE)
+    regZeroFlagReg := wDataIsZero
   }
 
   // Commit ring push.
