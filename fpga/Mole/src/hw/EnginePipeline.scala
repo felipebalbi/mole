@@ -874,10 +874,31 @@ case class EnginePipeline(cfg: MoleConfig) extends Component {
   // here they evaluate to False as defence-in-depth.
   //
   // Reads from the *current* architectural Reg values. WIRE flag writers
-  // (mismatchFlagReg / timeoutFlagReg) and START/STOP set/clear at the same
-  // cycle, so BRANCH_ON/WAIT_ON observe values "one cycle behind" the
-  // setting opcode — which is correct since BRANCH_ON/WAIT_ON are by
-  // construction a later opcode in program order.
+  // (mismatchFlagReg / timeoutFlagReg) and START/STOP set/clear in X, so
+  // BRANCH_ON/WAIT_ON observe values "one cycle behind" the setting opcode
+  // — which is correct since BRANCH_ON/WAIT_ON are by construction a later
+  // opcode in program order and the pipeline gap covers the visibility.
+  // REG_ZERO_FLAG is special: DATA writers commit it at W, one cycle later
+  // than X-stage writers. See the xRegZeroFlagFwd bypass below for the W→X
+  // forwarding that closes the DEC→BRANCH_ON_REG_ZERO hazard.
+  // C.9 fix: REG_ZERO_FLAG W→X bypass. DATA opcodes commit the flag at W
+  // (one cycle later than the X-stage WIRE FSM flag writers above). A
+  // BRANCH_ON / WAIT_ON with cond REG_ZERO or NOT_REG_ZERO immediately
+  // following a DATA writer (the canonical DEC-loop pattern from spec
+  // §5.21) would otherwise observe the stale regZeroFlagReg value — its
+  // X cycle is the same cycle as the DATA op's W commit. Forward the W-
+  // stage value to X when a flag-writing DATA op is firing in W. Mirrors
+  // the W→R bypass in RegFile (Phase C.5). No equivalent bypass needed
+  // for mismatchFlagReg / timeoutFlagReg / startFlagReg / stopFlagReg:
+  // those are written in X and visible to a subsequent X two cycles
+  // later (the program-order gap is at least one fetch, and the existing
+  // pipeline has at least one stage between back-to-back X cycles).
+  val xRegZeroFlagFwd = Mux(
+    w.isValid && w(PipeStageables.REG_ZERO_FLAG_WRITE_EN),
+    w(PipeStageables.REG_ZERO_FLAG_VALUE),
+    regZeroFlagReg
+  )
+
   val xCondCode = x(PipeStageables.COND_CODE)
   val xCondTrue = Bool()
   xCondTrue := False
@@ -892,8 +913,8 @@ case class EnginePipeline(cfg: MoleConfig) extends Component {
     is(7) { xCondTrue := observer.sclSampled } // SCL_HIGH
     is(8) { xCondTrue := timeoutFlagReg } // TIMEOUT
     is(9) { xCondTrue := !timeoutFlagReg } // NOT_TIMEOUT
-    is(10) { xCondTrue := regZeroFlagReg } // REG_ZERO
-    is(11) { xCondTrue := !regZeroFlagReg } // NOT_REG_ZERO
+    is(10) { xCondTrue := xRegZeroFlagFwd } // REG_ZERO (W→X bypass)
+    is(11) { xCondTrue := !xRegZeroFlagFwd } // NOT_REG_ZERO (W→X bypass)
     default { xCondTrue := False } // 12..15 reserved; trap path takes over.
   }
   val xCondReserved = xCondCode >= 12
