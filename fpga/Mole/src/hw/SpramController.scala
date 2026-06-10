@@ -128,39 +128,72 @@ case class SpramController(cfg: MoleConfig, useBlackBox: Boolean = true)
     /** Engine fetch response. `Flow`, not `Stream` — the SPRAM primitive
       * returns data one cycle after the address is presented and there is no
       * way to stall the read once it is issued. `Flow.valid` is true exactly
-      * one cycle after the cycle on which the corresponding `readCmd.fire`d.
+      * **two** cycles after the cycle on which the corresponding `readCmd`
+      * handshake fired (one cycle for the per-port `m2sPipe` input register
+      * added in Phase X.1 to break the critical-path routing between writers
+      * and the SPRAM hard block, plus one cycle for the SPRAM-internal
+      * synchronous read). Consumers wait on `readResp.valid` and so are
+      * timing-invariant w.r.t. this latency.
       */
     val readResp = master Flow (Bits(32 bits))
   }
+
+  // Per-port input pipeline registers (Phase X.1, Fmax fix).
+  //
+  // Each input port (loaderWrite, resultWrite, readCmd) is registered
+  // before entering the arbitration mux. This splits the long routing
+  // wire from the writer logic (the carry-chain compare in the loader
+  // adapter, the result-ring producer in W stage, the engine fetch PC)
+  // into two segments:
+  //
+  //   - Cycle N: writer drives port → m2sPipe register (long route OK).
+  //   - Cycle N+1: registered values feed arbiter mux → SPRAM hard
+  //     block (short, adjacent-LUT route, since the placer can keep
+  //     these regs and the mux close to the SB_SPRAM256KA corner).
+  //
+  // Each port keeps full one-transaction-per-cycle throughput; only the
+  // per-transaction latency goes from 0 to 1 cycle on the input side,
+  // and the readResp arrives 2 cycles after readCmd handshake instead
+  // of 1. The engine's F2 latch (EnginePipeline.scala §F2) is timing-
+  // invariant w.r.t. SPRAM response latency — it waits on
+  // io.spramResp.valid regardless of when it arrives.
+  //
+  // `collapsBubble = true` (m2sPipe default) keeps the upstream `ready`
+  // True when the register is empty, so the first transaction after an
+  // idle period still observes ready=True on cycle N (no warmup
+  // penalty).
+  val loaderWritePiped = io.loaderWrite.m2sPipe()
+  val resultWritePiped = io.resultWrite.m2sPipe()
+  val readCmdPiped = io.readCmd.m2sPipe()
 
   // Arbitration:
   //   - readCmd can always fire (the engine's critical path).
   //   - resultWrite fires when readCmd is not firing.
   //   - loaderWrite fires only when neither read nor result-write
   //     is firing.
-  io.readCmd.ready := True
-  io.resultWrite.ready := !io.readCmd.valid
-  io.loaderWrite.ready := !io.readCmd.valid && !io.resultWrite.valid
+  readCmdPiped.ready := True
+  resultWritePiped.ready := !readCmdPiped.valid
+  loaderWritePiped.ready := !readCmdPiped.valid && !resultWritePiped.valid
 
-  val doRead = io.readCmd.fire
-  val doResultWrite = io.resultWrite.fire
-  val doLoaderWrite = io.loaderWrite.fire
+  val doRead = readCmdPiped.fire
+  val doResultWrite = resultWritePiped.fire
+  val doLoaderWrite = loaderWritePiped.fire
   val doWrite = doResultWrite || doLoaderWrite
 
   // Address selection. Read wins; among writes, result wins.
   val addr = UInt(addrWidth bits)
   val wrData = Bits(32 bits)
   when(doRead) {
-    addr := io.readCmd.payload
+    addr := readCmdPiped.payload
   } elsewhen (doResultWrite) {
-    addr := io.resultWrite.payload.addr
+    addr := resultWritePiped.payload.addr
   } otherwise {
-    addr := io.loaderWrite.payload.addr
+    addr := loaderWritePiped.payload.addr
   }
   when(doResultWrite) {
-    wrData := io.resultWrite.payload.data
+    wrData := resultWritePiped.payload.data
   } otherwise {
-    wrData := io.loaderWrite.payload.data
+    wrData := loaderWritePiped.payload.data
   }
 
   if (useBlackBox) {

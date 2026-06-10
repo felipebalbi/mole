@@ -8,11 +8,14 @@ import spinal.lib._
 /** Black-box-style sim for [[SpramController]].
   *
   * Drives the controller with `useBlackBox = false` so we exercise the wrapper
-  * logic (address mux, arbitration, ready back-pressure, one-cycle read
-  * latency) against the SpinalHDL `Mem` substitute --- no external Verilog
-  * model of `SB_SPRAM256KA` required. The wrapper logic under test is identical
-  * between the two paths; the only thing the sim does not cover is the BlackBox
-  * port wiring itself, which is verified by HW bring-up (Phase C).
+  * logic (address mux, arbitration, ready back-pressure, two-cycle end-to-end
+  * read latency) against the SpinalHDL `Mem` substitute --- no external
+  * Verilog model of `SB_SPRAM256KA` required. The wrapper logic under test is
+  * identical between the two paths; the only thing the sim does not cover is
+  * the BlackBox port wiring itself, which is verified by HW bring-up
+  * (Phase C). The per-port `m2sPipe` input register added in Phase X.1
+  * contributes one of the two response-latency cycles; the SPRAM-internal
+  * synchronous read contributes the other.
   *
   * Cases -----
   *   1. **Write-then-read every cell.** Loader-write a recognizable pattern
@@ -27,8 +30,9 @@ import spinal.lib._
   *   4. **Result-ring wrap-around.** Drive a software-managed pointer past the
   *      result-ring size and verify the cells wrap cleanly without
   *      address-translation glitches.
-  *   5. **One-cycle read latency.** Verify exactly one cycle of
-  *      `readResp.valid` after each `readCmd.fire`, no more, no fewer.
+  *   5. **Two-cycle read latency.** Verify exactly one cycle of
+  *      `readResp.valid` two cycles after each `readCmd` handshake (one cycle
+  *      m2sPipe + one cycle SPRAM), no more, no fewer.
   *   6. **Read-vs-write to the same address.** With the read-priority arbiter
   *      the read wins on cycle N and the write fires on cycle N+1; the read
   *      therefore returns the *pre-write* value and the second read (issued
@@ -224,7 +228,9 @@ object SpramControllerSim {
       // Fork the response watcher BEFORE staging the contention.
       // It samples readResp.valid every cycle and exits the first
       // cycle it sees the pulse, so it cannot miss the one-cycle
-      // Flow.valid that fires on the cycle after readCmd fires.
+      // Flow.valid that fires two cycles after readCmd handshakes
+      // (one cycle to traverse the per-port m2sPipe input register
+      // added in Phase X.1, one cycle for the SPRAM-internal read).
       val resp = captureReadResp(dut)
 
       // Stage both sources simultaneously.
@@ -234,9 +240,12 @@ object SpramControllerSim {
       dut.io.resultWrite.payload.addr #= writeAddr
       dut.io.resultWrite.payload.data #= newVal
 
-      // After one clock the read must have fired, write must have
-      // been back-pressured.
-      dut.clockDomain.waitSampling()
+      // First cycle: both per-port m2sPipe stages are empty, so
+      // both upstream `ready` signals are True (collapsBubble).
+      // The transactions enter the input registers on this edge.
+      // Second cycle: stages are full; internal arbitration kicks
+      // in and the contending write sees `ready` go low.
+      dut.clockDomain.waitSampling(2)
       assert(
         dut.io.readCmd.ready.toBoolean,
         "readCmd.ready must be high while a read is contending"
@@ -245,7 +254,8 @@ object SpramControllerSim {
         !dut.io.resultWrite.ready.toBoolean,
         "resultWrite.ready must be low while a read is contending"
       )
-      // Drop the read; the write fires now.
+      // Drop the read; the staged read drains next cycle and then
+      // the write fires.
       dut.io.readCmd.valid #= false
 
       // Wait for the watcher to catch the readResp.valid pulse,
@@ -292,7 +302,10 @@ object SpramControllerSim {
       dut.io.resultWrite.payload.addr #= resultAddr
       dut.io.resultWrite.payload.data #= resultData
 
-      dut.clockDomain.waitSampling()
+      // First cycle: both per-port m2sPipe stages empty → both
+      // upstream `ready` are True (collapsBubble). Second cycle:
+      // stages full; arbitration kicks in.
+      dut.clockDomain.waitSampling(2)
       assert(
         dut.io.resultWrite.ready.toBoolean,
         "resultWrite.ready must be high (no competing read)"
@@ -362,11 +375,14 @@ object SpramControllerSim {
     }
   }
 
-  /** Case 5: read latency is exactly one cycle.
+  /** Case 5: read latency is exactly two cycles end-to-end.
     *
     * Drive `readCmd.valid` for a single cycle and sample `readResp.valid` on
-    * each cycle, asserting that it is high on the cycle immediately following
-    * the fire and low on every other cycle.
+    * each cycle, asserting that it eventually pulses high (the watcher catches
+    * the pulse regardless of when it lands) and is low again one cycle after
+    * the response. The Phase X.1 per-port m2sPipe input register adds one
+    * cycle on top of the SPRAM's intrinsic one-cycle synchronous read; total
+    * is two cycles from handshake to response.
     */
   def caseReadLatency(): Unit = {
     compileDut().doSim("read-latency") { dut =>
@@ -409,9 +425,9 @@ object SpramControllerSim {
         s"readResp.payload mismatch: 0x${got.toString(16)}"
       )
 
-      // Two full cycles after the fire `readCmd.valid` has been
-      // low long enough that `RegNext(doRead)` is settled False
-      // --- no race here, a bare sample is fine.
+      // After the watcher caught the pulse, one more cycle is
+      // enough for `RegNext(doRead)` to settle False --- no race
+      // here, a bare sample is fine.
       dut.clockDomain.waitSampling()
       assert(
         !dut.io.readResp.valid.toBoolean,
@@ -453,8 +469,10 @@ object SpramControllerSim {
       dut.io.resultWrite.payload.addr #= addr
       dut.io.resultWrite.payload.data #= post
 
-      // After one cycle: read fired, write is back-pressured.
-      dut.clockDomain.waitSampling()
+      // First cycle: per-port m2sPipe stages empty; both upstream
+      // `ready` are True. Second cycle: stages full, arbitration
+      // shows read winning, write back-pressured.
+      dut.clockDomain.waitSampling(2)
       assert(
         dut.io.readCmd.ready.toBoolean,
         "readCmd.ready must remain high while contending"
@@ -521,7 +539,10 @@ object SpramControllerSim {
       dut.io.loaderWrite.payload.addr #= writeAddr
       dut.io.loaderWrite.payload.data #= newVal
 
-      dut.clockDomain.waitSampling()
+      // First cycle: per-port m2sPipe stages empty; both upstream
+      // `ready` are True. Second cycle: stages full, arbitration
+      // shows read winning, loader-write back-pressured.
+      dut.clockDomain.waitSampling(2)
       assert(
         dut.io.readCmd.ready.toBoolean,
         "readCmd.ready must be high while a read is contending"
