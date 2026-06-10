@@ -104,6 +104,7 @@ sim: sim-config sim-opendrain sim-baud-gen sim-rx-sync \
      sim-engine-stretch-role \
      sim-engine-jmp-boundary \
      sim-engine-stretch sim-engine-target sim-engine-full \
+     sim-engine-data \
      sim-regfile sim-engine-pipeline ## Run all simulations (Phase C in flight)
 
 # Per-block sim / gen targets land here once their hint blocks in
@@ -181,6 +182,9 @@ sim-engine-smoke: ## EMIT_BIT smoke: i3c-OD vs i3c-PP byte trace (Step 9)
 
 sim-engine-full: ## Full ISA coverage of BitCycleEngineCore (Step 12)
 	$(SBT) -batch "runMain $(PACKAGE).BitCycleEngineSim"
+
+sim-engine-data: ## DATA-group ISA coverage (Phase C.9)
+	$(SBT) -batch "runMain $(PACKAGE).BitCycleEngineDataSim"
 
 sim-engine-target: ## Target-role coverage of BitCycleEngineCore (Step 19)
 	$(SBT) -batch "runMain $(PACKAGE).BitCycleEngineTargetSim"
@@ -265,6 +269,7 @@ help: ## Show this help (every target with a ## description)
         sim-tx-shiftreg sim-rx-shiftreg sim-tx-fsm sim-rx-fsm \
         sim-uart-tx sim-uart-rx sim-uart sim-spram sim-isa \
         sim-engine-smoke sim-engine-full sim-engine-target sim-pll \
+        sim-engine-data \
         sim-crc sim-iobuf sim-loader-fsm sim-drainer-fsm sim-top \
         sim-top-flow-control sim-symbol-decoder-contention \
         sim-engine-jmp-boundary sim-top-cts-violation \
