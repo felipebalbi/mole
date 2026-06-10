@@ -816,8 +816,36 @@ case class EnginePipeline(cfg: MoleConfig) extends Component {
 
   r.haltWhen(regFile.io.loadUseStall)
 
-  regFile.io.eValid := x.isValid && x(PipeStageables.WRITES_REG)
-  regFile.io.eWriteAddr := x(PipeStageables.WRITE_REG_ADDR)
+  // Load-use stall detector inputs — drive from REGISTERED D→X payloads
+  // (IS_LOAD_USE, DATA_DST) rather than the combinationally-overridden
+  // X-output payloads (WRITES_REG, WRITE_REG_ADDR).
+  //
+  // Phase X.2 Fmax fix. The previous wiring
+  //   regFile.io.eValid     := x.isValid && x(WRITES_REG)
+  //   regFile.io.eWriteAddr := x(WRITE_REG_ADDR)
+  // had the X-stage WIRE mini-FSM state (xWireWritesReg, xWireWriteAddr —
+  // combinational from timer.counter / sclDriveHigh / xCapture and friends)
+  // feeding regFile.io.loadUseStall, and from there into r.haltWhen and the
+  // f1/f2/d/r ready-propagation chain back to pcReg's clock-enable. The
+  // X.1 nextpnr report named this as the post-X.1 critical path (37.68 ns,
+  // 26.54 MHz best seed).
+  //
+  // The replacement is logically equivalent for the only output that
+  // matters here (regFile.io.loadUseStall):
+  //   loadUseStall = eValid && eIsLoadUse && (eWriteAddr matches)
+  //   eIsLoadUse   = IS_LOAD_USE = (decoded as DATA opcode at D)
+  // so widening eValid from WRITES_REG to IS_LOAD_USE does not change
+  // loadUseStall — every IS_LOAD_USE op is a DATA op, every DATA op writes
+  // a register, and the AND with eIsLoadUse already masks out the WIRE-
+  // capture writes (which write R7 but are not load-use producers).
+  // Similarly DATA_DST equals WRITE_REG_ADDR for every DATA op (the only
+  // case where eIsLoadUse=True).
+  //
+  // Both replacement signals are payloads written at D and registered
+  // across the d→r→x StageLinks, so they cut the combinational chain from
+  // X-stage state to r.haltWhen entirely.
+  regFile.io.eValid := x.isValid && x(PipeStageables.IS_LOAD_USE)
+  regFile.io.eWriteAddr := x(PipeStageables.DATA_DST)
   regFile.io.eIsLoadUse := x(PipeStageables.IS_LOAD_USE)
 
   // --------------------------------------------------------------------------
