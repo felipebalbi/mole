@@ -68,6 +68,16 @@ case class MoleTop(
   // Resync gap for the loader: 20 UART bit periods of idle on RX.
   val idleGapCycles: Int = 20 * uartCfg.ticksPerBit
 
+  // SPRAM address width derived from cfg directly (not from `pipeline`).
+  // `LoaderWidthAdapter` and `SpramController` are constructed before
+  // `pipeline` inside the engine ClockingArea; routing this through
+  // `pipeline.spramAddrWidth` would dereference a not-yet-assigned field
+  // (SpinalHDL elaborates Component bodies eagerly). The pipeline computes
+  // the same value from the same inputs — see EnginePipeline.scala:233.
+  val spramAddrWidth: Int = log2Up(
+    cfg.programWordCount + (cfg.resultRingByteCount + 3) / 4
+  )
+
   val io = new Bundle {
     val io_clk = in Bool ()
     val io_reset = in Bool ()
@@ -256,9 +266,6 @@ case class MoleTop(
 
     // ---- Loader width adapter: 16-bit → 32-bit ----------------------------
     loaderAdapter.io.loaderIn <> loader.io.programWrite
-
-    // spramAddrWidth helper (re-use pipeline's computed value)
-    def spramAddrWidth = pipeline.spramAddrWidth
 
     // ---- SPRAM port wiring -------------------------------------------------
 
