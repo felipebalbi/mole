@@ -27,10 +27,11 @@ GTKWAVE := gtkwave
 
 # Derived files. The Verilog entrypoint is `MoleTopVerilog`, the
 # generated module is `MoleTop`.
-V    := $(GEN_DIR)/$(TOP).v
-JSON := $(GEN_DIR)/$(TOP).json
-ASC  := $(GEN_DIR)/$(TOP).asc
-BIN  := $(GEN_DIR)/$(TOP).bin
+V      := $(GEN_DIR)/$(TOP).v
+JSON   := $(GEN_DIR)/$(TOP).json
+ASC    := $(GEN_DIR)/$(TOP).asc
+BIN    := $(GEN_DIR)/$(TOP).bin
+REPORT := $(GEN_DIR)/$(TOP).report.json
 
 # Hardware sources only -- sim sources don't affect Verilog
 # generation, so excluding them prevents needless rebuilds when
@@ -81,6 +82,46 @@ $(ASC): $(JSON) $(PCF)
 # 4. Pack (ASC -> BIN)
 $(BIN): $(ASC)
 	$(ICEPACK) $< $@
+
+# Interactive place-and-route viewer (requires nextpnr-ice40 built with
+# `-DBUILD_GUI=ON` — true on most Linux distributions and oss-cad-suite
+# builds; NOT true of the default macOS Homebrew build). Loads the same
+# netlist and constraints as the regular synth flow, then opens the Qt
+# GUI so you can browse the placed cells, routed nets, and timing paths.
+# Click on a cell to highlight its connections; click on a net to trace
+# it across the fabric. The "Timing" pane shows the critical paths
+# ranked by slack — single-click any line to highlight the corresponding
+# route on the chip layout.
+#
+# The .asc output goes to /tmp/ so it doesn't clobber the regular
+# bitstream build; the GUI is purely diagnostic.
+gui: $(JSON) $(PCF) ## Open nextpnr GUI on the v0.2 design (Linux/oss-cad-suite)
+	$(NEXTPNR) \
+		--up5k          \
+		--package sg48  \
+		--pcf $(PCF)    \
+		--json $<       \
+		--asc /tmp/$(TOP).gui.asc \
+		--freq 48       \
+		--seed 3        \
+		--gui
+
+# Machine-readable timing + utilisation report. Useful for tracking
+# Fmax across seeds and for scripted critical-path extraction.
+# Output: gen/<TOP>.report.json
+$(REPORT): $(JSON) $(PCF)
+	$(NEXTPNR) \
+		--up5k          \
+		--package sg48  \
+		--pcf $(PCF)    \
+		--json $<       \
+		--asc gen/$(TOP).report.asc \
+		--freq 48       \
+		--seed 3        \
+		--report $@     \
+		--detailed-timing-report
+
+report: $(REPORT) ## Generate nextpnr report (gen/<TOP>.report.json)
 
 # Aggregate sim target. Per-block sim targets land as the project
 # grows (see TODO.md). Keep this list and .PHONY in sync.
@@ -274,4 +315,5 @@ help: ## Show this help (every target with a ## description)
         sim-engine-emit-bit-data-hold \
         sim-engine-stretch sim-engine-stretch-role \
         sim-regfile sim-engine-pipeline \
-        gen waves flash clean distclean help
+        gen waves flash clean distclean help \
+        gui report
