@@ -1,43 +1,53 @@
 # Mole/fpga/Mole --- TODO
 
-Bottom-up bring-up plan for the Mole v0 bit-cycle engine in
-SpinalHDL, targeting the iCEbreaker (iCE40 UP5K-SG48). Same
-workflow as the sibling `icebreaker-spinalhdl-examples` projects:
-each block built in isolation, sim'd, then composed into a wrapper,
-then a top, then real silicon. Order isn't load-bearing --- adjust
-as the design teaches us something.
+Bottom-up bring-up plan for the Mole bit-cycle engine in
+SpinalHDL, targeting the iCEbreaker (iCE40 UP5K-SG48) as the
+Verde dev surface. Same workflow as the sibling
+`icebreaker-spinalhdl-examples` projects: each block built in
+isolation, sim'd, then composed into a wrapper, then a top, then
+real silicon. Order isn't load-bearing --- adjust as the design
+teaches us something.
 
-This TODO covers the **FPGA side** of `ROADMAP.md`'s v0 Phase 0 +
-Phase 1 (engine in HDL). The host-side Scheme compiler, encoder,
-and result decoder live in their own root-level crates (e.g.
-`../../mole-asm/`, `../../mole-asm-cli/`) and have their own
-bring-up plan (TBD).
+This TODO covers the **FPGA side** of `ROADMAP.md`. The
+host-side Rust crates (`../../mole-asm/`, `../../mole-asm-cli/`,
+`../../mole-loader/`, `../../mole-loader-cli/`, `../../mole-abi/`)
+have their own roadmap entries in the workspace docs.
 
 Each completed step gets a "What landed" entry so the design
 rationale survives independently of the source.
 
 **Note on historical "What landed" entries.** These are
-point-in-time records of what shipped at each step. Concrete
-values (`programWordCount`, opcode-field bit positions, BRANCH /
-WAIT operand widths, etc.) may have been superseded by later
-steps. Two notable retroactive deltas: Step 21 widened the
-opcode field from 4 bits at `[15:12]` to 5 bits at `[15:11]` (so
-operand-bearing positions shifted: `[11:0]` operands became
-`[10:0]`, `[11:8]cond [7:0]operand` became `[10:7]cond
-[6:0]operand`), and `programWordCount`'s cap dropped from 4096
-to 2048 as `JMP`'s addr field narrowed from 12 bits to 11. Step
-22 added `SET_ROLE` and made the engine role a runtime register.
-See code (`src/hw/Instruction.scala`, `src/hw/MoleConfig.scala`,
-`src/hw/BitCycleEngineCore.scala`) for current values.
+point-in-time records of what shipped at each step. They reflect
+the **v0 ISA** (15 opcodes, 16-bit fixed-width, opcode at
+`[15:11]`) and the v0 single-FSM engine. Concrete values
+(`programWordCount`, opcode-field bit positions, BRANCH / WAIT
+operand widths, etc.) have been **superseded by Phase C**. The
+current ISA is v0.2 (see below). v0-era step entries are kept
+verbatim as design archaeology; do not edit them to match v0.2
+values.
 
-The 15-opcode ISA (`EMIT_BIT`, `EMIT_QUARTER`, `STRETCH_SCL`,
-`WAIT_ON`, `SET_BUS_MODE`, `SAMPLE_BIT_ON_SCL`,
-`DRIVE_BIT_ON_SCL`, `JMP`, `BRANCH_ON`, `HALT`, `MARK`,
-`LOAD_TIMING`, `LOAD_LOOP`, `DEC_BRANCH`, `SET_ROLE`; 17
-reserved opcode slots in a 5-bit opcode field at `[15:11]`) and
-its 16-bit fixed-width encoding are the externally visible
-contract. See `../../ROADMAP.md` §"Layer 0" and `AGENTS.md`
-§"ISA is a stable contract" before changing either.
+The two notable v0-era retroactive deltas, both during the v0
+phases themselves: Step 21 widened the opcode field from 4 bits
+at `[15:12]` to 5 bits at `[15:11]` (so operand-bearing positions
+shifted: `[11:0]` operands became `[10:0]`, `[11:8]cond
+[7:0]operand` became `[10:7]cond [6:0]operand`), and
+`programWordCount`'s cap dropped from 4096 to 2048 as `JMP`'s
+addr field narrowed from 12 bits to 11. Step 22 added `SET_ROLE`
+and made the engine role a runtime register.
+
+## Current ISA (v0.2)
+
+The **26-opcode v0.2 ISA** (10 WIRE + 8 CTRL + 8 DATA opcodes;
+LOOP group fully reserved; 38 reserved sub-slots) supersedes the
+v0 ISA. **32-bit fixed-width** instructions; opcode field
+`{group[31:30], sub[29:26]}`; flag triple at `[2:0]` on the eight
+flag-bearing opcodes. **`docs/MOLE-0.2-SPEC.md` is the normative
+encoding** --- this file does not duplicate it. See
+`../../AGENTS.md` §3.9–§3.17 and `AGENTS.md` §"ISA is a stable
+contract" for the design contract; see Phase C below for the
+rework history. The v0 engine ran on real silicon through Step
+17 (TMP108 I2C); v0 bytecode is **not** cross-compatible with the
+v0.2 engine or encoder.
 
 ---
 
@@ -89,8 +99,14 @@ the design contract.
 - [x] **C.8.2 --- CTRL-group opcodes in X stage.** 5 NEW CTRL opcodes (BRANCH_ON, WAIT_ON, FLAG_CLEAR, MARK, LOAD_TIMING). Cond-code evaluator (combinational, shared by BRANCH_ON and WAIT_ON, codes 0..11 wired; 12..15 trap STATUS_TRAP). 8 timing registers + BUS_MODE-driven active divider mux per spec §5.17. Quarter-bit timestamp counter for MARK. START/STOP edge detection in observer. FLAG_CLEAR mask paths for all 5 sticky flags. MARK 3-word atomic commit via direct X→ring drive with mutex against W's ring-write path. Two `SPEC GAP` markers in source for the out-of-range BRANCH target and MARK mid-window overflow design calls (both ratified by orchestrator as `docs(spec)` candidates). Commit `abd2054`.
 - [x] **C.8.3a --- F2 flush + fetchActive deadlock fixes (uncovered by BRANCH_ON).** Two engine bugs surfaced by `BitCycleEngineJmpBoundarySim`: (1) the C.7 F2 latch state (`f2InstrReg`/`f2InstrValid`/`f2RespPending`) was not cleared on flush, so post-flush F2 transactions saw stale latched instructions; (2) `SpramController.resultWrite.ready := !readCmd.valid` caused a deadlock — F1 fetched continuously and back-pressured W's halt-commit ring write. Fix: clear F2 latch state in the flush handler; suppress F1 fetches when W has HALT_REQUEST in payload (observed at the registered W boundary to break a combinational loop through SPRAM arbitration). Resurrected `BitCycleEngineJmpBoundarySim` with 4 cases (in-range self-loop, max in-range, out-of-range forward, negative wrap). Commit `7719e8d`.
 - [x] **C.8.3b --- `xMarkPhase` re-arm fix + 3 sim resurrections.** Engine bug surfaced by writing `BitCycleEngineTargetSim` back-to-back MARKs: `xMarkPhase` had a 4-value lifecycle (0/1/2/3=DONE) whose phase-3→0 reset was predicated on `xMarkActive`, which goes False the same cycle `xMarkDone` goes True. The reset never fired; `xMarkPhase` wedged at 3; the next MARK left X without writing. Fix: collapse phase 3, reset `xMarkPhase := 0` directly on phase-2 success and overflow paths. Commit `dc3e536`. Then resurrected the remaining 3 stashed sims: `BitCycleEngineStretchSim` (LOAD_TIMING divider-swap audit, 2 cases), `BitCycleEngineTargetSim` (MARK format + back-to-back monotonicity + SAMPLE_BIT_ON_SCL match/mismatch via the HALT-word mismatch bit, 3 cases), `BitCycleEngineSim` (full-ISA CTRL coverage, 9 cases). DATA cases stay commented with `// V0.2-TODO: C.9 re-enable`. Commit `0fea780`.
+- [x] **POST-C.8 --- EMIT_BYTE `_IMM`/`_REG` split.** Spec §5.5 / §5.5b amended to define two live byte-emit opcodes sharing the X stage's 9-cell shift FSM: `EMIT_BYTE_REG` (sub `0b0100`, R7-sourced, v0-compatible) and the new `EMIT_BYTE_IMM` (sub `0b1001`, 8-bit payload at `[10:3]`, no R7 traffic). Motivation: a typical I2C write of 3–6 bytes was costing 6–12 instructions of `LOAD_IMM R7, <b>; EMIT_BYTE_REG` glue and gratuitous R7 load-use hazards; IMM flattens it to one instruction per byte. moleasm keeps bare `EMIT_BYTE` as sugar for `EMIT_BYTE_REG` (back-compat with v0.1 source); new sources should prefer the explicit form mirroring `EMIT_BIT_*` / `EMIT_QUARTER_*` / `STRETCH_SCL_*`. 6 commits `36374f2` → `dbcee94` → `c424c1a` → `d446b9a` → `3cdebd8` → `50d686b` cover spec, ABI, encoder, engine, sims, golden fixtures. Live WIRE-group count goes 9 → 10; total live opcodes 25 → 26 (38 reserved slots remain).
+- [x] **C.9 --- DATA-group opcodes + first nextpnr Fmax measurement.** 8 DATA opcodes in the X stage (LOAD_IMM / MOV / ADD_IMM / DEC / AND_IMM / OR_IMM / XOR_IMM / SHIFT). SHIFT `aleft` (arith=1+dir=0) traps STATUS_TRAP at D via the IS_TRAP path (SPEC GAP in source: no left-arithmetic semantics defined). REG_ZERO_FLAG written at W from `w(WRITE_REG_DATA) === 0` with an `xRegZeroFlagFwd` bypass for DATA→BRANCH_ON dependency. `MoleTop` NPE fix (`spramAddrWidth` hoisted to cfg-derived val so the `LoaderWidthAdapter`/`SpramController` construction order doesn't reach a not-yet-assigned `pipeline` field). Makefile retargeted to `--freq 48 --seed 3`. 5 commits `347422e` (DATA opcodes) + `ef43536` (REG_ZERO_FLAG W→X bypass) + `c68261c` (13 DATA tests) + `c7eb2a0` (--freq 48) + `139802d` (MoleTop NPE fix). First synth measurement on UP5K-SG48: Fmax 26.00–27.24 MHz across 10 seeds, critical path the SPRAM-data mux (~24.78 ns routing). 48 MHz target NOT met.
+- [x] **X.1–X.5 --- Fmax perf chain on UP5K-SG48.** Five rounds of perf work attacking successive long paths surfaced by nextpnr at the 48 MHz target. **X.1** registered SpramController port inputs (+1-cycle latency on the read path) and edge-drove `spramRead.valid` on `f1.down.isFiring` to avoid a one-cycle redundant pulse — commits `92b878e` + `7bda556`. **X.2** drove the load-use detector (`eValid`/`eWriteAddr`/`eIsLoadUse`) from D-registered payloads instead of X-stage outputs, breaking a combinational loop through the X→D back-edge — commit `a7cd721`. **X.4** inserted an `S2MLink` skid buffer at the F2 ↔ D boundary to break a ready-back-fan chain (X stalls were rippling back through F2 ready logic to F1 in a single cycle) — commit `d041988`. **X.5** moved the REG_ZERO_FLAG zero-detect from X to W (W's `WRITE_REG_DATA === 0` lands one cycle later but the BRANCH_ON bypass already covers the dependency) — commit `f86514a`. **Result:** each round broke a different long path but Fmax stayed in 26–32 MHz, peaking at 31.87 MHz best across 10 seeds at the 48 MHz target. UP5K-SG48 fabric is the binding factor at this design size, not pipeline logic depth. Headroom for 48+ MHz needs a different SKU; see Verde retarget below.
+- [x] **Makefile `gui` + `report` targets.** Two nextpnr diagnostic targets that load the same netlist + constraints as the main bitstream rule but route output to `/tmp/` instead of `gen/`. `gui` opens the Qt place-and-route viewer (requires `-DBUILD_GUI=ON`-built nextpnr-ice40 — true on Linux / oss-cad-suite, NOT true on default macOS Homebrew). `report` emits a machine-readable JSON timing + utilisation report for scripted critical-path extraction. Both pin to `--freq 24 --seed 3` matching the bitstream rule. Commit `e2ab0a3`.
+- [x] **Verde retarget to 24 MHz `engineClk`.** After the X.1–X.5 perf chain plateaued at ~32 MHz best across 10 seeds, the design call was made to drop the Verde target back to 24 MHz — the same fabric clock the v0 engine ran on against silicon at Step 17. Rationale: chasing a moving Fmax target eats engineering time better spent on Phase 0 features; 24 MHz gives ~30 % margin off the worst observed v0.2 Fmax (X.5: 31.87 MHz best); the 5-stage pipeline still pays in IPC even at the same clock (a v0-equivalent program runs in roughly the same wall-time despite the lower clock); Rojo (ECP5-45K) is the headroom SKU for 48+ MHz work and gets there structurally, not by chasing UP5K Fmax. Changes: `MolePllUp5k` DIVQ 3 → 4 (VCO 384 MHz / 16 = 24 MHz, was / 8 = 48 MHz); `clkOutUart` wired directly to `PLLOUTGLOBAL` instead of through the toggle-FF divider (1:1 ratio on Verde, the toggle-FF path is dead code now); `MoleConfig.fabricFreqHz` 48 → 24 MHz; `uartFreqHz` stays 24 MHz; ratio require relaxed from `== 2` to `∈ {1, 2}` (2:1 stays available for Rojo); Makefile `--freq 48 --seed 3` → `--freq 24 --seed 3`; integer-divider audit confirmed at 24 MHz for every standard rate. Spec §2 clock-domain table updated. AGENTS.md `Fabric frequency targets` block rewritten to document the X.1–X.5 plateau + the call. Commit `1356477`.
+- [x] **C.10 --- host-side closure for the sticky-flag observability contract.** The placeholder `#[ignore]` test `all_four_sticky_flags_observable_in_decoded_ring` in `mole-loader/tests/adversarial.rs` was written against a model in which all four sticky flags were expected to acquire dedicated HALT-word bits; v0.2 settled instead on a split — MISMATCH ships in HALT bit `[28]`, TIMEOUT / START / STOP are observable via program logic (BRANCH_ON consumes the flag, HALTed status code encodes the outcome; spec §6 + §11). Test re-authored to exercise the loader-side contract on both channels: any (status, mismatch, overflow) tuple round-trips through `decode_ring` without conflation. The engine-side "does it actually set the flag?" question stays with `BitCycleEngineSim` / `EnginePipelineSim`. Result: `cargo test --workspace` is 393 passed / 0 failed / 0 ignored. Commit `fea7f7e` (plus the orthogonal Makefile column-tidy `1c7228a`). Note: the v0 `MoleTopSim` family stashed in `attic/` is **not** resurrected here; that work is queued as C.11.b under the Phase C acceptance gate below.
 
-**Phase C status:** 28/28 sims green via `make sim`. C.1–C.8 complete. **C.9 (DATA opcodes + first nextpnr Fmax measurement) and C.10 (loader + drainer + frame v0.2 + dual-domain plumbing) are next.** A POST-C.8 EMIT_BYTE_IMM/_REG split (spec amendment + dual-encoder + engine + sims) is queued ahead of C.9 per user feedback that the unary EMIT_BYTE (R7-sourced) doubles the program-memory cost of every I2C operation vs. an immediate-byte variant. C.11 (end-to-end smoke on iCEBreaker + close Step 18 on MCXA268 under v0.2) is the Phase C acceptance gate per `AGENTS.md` §"Hardware bring-up gating".
+**Phase C status:** 29/29 sim targets green via `make sim`. C.1–C.10 complete. **C.11 (end-to-end acceptance gate)** is split into five sub-tasks (a, b host/sim-side; c, d, e hardware-side); see the `### 🔲 Step 18 / Phase C.11 acceptance gate` block in Phase 3 below for the hand-off contract.
 
 ---
 
@@ -1245,17 +1261,313 @@ coverage shipped in Steps 12 + 14. The bring-up evidence
 lives in the regression tests added alongside the host-side
 fixes listed under "Files" above.
 
-### 🔲 Step 18 --- MCXA dev board as I3C target
+### 🔲 Step 18 / Phase C.11 --- v0.2 hardware acceptance gate
 
-**Goal:** drive `embassy-mcxa` I3C target (which we own; see the
-sibling `embassy-mcxa/src/i3c/target.rs`) from a hand-encoded I3C
-SDR write-then-read program. Validates the engine's I3C SDR
-timing against a known-good controller-side reference.
+This step is the **Phase C acceptance gate** for the v0.2 engine
+per `AGENTS.md` §"Hardware bring-up gating". v0 closed Step 17
+(TMP108) against silicon and was retired; v0.2 reopens Step 18
+under the new ISA. **Sim-only completion does not equal step
+done.** The gate is real hardware behaving correctly on a real
+bus against a real DUT.
 
-**Bring-up gate:** soak test for ≥10⁵ iterations without
-mismatch. This is the v0 acceptance criterion --- after this
-step, Mole is ready for the Scheme SDK (Phase 2 in ROADMAP) to
-take over from hand-encoded programs.
+The HDL is frozen at commit `1356477` (Verde 24 MHz retarget).
+**Do not edit `fpga/Mole/src/hw/` during C.11 unless a regression
+is positively identified on the wire.** If something fails in
+silicon that worked in sim, that is news worth a dedicated `fix(engine):`
+commit, not a panic patch.
+
+**Split into five sub-tasks.** (a) and (b) are host-side /
+sim-side and can be done by any agent on any machine without a
+board in hand. (c), (d), (e) require physical hardware and are
+the cross-machine hand-off targets.
+
+#### C.11.a (host-side) --- re-port `tmp108.moleasm` to v0.2
+
+**Where:** `mole-asm/tests/fixtures/tmp108.moleasm` (v0 source,
+already in tree) and a new `mole-asm/tests/fixtures/tmp108.molecode`
+(v0.2 byte-exact golden fixture). Note `tmp108.moleasm` currently
+uses bare `EMIT_BYTE` (sugar for `EMIT_BYTE_REG`) preceded by
+`LOAD_IMM R7, <byte>` for every fixed byte (I2C address, register
+pointer). The v0.2 port should replace those pairs with
+`EMIT_BYTE_IMM <byte>, ...` — exactly the case the EMIT_BYTE_IMM
+opcode was designed for (POST-C.8 entry above).
+
+**Procedure:**
+1. Read the v0 fixture; identify every `LOAD_IMM R7, <const>;
+   EMIT_BYTE_REG ...` pair where `<const>` is known at compile
+   time.
+2. Rewrite each pair as a single `EMIT_BYTE_IMM <const>, ...`
+   carrying the same flag triple.
+3. Run `cargo run --bin mole-asm -- assemble
+   mole-asm/tests/fixtures/tmp108.moleasm -o
+   /tmp/tmp108.molecode` and golden-diff `/tmp/tmp108.molecode`
+   against the existing fixture to confirm wire-shape is
+   semantically identical (record count, flag positions; the
+   word count will drop).
+4. Add the new `.molecode` to `mole-asm/tests/fixtures/` so the
+   Scala `InstructionGoldenCrossCheckSim` consumes it
+   automatically.
+5. Run `cargo test -p mole-asm` (must stay green) and
+   `make sim-isa` (must stay green; the golden cross-check
+   reads the new fixture).
+
+**Caveat the user wants to discuss before this lands:** there
+is a complication with the v0 → v0.2 syntax port that affects
+whether this sub-task can be done before hardware bring-up or
+needs to be done with the board in hand. **Ask the user before
+starting C.11.a.** Context lives in the chat session that
+opened this hand-off (not in tree); if no context is
+reachable, the conservative default is "defer C.11.a to the
+hardware bring-up session and have the board on the bench
+while assembling the v0.2 fixture".
+
+**Acceptance:** new fixture in tree; `cargo test -p mole-asm` and
+`make sim-isa` both green; word count in the v0.2 fixture
+strictly less than v0 (proves the IMM opcode is doing its job).
+
+#### C.11.b (sim-side) --- re-port `MoleTopSim` family from `attic/`
+
+**Where:** `fpga/Mole/src/attic/MoleTopSim.scala.v0-stash`,
+`MoleTopFlowControlSim.scala.v0-stash`,
+`MoleTopCtsViolationSim.scala.v0-stash` are intent-only v0
+references. The corresponding v0.2 sims need to drive the
+**v0.2 frame format** (MAGIC + body_len + body + CRC; see
+`mole-abi/src/lib.rs`) into `MoleLoaderFsm`, watch the engine
+execute, and decode the drainer output through `mole-loader`'s
+`decode_ring` host-side function.
+
+**Why it has value even without hardware:** validates the v0.2
+frame → loader → SPRAM → engine → drainer → host decode chain
+end-to-end in SpinalSim. This is the largest gap in the current
+sim coverage — every component sim is green individually but no
+sim drives the full chain under one DUT compile. A regression
+in any inter-component contract (e.g. SPRAM byte ordering,
+loader address generation, drainer ring word count) would be
+caught here, not in any of the 29 existing sims.
+
+**Procedure:**
+1. Read the three v0 stash files; each documents a specific
+   end-to-end scenario (short halt round-trip; CTS / RTS flow
+   control; bad-CRC recovery and back-to-back frames).
+2. Re-author each as a v0.2 sim using:
+   - `mole-asm` (called from Scala via `sys.process` or
+     pre-assembled to a hex string in the sim source) to
+     generate the v0.2 frame bytes.
+   - `MoleLoaderFsm` driven by a sim-side UART TX
+     (`UartTx` in slave mode).
+   - The full pipelined `EnginePipeline` (not a stubbed
+     engine).
+   - `MoleDrainerFsm` to flush the ring back through a
+     sim-side UART RX.
+   - Host-side decode in the sim (a Scala port of the
+     `mole-loader::decode_ring` happy path is fine; doesn't
+     need to be exhaustive, only the assertions the v0 sims
+     made).
+3. Add three new Makefile targets `sim-top`,
+   `sim-top-flow-control`, `sim-top-cts-violation`. Update
+   the aggregate `sim:` target to depend on them.
+4. Delete the `.v0-stash` files from `attic/` once their v0.2
+   replacements are landing green. Keep `attic/README.md`
+   noting they were resurrected.
+
+**Caveat:** C.11.b can land before C.11.a. The order is
+independent.
+
+**Acceptance:** `make sim` reports 32/32 sim targets green
+(29 today + 3 new). At least one of the new sims exercises a
+known-good short HALT-0 program through the entire chain and
+asserts the decoded HALT word matches `tag=11, status=0,
+overflow=0, mismatch=0`.
+
+#### C.11.c (hardware) --- iCEbreaker bitstream flash + smoke HALT
+
+**Requires:** iCEbreaker board (iCE40 UP5K-SG48) plugged into
+USB on a machine with `iceprog`, `nextpnr-ice40`, `yosys`,
+`icestorm`, `sbt`, and `cargo` on PATH. macOS Homebrew and
+Linux oss-cad-suite are both known-working host toolchains; the
+nextpnr GUI (`make gui`) is Linux-only on oss-cad-suite (see
+the `gui` target's doc comment in `fpga/Mole/Makefile`).
+
+**Procedure:**
+1. From `fpga/Mole/`: `make clean && make all` to produce
+   `gen/MoleTop.bin`. Expected: nextpnr meets timing at 24 MHz
+   on seed 3 (Verde target; not 48 MHz — see Verde retarget
+   above and `MoleConfig.fabricFreqHz`). If it misses, try
+   another seed via `make all SEED=<N>`; do **not** raise the
+   target.
+2. `make flash` (this is `iceprog gen/MoleTop.bin`). Expected:
+   "VERIFY OK" from iceprog; the blue heartbeat LED on the
+   iCEbreaker pulses at ~1 Hz; the green LED is off (engine
+   idle).
+3. From the repo root: build the smoke fixture as a v0.2 frame.
+   Suggested moleasm program: `SET_BUS_MODE i2c; HALT 0`. Save
+   as `/tmp/halt.moleasm`. Run:
+   ```sh
+   cargo run --bin mole-asm -- assemble /tmp/halt.moleasm \
+       -o /tmp/halt.molecode
+   cargo run --bin mole-loader-cli -- \
+       --port /dev/ttyUSB0 \
+       --frame /tmp/halt.molecode \
+       --ring-bytes 8192
+   ```
+   (Adjust `/dev/ttyUSB0` per OS / device enumeration; on macOS
+   it is typically `/dev/tty.usbserial-ibXXXXXX`.)
+4. Expected output: drainer returns 8192 bytes; loader-cli
+   decodes a `HaltStatus { status: 0, mismatch: false, overflow:
+   false }`. Green LED briefly flashes; blue heartbeat resumes.
+
+**Failure-mode catalogue:**
+- *Nothing drains, red LED pulses.* Bad CRC or `len`
+  mismatch. Stop sending for ≥20 µs (idle line) so the loader
+  returns to `idleState`; retry. See `WIRE_FORMAT.md`
+  §"Resync rule".
+- *Drains all-zeros / all-0xFF.* Likely no power or PLL
+  never locked. Power-cycle; re-flash; verify with `dmesg`
+  that the FT2232H enumerates as two `/dev/ttyUSB*` devices.
+- *Drainer returns fewer than 8192 bytes.* `crtscts` is not
+  enabled on the host. `mole-loader-cli` should set it via
+  the serialport builder; if you're driving raw, run
+  `stty -F /dev/ttyUSB0 1000000 cs8 -cstopb -parenb crtscts
+  -ixon -ixoff -ixany raw` first.
+
+**Acceptance:** clean HALT 0 word decoded by `mole-loader-cli`
+from a freshly flashed Verde bitstream. Add the smoke procedure
+output (last 50 lines of the loader-cli session) as a comment
+on the C.11.c closeout commit.
+
+#### C.11.d (hardware) --- TMP108 I2C regression under v0.2
+
+**Requires:** everything from C.11.c plus a **TMP108 sensor**
+wired to PMOD1A (PMOD1A.1 → SCL, PMOD1A.2 → SDA), with external
+4.7 kΩ pull-ups to 3.3 V. PMOD1A does **not** have on-board
+pull-ups. Optional but recommended: a 2-channel scope on
+SDA / SCL.
+
+This step **must** wait for C.11.a (the v0.2 TMP108 fixture).
+Without it there is nothing to send.
+
+**Procedure:**
+1. Assemble `tmp108.moleasm` to `/tmp/tmp108.molecode` (from
+   C.11.a). Send via `mole-loader-cli` exactly as in C.11.c.
+2. Expected ring: 19 CAPTURE records (3 slave ACKs + 8 MSB
+   data bits + 8 LSB data bits) followed by a clean HALT
+   status=0. The CAPTURE records decode to a 16-bit signed
+   temperature; at room ambient that should land in
+   roughly 20–25 °C. The TMP108 datasheet's register-0x00
+   layout (12-bit Q4.4 in the high 12 bits) is what the
+   decode logic should produce.
+3. Repeat 100 times back-to-back via a small shell loop;
+   confirm no MISMATCH bit set in any HALT word, no overflow,
+   no STATUS_TRAP, and consecutive temperature readings
+   within ±1 °C of each other (TMP108 quantises at 0.0625 °C
+   so readings should be near-identical).
+
+**Failure-mode catalogue:**
+- *Slave does not ACK its address* (first CAPTURE record is
+  `recessive`, not `dominant`). Bus wiring wrong, no pull-
+  ups, or TMP108 address wrong. Scope SDA and SCL — confirm
+  100 kHz SCL, clean address byte (7-bit address `0x48` by
+  default), clean ACK slot.
+- *MISMATCH bit set, otherwise correct.* The v0.2 engine's
+  EMIT_BYTE_IMM ACK-slot semantics differ from v0 in some
+  edge case. Capture full RAW frames + ring on both v0
+  (still in `attic/`) and v0.2 silicon side-by-side; file
+  a `fix(engine):` issue with the diff.
+- *Drain comes back but HALT has STATUS_TRAP (0x1F).* The
+  engine hit a reserved opcode, reserved cond code, reserved
+  tx_symbol, or out-of-range BRANCH. Most likely cause: an
+  ABI drift between the encoder and engine. Compare the
+  `/tmp/tmp108.molecode` output against the spec §3/§4
+  encoding table by hand for the first few words.
+
+**Acceptance:** 100 consecutive successful TMP108 reads at
+room ambient, all within ±1 °C, no MISMATCH / overflow /
+STATUS_TRAP. Add the loop output as a comment on the C.11.d
+closeout commit.
+
+#### C.11.e (hardware) --- MCXA268 I3C target soak
+
+**Requires:** everything from C.11.c plus an **NXP MCXA268 dev
+board** wired as the I3C controller, with Mole's PMOD1A SDA /
+SCL pads wired to the MCXA268's I3C bus. External pull-ups per
+the I3C spec (1 kΩ pull-up to 1.8 V for I3C-OD windows;
+matching `BUS_MODE.i3c-OD` divider on Mole). Scope strongly
+recommended.
+
+**Why MCXA268 specifically:** the sibling repo `embassy-mcxa`
+has a working I3C target driver (`embassy-mcxa/src/i3c/target.rs`)
+that this gate validates Mole's engine against. The MCXA268 is
+the known-good *controller-side reference* for our team; passing
+this gate proves Mole behaves correctly as an I3C target on a
+bus driven by an independently developed controller.
+
+**Procedure:**
+1. Author a target-role moleasm program that uses Mole's
+   `SET_ROLE Target` opcode (or the runtime-default if
+   `MoleConfig.role = Target` was set at elaboration), sets
+   `BUS_MODE i3c-OD`, and uses `SAMPLE_BIT_ON_SCL` /
+   `DRIVE_BIT_ON_SCL` (target-role opcodes; see spec §5.4 /
+   §5.5) to respond to a multi-byte I3C write from the
+   MCXA268. Suggested first program: respond to a single
+   private write of 4 bytes; capture all 36 bits (4 × 8 data
+   + 4 ACK slots); HALT clean.
+2. On the MCXA268, run an `embassy-mcxa` test program that
+   issues exactly that write at 1 MHz SCL.
+3. Soak: ≥10⁵ iterations without mismatch. This is the v0.2
+   acceptance criterion (matches v0's Step 18 spec).
+4. If anything fails, scope the bus during a failure event:
+   miscount on SAMPLE_BIT_ON_SCL is the highest-prior
+   suspect (the v0 engine's edge-detector had subtle
+   start-of-bit alignment hazards; the v0.2 pipelined
+   version reused the same `BusObserver` so any v0 hazards
+   may reproduce).
+
+**Acceptance:** 10⁵ iterations without mismatch / overflow /
+STATUS_TRAP; the engine reports the expected 36-bit capture
+record stream every iteration; HALT word is clean status=0
+every iteration. **After this passes, Mole v0.2 is ready for
+Phase 0 release** (first tagged encoder + bytecode-format
+freeze; see `AGENTS.md` §3.17).
+
+#### Cross-machine hand-off prerequisites
+
+For an agent on a different machine to pick up C.11.c/d/e cold,
+they will need:
+
+- **Repository:** `git clone` of this repo on branch `v0.2` at
+  commit `1356477` or later. Tree must be clean.
+- **Host toolchain:** `cargo` (Rust 1.79+, stable), `sbt` 1.9+,
+  `nextpnr-ice40`, `yosys`, `icestorm`. macOS Homebrew or Linux
+  oss-cad-suite both work for the FPGA tools. Rust is via
+  rustup.
+- **Mole binaries:** `cargo build --release -p mole-asm-cli -p
+  mole-loader-cli` produces `target/release/mole-asm` and
+  `target/release/mole-loader`. Add to PATH or use full paths.
+- **Verification before touching hardware:** `cargo test
+  --workspace` must report 393 passed / 0 failed / 0 ignored;
+  `make sim` (in `fpga/Mole/`) must report 29/29 sim targets
+  green (32/32 if C.11.b has landed). Either failing means
+  something has drifted since the HDL freeze at `1356477`;
+  stop and ask before flashing.
+- **Hardware kit:** see each sub-task's `**Requires:**` block.
+
+#### C.11 closeout convention
+
+When C.11.c, d, e each pass on hardware:
+
+1. Tick the corresponding sub-checkbox in `## ✅ Done` at the
+   top.
+2. Convert the sub-task block above from `#### C.11.x (hardware)
+   --- ...` to `#### ✅ C.11.x --- ...` with a "What landed"
+   body including: **Hardware** (board / DUT / pull-ups / scope
+   trace), **Procedure delta** (any deviation from the script),
+   **Results** (counts, observations, scope screenshots if any
+   were captured to a non-repo location), **Commit** (the
+   closeout commit hash).
+3. When all five sub-tasks are green, replace the **Phase C
+   status** line at the end of the `## ✅ Done` section with
+   "**Phase C complete. Ready for Phase 0 release.**" and open
+   `ROADMAP.md` for the Phase 0 work plan.
 
 ---
 
