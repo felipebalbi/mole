@@ -99,29 +99,29 @@ $(BIN): $(ASC)
 # The .asc output goes to /tmp/ so it doesn't clobber the regular
 # bitstream build; the GUI is purely diagnostic.
 gui: $(JSON) $(PCF) ## Open nextpnr GUI on the v0.2 design (Linux/oss-cad-suite)
-	$(NEXTPNR) \
-		--up5k          \
-		--package sg48  \
-		--pcf $(PCF)    \
-		--json $<       \
+	$(NEXTPNR)                        \
+		--up5k                    \
+		--package sg48            \
+		--pcf $(PCF)              \
+		--json $<                 \
 		--asc /tmp/$(TOP).gui.asc \
-		--freq 24       \
-		--seed 3        \
+		--freq 24                 \
+		--seed 3                  \
 		--gui
 
 # Machine-readable timing + utilisation report. Useful for tracking
 # Fmax across seeds and for scripted critical-path extraction.
 # Output: gen/<TOP>.report.json
 $(REPORT): $(JSON) $(PCF)
-	$(NEXTPNR) \
-		--up5k          \
-		--package sg48  \
-		--pcf $(PCF)    \
-		--json $<       \
+	$(NEXTPNR)                          \
+		--up5k                      \
+		--package sg48              \
+		--pcf $(PCF)                \
+		--json $<                   \
 		--asc gen/$(TOP).report.asc \
-		--freq 24       \
-		--seed 3        \
-		--report $@     \
+		--freq 24                   \
+		--seed 3                    \
+		--report $@                 \
 		--detailed-timing-report
 
 report: $(REPORT) ## Generate nextpnr report (gen/<TOP>.report.json)
