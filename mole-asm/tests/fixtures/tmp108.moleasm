@@ -21,7 +21,24 @@
 ;
 ; v0.2 spelling: EMIT_BIT/EMIT_QUARTER → _IMM suffix; LOAD_TIMING
 ; uses positional reg/divider (reg=0 = i2c quarter-bit divider per
-; §5.17).
+; §5.17). Compile-time-known bytes (I2C address, register pointer,
+; repeated-start address) use EMIT_BYTE_IMM (§5.5b) instead of
+; the 9-EMIT_BIT_IMM-per-byte spelling: each byte collapses to one
+; instruction and the slave-ACK observation rides on the opcode's
+; flag triple. Slave-sourced data bytes (the 16-bit temperature
+; reading) stay bit-by-bit so each read bit gets its own CAPTURE
+; record in the ring.
+;
+; (use-raw-primitives) is required because EMIT_BYTE_IMM mask=1
+; normally triggers the §5.5 E-WIRE-003 pairing rule (program must
+; BRANCH_ON MISMATCH or FLAG_CLEAR after the byte). This fixture is
+; fire-and-forget-capture: each ACK observation lands in the ring,
+; and the host examines them post-mortem along with the data bits.
+; The bit-by-bit version of this fixture had the same semantics
+; without raising E-WIRE-003 because the rule is gated to
+; EMIT_BYTE_*. The pragma documents that the asymmetry is
+; intentional here.
+(use-raw-primitives)
 
 .equ slow_div, 59           ; 100 kHz target at 24 MHz fabric
 
@@ -38,31 +55,11 @@
         EMIT_QUARTER_IMM  sda=dominant  scl=dominant
         EMIT_QUARTER_IMM  sda=dominant  scl=dominant
 
-        ; -- addr_write = 0x90 = 1001_0000 --
-        EMIT_BIT_IMM      tx=recessive
-        EMIT_BIT_IMM      tx=dominant
-        EMIT_BIT_IMM      tx=dominant
-        EMIT_BIT_IMM      tx=recessive
-        EMIT_BIT_IMM      tx=dominant
-        EMIT_BIT_IMM      tx=dominant
-        EMIT_BIT_IMM      tx=dominant
-        EMIT_BIT_IMM      tx=dominant
+        ; -- addr_write = 0x90 = 1001_0000 + slave ACK --
+        EMIT_BYTE_IMM     imm=0x90 expect=0 mask=1 capture=1
 
-        ; -- slave ACK --
-        EMIT_BIT_IMM      tx=recessive expect=0 mask=1 capture=1
-
-        ; -- ptr_temp = 0x00 = all zero --
-        EMIT_BIT_IMM      tx=dominant
-        EMIT_BIT_IMM      tx=dominant
-        EMIT_BIT_IMM      tx=dominant
-        EMIT_BIT_IMM      tx=dominant
-        EMIT_BIT_IMM      tx=dominant
-        EMIT_BIT_IMM      tx=dominant
-        EMIT_BIT_IMM      tx=dominant
-        EMIT_BIT_IMM      tx=dominant
-
-        ; -- slave ACK --
-        EMIT_BIT_IMM      tx=recessive expect=0 mask=1 capture=1
+        ; -- ptr_temp = 0x00 + slave ACK --
+        EMIT_BYTE_IMM     imm=0x00 expect=0 mask=1 capture=1
 
         ; -- Repeated START --
         EMIT_QUARTER_IMM  sda=dominant  scl=dominant
@@ -76,18 +73,8 @@
         EMIT_QUARTER_IMM  sda=dominant  scl=dominant
         EMIT_QUARTER_IMM  sda=dominant  scl=dominant
 
-        ; -- addr_read = 0x91 = 1001_0001 --
-        EMIT_BIT_IMM      tx=recessive
-        EMIT_BIT_IMM      tx=dominant
-        EMIT_BIT_IMM      tx=dominant
-        EMIT_BIT_IMM      tx=recessive
-        EMIT_BIT_IMM      tx=dominant
-        EMIT_BIT_IMM      tx=dominant
-        EMIT_BIT_IMM      tx=dominant
-        EMIT_BIT_IMM      tx=recessive
-
-        ; -- slave ACK --
-        EMIT_BIT_IMM      tx=recessive expect=0 mask=1 capture=1
+        ; -- addr_read = 0x91 = 1001_0001 + slave ACK --
+        EMIT_BYTE_IMM     imm=0x91 expect=0 mask=1 capture=1
 
         ; -- read MSB (8 capture bits) --
         EMIT_BIT_IMM      tx=recessive capture=1
