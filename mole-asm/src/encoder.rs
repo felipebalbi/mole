@@ -89,10 +89,9 @@ fn check_tx(name: &str, tx: u8, raw_mode: bool) -> Result<(), String> {
         ));
     }
     if tx == 0b11 && !raw_mode {
-        return Err(format!(
-            "E-WIRE-001: tx=reserved (0b11) requires \
+        return Err("E-WIRE-001: tx=reserved (0b11) requires \
              '(use-raw-primitives)' pragma; use .dw or declare raw/"
-        ));
+            .to_string());
     }
     Ok(())
 }

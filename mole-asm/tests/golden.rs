@@ -4,7 +4,7 @@
 //!
 //!   - `<name>.moleasm`   the human-written source,
 //!   - `<name>.molecode`  the raw SPRAM image (preamble + body, packed
-//!                        little-endian, no UART envelope),
+//!     little-endian, no UART envelope),
 //!   - `<name>.mole.bin`  the UART frame (length prefix + bytecode + CRC).
 //!
 //! Each fixture is asserted byte-identical at two granularities:

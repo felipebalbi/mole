@@ -101,7 +101,7 @@ proptest! {
     /// It must NEVER panic, infinite-loop, or abort.
     #[test]
     fn assemble_never_panics_on_arbitrary_utf8(src in ".*") {
-        let _ = std::panic::catch_unwind(|| {
+        std::panic::catch_unwind(|| {
             let _ = mole_asm::assemble(&src, "<proptest>");
         }).expect("assemble panicked on arbitrary UTF-8 input");
     }
@@ -125,7 +125,7 @@ proptest! {
         bytes in prop::collection::vec(any::<u8>(), 0..4096)
     ) {
         let src = String::from_utf8_lossy(&bytes).into_owned();
-        let _ = std::panic::catch_unwind(|| {
+        std::panic::catch_unwind(|| {
             let _ = mole_asm::assemble(&src, "<proptest>");
         }).expect("assemble panicked on lossy-UTF-8 input");
     }
@@ -149,7 +149,7 @@ proptest! {
         lines in prop::collection::vec(structured_line_strategy(), 0..64)
     ) {
         let src = lines.join("\n");
-        let _ = std::panic::catch_unwind(|| {
+        std::panic::catch_unwind(|| {
             let _ = mole_asm::assemble(&src, "<proptest>");
         }).expect("assemble panicked on structured input");
     }
@@ -171,7 +171,7 @@ proptest! {
     fn build_frame_never_panics(
         words in prop::collection::vec(any::<u32>(), 0..10_000)
     ) {
-        let _ = std::panic::catch_unwind(|| {
+        std::panic::catch_unwind(|| {
             let _ = mole_asm::frame::build_frame(&words);
         }).expect("build_frame panicked on arbitrary u32 slice");
     }
@@ -193,7 +193,7 @@ proptest! {
     fn crc16_never_panics(
         bytes in prop::collection::vec(any::<u8>(), 0..100_000)
     ) {
-        let _ = std::panic::catch_unwind(|| {
+        std::panic::catch_unwind(|| {
             let _ = mole_asm::frame::crc16_xmodem(&bytes);
         }).expect("crc16_xmodem panicked on arbitrary bytes");
     }
@@ -215,7 +215,7 @@ proptest! {
     fn pack_bytecode_never_panics(
         words in prop::collection::vec(any::<u32>(), 0..10_000)
     ) {
-        let _ = std::panic::catch_unwind(|| {
+        std::panic::catch_unwind(|| {
             let bytes = mole_asm::frame::pack_bytecode(&words);
             // Length invariant: 4 bytes per word.
             assert_eq!(bytes.len(), words.len() * 4);

@@ -14,7 +14,6 @@ use crate::decode::decode_word;
 /// Frame-detection and strip logic is inlined here (same heuristic as
 /// `inspect`).  The two subcommands share the same detection rules but
 /// are kept separate to avoid coupling their Args structs.
-
 const PREAMBLE_WORDS: usize = 2;
 
 #[derive(Debug, clap::Args)]

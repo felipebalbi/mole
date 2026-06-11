@@ -627,10 +627,9 @@ fn resolve_tx_key(
             }
             return Err(AsmError::operand(
                 loc,
-                format!(
-                    "E-WIRE-001: tx=reserved (0b11) requires \
+                "E-WIRE-001: tx=reserved (0b11) requires \
                      '(use-raw-primitives)' pragma"
-                ),
+                    .to_string(),
             ));
         }
     }
@@ -752,7 +751,7 @@ fn find_emit_byte_pair(
                         .filter(|s| s.kind == SymbolKind::Equate)
                         .map(|s| s.value)
                 } else {
-                    parse_int_raw(mask_tok).ok().map(|v| v as i64)
+                    parse_int_raw(mask_tok).ok()
                 };
                 if let Some(m) = resolved {
                     if m & 1 != 0 {

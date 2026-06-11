@@ -245,6 +245,6 @@ mod tests {
         // 8192 × 4 bytes = 32768 bytes total program memory.
         assert_eq!(MAX_PROGRAM_WORDS * 4, 32768);
         // UP5K SPRAM is 4 × 16-KiB = 65536 bytes; program fits.
-        assert!(32768 <= 65536);
+        // assert!(32768 <= 65536);
     }
 }
