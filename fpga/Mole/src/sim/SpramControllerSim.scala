@@ -9,13 +9,13 @@ import spinal.lib._
   *
   * Drives the controller with `useBlackBox = false` so we exercise the wrapper
   * logic (address mux, arbitration, ready back-pressure, two-cycle end-to-end
-  * read latency) against the SpinalHDL `Mem` substitute --- no external
-  * Verilog model of `SB_SPRAM256KA` required. The wrapper logic under test is
-  * identical between the two paths; the only thing the sim does not cover is
-  * the BlackBox port wiring itself, which is verified by HW bring-up
-  * (Phase C). The per-port `m2sPipe` input register added in Phase X.1
-  * contributes one of the two response-latency cycles; the SPRAM-internal
-  * synchronous read contributes the other.
+  * read latency) against the SpinalHDL `Mem` substitute --- no external Verilog
+  * model of `SB_SPRAM256KA` required. The wrapper logic under test is identical
+  * between the two paths; the only thing the sim does not cover is the BlackBox
+  * port wiring itself, which is verified by HW bring-up (Phase C). The per-port
+  * `m2sPipe` input register added in Phase X.1 contributes one of the two
+  * response-latency cycles; the SPRAM-internal synchronous read contributes the
+  * other.
   *
   * Cases -----
   *   1. **Write-then-read every cell.** Loader-write a recognizable pattern
@@ -380,9 +380,9 @@ object SpramControllerSim {
     * Drive `readCmd.valid` for a single cycle and sample `readResp.valid` on
     * each cycle, asserting that it eventually pulses high (the watcher catches
     * the pulse regardless of when it lands) and is low again one cycle after
-    * the response. The Phase X.1 per-port m2sPipe input register adds one
-    * cycle on top of the SPRAM's intrinsic one-cycle synchronous read; total
-    * is two cycles from handshake to response.
+    * the response. The Phase X.1 per-port m2sPipe input register adds one cycle
+    * on top of the SPRAM's intrinsic one-cycle synchronous read; total is two
+    * cycles from handshake to response.
     */
   def caseReadLatency(): Unit = {
     compileDut().doSim("read-latency") { dut =>

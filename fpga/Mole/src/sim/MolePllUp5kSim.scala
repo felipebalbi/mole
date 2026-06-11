@@ -5,23 +5,24 @@ import spinal.core.sim._
 
 /** Smoke sim for [[MolePllUp5k]].
   *
-  * The wrapper is a thin BlackBox-vs-bypass selector with registered logic only
-  * in the ÷2 uartClk divider. Three things to verify:
+  * The wrapper is a thin BlackBox-vs-bypass selector. Three things to verify:
   *
   *   1. The bypass path elaborates cleanly: `clkOutEngine` tracks `clkIn`
-  *      (1:1), `clkOutUart` toggles at half the rate of `clkIn`, and `locked`
-  *      stays high. This is the path [[MoleTopSim]] depends on, since Verilator
-  *      has no model of the iCE40 `SB_PLL40_PAD` cell.
+  *      (1:1), `clkOutUart` also tracks `clkIn` (1:1, current Verde topology —
+  *      both outputs share the same source), and `locked` stays high. This is
+  *      the path [[MoleTopSim]] depends on, since Verilator has no model of the
+  *      iCE40 `SB_PLL40_PAD` cell.
   *   2. The BlackBox path elaborates to Verilog without errors and emits the
-  *      `SB_PLL40_PAD` primitive with the 48 MHz recipe generics (DIVR=0,
-  *      DIVF=31, DIVQ=3, FILTER_RANGE=1, FEEDBACK_PATH="SIMPLE"). yosys's
+  *      `SB_PLL40_PAD` primitive with the 24 MHz recipe generics (DIVR=0,
+  *      DIVF=31, DIVQ=4, FILTER_RANGE=1, FEEDBACK_PATH="SIMPLE"). yosys's
   *      `synth_ice40` is the actual end-to-end check; here we just verify the
   *      SpinalHDL elaboration stage produces a Verilog file that mentions the
   *      primitive, so a future refactor that silently drops the BlackBox is
   *      caught at sim time rather than at the next bitstream build.
-  *   3. New: the bypass path's `clkOutUart` follows a 2:1 toggle pattern when
-  *      driven with 10 rising edges of `clkIn`. Both `clkOutEngine` and
-  *      `clkOutUart` IOs are verified on the BlackBox Verilog boundary.
+  *   3. The bypass path's `clkOutUart` tracks `clkIn` 1:1 (both outputs are
+  *      wired to the same PLL output on Verde). The IO shape preserves a
+  *      separate `clkOutUart` for a future 2:1 ratio retarget (e.g. on Mole
+  *      Rojo with ECP5 headroom) without re-shaping consumers.
   *
   * Run: `sbt "runMain mole.MolePllUp5kSim"`
   */
@@ -38,8 +39,8 @@ object MolePllUp5kSim extends App {
       dut.clockDomain.forkStimulus(period = 10)
 
       // clkOutEngine is combinational pass-through. Drive clkIn through
-      // both edges, leave resetB high (out of reset), and verify
-      // clkOutEngine tracks clkIn and locked stays true.
+      // both edges, leave resetB high (out of reset), and verify both
+      // outputs track clkIn (1:1, Verde topology) and locked stays true.
       dut.io.resetB #= true
       for (level <- Seq(false, true, false, true, false)) {
         dut.io.clkIn #= level
@@ -50,6 +51,11 @@ object MolePllUp5kSim extends App {
           dut.io.clkOutEngine.toBoolean == level,
           s"clkOutEngine should follow clkIn in bypass: clkIn=$level " +
             s"clkOutEngine=${dut.io.clkOutEngine.toBoolean}"
+        )
+        assert(
+          dut.io.clkOutUart.toBoolean == level,
+          s"clkOutUart should follow clkIn (1:1) in bypass: clkIn=$level " +
+            s"clkOutUart=${dut.io.clkOutUart.toBoolean}"
         )
         assert(
           dut.io.locked.toBoolean,
@@ -66,6 +72,10 @@ object MolePllUp5kSim extends App {
       assert(
         dut.io.clkOutEngine.toBoolean,
         "bypass: clkOutEngine must still follow clkIn while resetB is low"
+      )
+      assert(
+        dut.io.clkOutUart.toBoolean,
+        "bypass: clkOutUart must still follow clkIn while resetB is low"
       )
       assert(
         dut.io.locked.toBoolean,
@@ -106,7 +116,7 @@ object MolePllUp5kSim extends App {
     )
 
     // Each generic appears as `.NAME(value)` in the SB_PLL40_PAD instance
-    // body. Verify the 48 MHz recipe is exactly what landed; a future change
+    // body. Verify the 24 MHz recipe is exactly what landed; a future change
     // that silently retargets the PLL ratio will show up here.
     val expectedGenerics = Seq(
       ".FEEDBACK_PATH",
@@ -136,28 +146,19 @@ object MolePllUp5kSim extends App {
   }
 
   // --------------------------------------------------------------
-  // Case 3: bypass path clkOutUart follows the 2:1 toggle pattern.
-  // Drive clkIn for 10 cycles and sample clkOutUart at each rising
-  // edge of clkIn. The toggle FF is BOOT-reset (init=False), so it
-  // starts False and flips on every rising edge of clkIn.
+  // Case 3: bypass path clkOutUart tracks clkIn 1:1 (Verde topology
+  // — both PLL outputs share the same source). Drive clkIn for 10
+  // cycles and sample clkOutUart at each rising and falling edge of
+  // clkIn; clkOutUart must mirror clkIn on every transition.
   //
-  // Sampling on rising edges of clkIn:
-  //   edge 0 (first): tick was False init, next = True   → sample True
-  //   edge 1:         tick was True,  next = False → sample False
-  //   edge 2:         tick was False, next = True  → sample True
-  //   ...
-  //
-  // So observed[i] = (i % 2 == 0)? True : False   -- 1,0,1,0,...
-  // Actually, SpinalSim's BOOT reset means the reg is already False at
-  // time 0. The first rising edge clocks tick := !False = True;
-  // we read it after that edge. The pattern is: True, False, True, ...
-  //
-  // Assert the alternating pattern holds for all 10 samples.
+  // A future retarget to a 2:1 ratio (e.g. Rojo / ECP5) would re-add
+  // a ÷2 toggle FF and replace this assertion with the alternation
+  // pattern preserved in git history.
   // --------------------------------------------------------------
 
   SimConfig
     .compile(MolePllUp5k(useBlackBox = false))
-    .doSim("uart-divider-toggle") { dut =>
+    .doSim("uart-1to1-tracking") { dut =>
       dut.clockDomain.forkStimulus(period = 10)
       dut.io.resetB #= true
 
@@ -165,46 +166,35 @@ object MolePllUp5kSim extends App {
       dut.io.clkIn #= false
       sleep(2)
 
-      var prevUart = false // tracks last observed value to verify alternation
-      var firstSample = true
-
       for (cycle <- 0 until 10) {
-        // Rising edge of clkIn: toggle FF advances.
+        // Rising edge of clkIn.
         dut.io.clkIn #= true
         sleep(2)
-        val eng = dut.io.clkOutEngine.toBoolean
-        val uart = dut.io.clkOutUart.toBoolean
-
-        // clkOutEngine must track clkIn (true on rising half).
         assert(
-          eng,
-          s"cycle $cycle: clkOutEngine should be true when clkIn is true"
+          dut.io.clkOutEngine.toBoolean,
+          s"cycle $cycle (rising): clkOutEngine should be true when clkIn is true"
+        )
+        assert(
+          dut.io.clkOutUart.toBoolean,
+          s"cycle $cycle (rising): clkOutUart should follow clkIn (1:1) — " +
+            s"clkIn=true, clkOutUart=${dut.io.clkOutUart.toBoolean}"
         )
 
-        // clkOutUart must alternate on every rising edge.
-        if (!firstSample) {
-          assert(
-            uart != prevUart,
-            s"cycle $cycle: clkOutUart did not toggle — " +
-              s"prev=$prevUart curr=$uart"
-          )
-        }
-        prevUart = uart
-        firstSample = false
-
-        // Falling edge of clkIn: no toggle expected on clkOutUart.
-        val uartBeforeFall = uart
+        // Falling edge of clkIn.
         dut.io.clkIn #= false
         sleep(2)
-        val uartAfterFall = dut.io.clkOutUart.toBoolean
         assert(
-          uartAfterFall == uartBeforeFall,
-          s"cycle $cycle: clkOutUart must not change on falling edge of clkIn " +
-            s"(before=$uartBeforeFall after=$uartAfterFall)"
+          !dut.io.clkOutEngine.toBoolean,
+          s"cycle $cycle (falling): clkOutEngine should be false when clkIn is false"
+        )
+        assert(
+          !dut.io.clkOutUart.toBoolean,
+          s"cycle $cycle (falling): clkOutUart should follow clkIn (1:1) — " +
+            s"clkIn=false, clkOutUart=${dut.io.clkOutUart.toBoolean}"
         )
       }
 
-      println("[uart-divider-toggle] OK")
+      println("[uart-1to1-tracking] OK")
     }
 
   println("MolePllUp5kSim: all cases passed")

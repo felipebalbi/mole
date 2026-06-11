@@ -64,21 +64,29 @@ cross-compatible.
 
 ### Clock domains
 
-| Domain      | Nominal     | Fallback         | Notes                              |
-|-------------|-------------|------------------|------------------------------------|
-| `engineClk` | 48 MHz      | 36/32 MHz UP5K   | Quarter-bit clock; fabric clock IS |
-|             |             | 48–72 MHz ECP5   | the quarter-bit clock (no PLL mul) |
-| `uartClk`   | 24 MHz      | —                | Fixed; drives UART baud generator  |
+| Domain      | Verde (UP5K) | Rojo (ECP5)     | Notes                              |
+|-------------|--------------|-----------------|------------------------------------|
+| `engineClk` | 24 MHz       | 48–72 MHz       | Quarter-bit clock; fabric clock IS |
+|             |              |                 | the quarter-bit clock (no PLL mul) |
+| `uartClk`   | 24 MHz       | 24 MHz (or 1:1) | Drives UART baud generator         |
+
+On Verde (UP5K) both clocks are 24 MHz, sourced from the same PLL output;
+the Phase C perf chain (X.1..X.5) explored a 48 MHz `engineClk` target on
+UP5K-SG48 but plateaued at ~32 MHz best Fmax, so the Verde target stays
+at the v0 silicon-validated 24 MHz to keep margin off the compliance edge.
+Rojo (ECP5) is the headroom SKU per ROADMAP §"Hardware tiers".
 
 Cross-domain FIFOs use SpinalHDL `StreamFifoCC` only. No combinational
-signals cross clock domains.
+signals cross clock domains. (On Verde where both domains are 1:1
+off the same PLL output, the CDC infrastructure is no-cost; it stays
+in place for portability to Rojo where the ratio may differ.)
 
 ### UART defaults
 
 | Baud rate | Oversampling | Use                          |
 |-----------|-------------|------------------------------|
-| 2 Mbaud   | 8×          | Default at 48 MHz engineClk  |
-| 1 Mbaud   | 16×         | Fallback at 48 MHz or below  |
+| 1 Mbaud   | 16×          | Default on Verde (24 MHz uartClk) |
+| 2 Mbaud   | 8×           | Available on Rojo (≥ 32 MHz uartClk) |
 
 ### Pipeline
 

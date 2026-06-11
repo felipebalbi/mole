@@ -56,19 +56,22 @@ $(JSON): $(V)
 
 # 3. Place & route (JSON -> ASC) -- iCE40 UP5K, SG48 package.
 #
-# Phase C target Fmax is 48 MHz (engineClk), per sub-tree AGENTS.md
-# "Fabric frequency targets". The v0 engine ran at 24 MHz on UP5K;
-# v0.2 doubles the target because the 5-stage pipeline plus the
-# stretch-aware Q1→Q2 guard, byte-emit FSM, and DATA ALU all need
-# the headroom. uartClk stays at 24 MHz regardless of engineClk.
+# Verde target Fmax is **24 MHz** (engineClk). The v0 engine ran at
+# 24 MHz on UP5K silicon (Step 17 closed at this clock); the v0.2
+# rework attempted 48 MHz via the 5-stage pipeline + perf X.1..X.5
+# but the UP5K-SG48 plateaued at ~32 MHz best across 10 seeds. The
+# call was made to return to 24 MHz to stay safely off the
+# compliance edge rather than chase a moving Fmax target.
+# uartClk is 24 MHz too (1:1 ratio, both off PLLOUTGLOBAL).
 #
-# The v0 `--seed 3` pin was chosen at 24 MHz on the v0 single-stage
-# engine — it does not generalise to the v0.2 5-stage pipeline at
-# 48 MHz. The C.9 closeout includes a fresh nextpnr seed sweep at
-# 48 MHz against the post-DATA-opcode netlist to pick a current
-# best-Fmax seed; see TODO.md / the C.9 commit chain for the sweep
-# results. Until that sweep selects a new pin, `--seed 0` (the
-# nextpnr default) is left explicit so the value is auditable.
+# `--seed 3` is the v0 silicon-validated pin from the original
+# 24 MHz bring-up (Step 16). On v0 at 24 MHz only ~37 % of seeds
+# passed timing; seed 3 was the lowest-numbered passing seed with
+# the best observed Fmax. The v0.2 netlist is structurally
+# different (5-stage pipeline, 32-bit instructions, larger SPRAM
+# wiring) so a fresh seed sweep at 24 MHz is appropriate. Until
+# that sweep selects a new pin, `--seed 3` is kept as the
+# auditable default that matches v0 bring-up history.
 $(ASC): $(JSON) $(PCF)
 	$(NEXTPNR) \
 		--up5k          \
@@ -76,8 +79,8 @@ $(ASC): $(JSON) $(PCF)
 		--pcf $(PCF)    \
 		--json $< \
 		--asc $@  \
-		--freq 48 \
-		--seed 0
+		--freq 24 \
+		--seed 3
 
 # 4. Pack (ASC -> BIN)
 $(BIN): $(ASC)
@@ -102,7 +105,7 @@ gui: $(JSON) $(PCF) ## Open nextpnr GUI on the v0.2 design (Linux/oss-cad-suite)
 		--pcf $(PCF)    \
 		--json $<       \
 		--asc /tmp/$(TOP).gui.asc \
-		--freq 48       \
+		--freq 24       \
 		--seed 3        \
 		--gui
 
@@ -116,7 +119,7 @@ $(REPORT): $(JSON) $(PCF)
 		--pcf $(PCF)    \
 		--json $<       \
 		--asc gen/$(TOP).report.asc \
-		--freq 48       \
+		--freq 24       \
 		--seed 3        \
 		--report $@     \
 		--detailed-timing-report

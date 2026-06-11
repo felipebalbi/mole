@@ -2,8 +2,8 @@ package mole
 
 import spinal.core._
 
-/** Dual-output PLL wrapper for the iCE40 UP5K: 12 MHz pad input → 48 MHz
-  * engineClk + 24 MHz uartClk.
+/** Dual-output PLL wrapper for the iCE40 UP5K: 12 MHz pad input → 24 MHz
+  * engineClk + 24 MHz uartClk (Verde topology).
   *
   * The iCEbreaker drives its 12 MHz clock onto a dedicated PLL input pin (pad
   * 35), which is the only pad on UP5K wired to the PLL's reference. That
@@ -19,48 +19,49 @@ import spinal.core._
   *   F_pfd    = F_ref / (DIVR + 1)   // must fall in 10..133 MHz
   * }}}
   *
-  * For 12 MHz → 48 MHz (v0.2 target): F_pllout = 12 * 32 / (1 * 8) = 48 MHz,
+  * For 12 MHz → 24 MHz (Verde target): F_pllout = 12 * 32 / (1 * 16) = 24 MHz,
   * F_pfd = 12 MHz.
   *
   * FILTER_RANGE = 1 follows the datasheet's loop-filter table for F_pfd in (7,
-  * 17] MHz. The VCO ladder (DIVF = 31, VCO at 384 MHz) is unchanged from the v0
-  * 24 MHz recipe — only the post-divider DIVQ moves back from 4 (÷16) to 3
-  * (÷8), restoring the "original 48 MHz recipe" the v0 PLL source documents
-  * explicitly.
+  * 17] MHz. The VCO ladder (DIVF = 31, VCO at 384 MHz) is the same recipe a 48
+  * MHz output would use; only the post-divider DIVQ changes.
   *
   *   - DIVR = 0 reference divider; F_pfd = F_ref / (DIVR + 1)
   *   - DIVF = 31 feedback divider; multiplies up by 32 (VCO at 384 MHz)
-  *   - DIVQ = 3 output divider; divides down by 2^3 = 8
+  *   - DIVQ = 4 output divider; divides down by 2^4 = 16
   *   - FILTER_RANGE = 1 loop filter setting for F_pfd in (7, 17] MHz
   *
-  * Phase C bet: the 5-stage pipeline (lands in C.6) closes 48 MHz on the UP5K
-  * SG48I where the v0 monolithic FSM did not. The v0 design came in at Fmax
-  * ~28.4 MHz after two rounds of register-retiming the loader FSM critical
-  * path; that result drove the choice of DIVQ = 4 (24 MHz) in v0. C.4 gets the
-  * PLL recipe in place; nextpnr timing closure awaits C.6+.
+  * Verde Fmax history: v0 silicon validated at 24 MHz with `nextpnr --seed 3`
+  * pinned (~37 % seed pass rate at 24 MHz, best Fmax ~24.5 MHz). Phase C
+  * (X.1..X.5 perf chain) attempted to lift Verde to 48 MHz on UP5K-SG48; the
+  * v0.2 5-stage pipeline plateaued at ~32 MHz best across 10 seeds (paths
+  * shifted but ceiling didn't move structurally). To keep comfortable margin
+  * off the compliance edge rather than chase a moving target, Verde returns to
+  * the v0 silicon-validated 24 MHz fabric. Full-rate I3C SDR / HDR-DDR are Mole
+  * Rojo (ECP5) territory.
   *
   * Outputs:
-  *   - `clkOutEngine` (48 MHz) is taken from PLLOUTGLOBAL so the fabric sees
+  *   - `clkOutEngine` (24 MHz) is taken from PLLOUTGLOBAL so the fabric sees
   *     the clock through the iCE40 global clock network (low skew, the standard
   *     choice for a fabric clock). PLLOUTCORE is left unconnected.
-  *   - `clkOutUart` (24 MHz) is derived from `clkOutEngine` by a fabric toggle
-  *     FF (÷2 divider), giving a 50 %-duty 24 MHz clock with one
-  *     engineClk-cycle skew vs PLLOUTGLOBAL. The consumer (MoleTop, C.6) wraps
-  *     `clkOutUart` in its own ClockDomain; this component stays free of
-  *     top-level clock-domain assumptions.
+  *   - `clkOutUart` (24 MHz) is wired directly from `clkOutEngine` — the
+  *     consumer (MoleTop) wraps each in its own ClockDomain, but they share a
+  *     clock source. The dual-output IO shape is preserved so a future
+  *     `engineClk` retarget (e.g. on Mole Rojo with ECP5 headroom) can
+  *     re-enable a ÷2 toggle for a 2:1 ratio topology without re-shaping
+  *     consumers.
   *   - `locked` is the primitive's async LOCK output. Treat it as
   *     asynchronous-to-fabric; the top-level reset bridge synchronises it into
-  *     the 48 MHz domain (async-assert, sync-deassert).
+  *     the 24 MHz domain (async-assert, sync-deassert).
   *
   * Bypass strategy:
   *   - `useBlackBox = true` (default, synthesis path) instantiates SB_PLL40_PAD
   *     with the parameters above.
-  *   - `useBlackBox = false` (sim path) routes `clkIn` straight to
-  *     `clkOutEngine` and derives `clkOutUart` via a toggle FF clocked by
-  *     `clkIn`, with `locked` tied high. Verilator sims do not have the iCE40
-  *     PLL cell model. The bypass path produces two clocks at a 2:1 ratio (so
-  *     12 MHz / 6 MHz instead of 48 MHz / 24 MHz in sim), preserving the
-  *     frequency relationship even though the absolute frequencies are wrong.
+  *   - `useBlackBox = false` (sim path) routes `clkIn` straight to both
+  *     `clkOutEngine` and `clkOutUart`, with `locked` tied high. Verilator sims
+  *     do not have the iCE40 PLL cell model. The bypass path produces 12 MHz on
+  *     both outputs (instead of 24 MHz) but preserves the 1:1 frequency
+  *     relationship between the two outputs.
   *
   * SB_PLL40_PAD pin notes:
   *   - PACKAGEPIN takes the reference straight from the pad; do not route it
@@ -70,11 +71,6 @@ import spinal.core._
   *     mechanism Mole uses.
   *   - RESETB is **active LOW** (note the B suffix). MoleTop drives it from the
   *     synchronised, inverted external reset button.
-  *
-  * I3C SDR 12.5 MHz note: the I3C PP-high target (50 MHz quarter rate) is NOT
-  * supported on Mole Verde at 48 MHz engineClk — it requires fabric > 50 MHz or
-  * a fractional divider. Full-rate I3C SDR and HDR-DDR are Mole Rojo (ECP5)
-  * territory by design — see ROADMAP §"Hardware tiers".
   *
   * @param useBlackBox
   *   When true (default), instantiate the SB_PLL40_PAD primitive. When false,
@@ -96,13 +92,15 @@ case class MolePllUp5k(useBlackBox: Boolean = true) extends Component {
       */
     val resetB = in Bool ()
 
-    /** 48 MHz fabric clock (engineClk). Wrap this in a `ClockDomain` at the
+    /** 24 MHz fabric clock (engineClk). Wrap this in a `ClockDomain` at the
       * call site; MolePllUp5k itself stays free of clock-domain assumptions.
       */
     val clkOutEngine = out Bool ()
 
-    /** 24 MHz UART clock (uartClk). Derived from `clkOutEngine` by a fabric ÷2
-      * toggle FF. Wrap in a `ClockDomain` at the call site.
+    /** 24 MHz UART clock (uartClk). Currently wired directly from
+      * `clkOutEngine` (1:1 ratio, Verde topology). Wrap in a `ClockDomain` at
+      * the call site; the dual-output IO shape is preserved for future retarget
+      * where a 2:1 ratio (with an in-fabric ÷2 toggle) would be appropriate.
       */
     val clkOutUart = out Bool ()
 
@@ -119,53 +117,18 @@ case class MolePllUp5k(useBlackBox: Boolean = true) extends Component {
     pll.io.RESETB := io.resetB
     pll.io.BYPASS := False
     io.clkOutEngine := pll.io.PLLOUTGLOBAL
+    io.clkOutUart := pll.io.PLLOUTGLOBAL // 1:1 on Verde
     io.locked := pll.io.LOCK
-
-    // 2:1 fabric divider for uartClk. The toggle FF runs on engineClk
-    // and produces a 50 %-duty 24 MHz clock with one engineClk-cycle
-    // skew vs PLLOUTGLOBAL. A synthetic ClockDomain is created here
-    // just for this one FF so elaboration stays clean when this
-    // component is used standalone; the consumer (MoleTop, C.6) will
-    // rewrap clkOutUart into its own ClockDomain.
-    val engDivCd = ClockDomain(
-      clock = pll.io.PLLOUTGLOBAL,
-      config = ClockDomainConfig(
-        clockEdge = RISING,
-        resetKind = BOOT,
-        resetActiveLevel = HIGH
-      )
-    )
-    val uartDiv = new ClockingArea(engDivCd) {
-      val tick = Reg(Bool()) init False
-      tick := !tick
-    }
-    io.clkOutUart := uartDiv.tick
-
   } else {
-    // Sim bypass path: pass the reference through unchanged and report
-    // lock high. Verilator has no model of SB_PLL40_PAD; the BlackBox
-    // path cannot be elaborated under simulation. The bypass path
-    // produces two clocks at a 2:1 ratio (12 MHz / 6 MHz instead of
-    // 48 MHz / 24 MHz in sim) so the frequency relationship is
-    // representative even though the absolute frequencies are wrong.
-    // The reset bridge in MoleTop is the only thing that actually
-    // consumes `locked` and it tolerates this constant-True drive.
+    // Sim bypass path: pass the reference through unchanged on both outputs
+    // and report lock high. Verilator has no model of SB_PLL40_PAD; the
+    // BlackBox path cannot be elaborated under simulation. The bypass path
+    // produces 12 MHz on both outputs (instead of 24 MHz) but preserves the
+    // 1:1 frequency relationship. The reset bridge in MoleTop is the only
+    // thing that actually consumes `locked` and it tolerates this
+    // constant-True drive.
     io.clkOutEngine := io.clkIn
-
-    // ÷2 toggle FF for the bypass path, clocked by clkIn.
-    val simDivCd = ClockDomain(
-      clock = io.clkIn,
-      config = ClockDomainConfig(
-        clockEdge = RISING,
-        resetKind = BOOT,
-        resetActiveLevel = HIGH
-      )
-    )
-    val simDiv = new ClockingArea(simDivCd) {
-      val tick = Reg(Bool()) init False
-      tick := !tick
-    }
-    io.clkOutUart := simDiv.tick
+    io.clkOutUart := io.clkIn
     io.locked := True
   }
 }
@@ -196,11 +159,11 @@ class SB_PLL40_PAD extends BlackBox {
   // Parameters are added as generics so the BlackBox elaboration matches the
   // iCE40 primitive macro expansion that yosys's `synth_ice40` recognises.
   // The FEEDBACK_PATH default "SIMPLE" matches the recipe in the class
-  // doc; the divider triple is the 48 MHz recipe (VCO at 384 MHz, DIVQ=3).
+  // doc; the divider triple is the 24 MHz recipe (VCO at 384 MHz, DIVQ=4).
   addGeneric("FEEDBACK_PATH", "SIMPLE")
   addGeneric("DIVR", B"0000")
   addGeneric("DIVF", B"0011111")
-  addGeneric("DIVQ", B"011") // was B"100" (÷16 = 24 MHz); ÷8 = 48 MHz
+  addGeneric("DIVQ", B"100") // ÷16 = 24 MHz (Verde target; matches v0 silicon)
   addGeneric("FILTER_RANGE", B"001")
 
   val io = new Bundle {

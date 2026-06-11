@@ -169,12 +169,18 @@ cycles per quarter-bit at runtime (for pp / od / i2c frequency
 selection); `SET_BUS_MODE` picks which of those divider words is
 active. There is no sub-quarter-bit timing knob.
 
-**Fabric frequency targets.** On iCE40 UP5K the target
-`engineClk` for v0.2 is **48 MHz** (Phase C bring-up target).
-The v0 engine achieved **24 MHz** on UP5K --- that is the
-_previous_ target, now historical. The `uartClk` domain runs at
-24 MHz regardless of `engineClk`. See `docs/MOLE-0.2-SPEC.md`
-§2 for the clock-domain table.
+**Fabric frequency targets.** On iCE40 UP5K the Verde target
+`engineClk` is **24 MHz**, the same fabric clock the v0 engine
+ran on against silicon (Step 17 closed at 24 MHz). The v0.2 rework
+attempted 48 MHz via the 5-stage pipeline; the X.1..X.5 perf chain
+on UP5K-SG48 plateaued at ~32 MHz best across 10 seeds (paths
+shifted as each long route was attacked but the ceiling didn't
+move structurally), at which point the call was made to keep 24
+MHz so the design sits safely off the compliance edge rather than
+chase a moving Fmax target. The `uartClk` domain also runs at 24
+MHz (1:1 with `engineClk` on Verde — both wired off the same PLL
+output). See `docs/MOLE-0.2-SPEC.md` §2 for the clock-domain
+table.
 
 This means:
 - Every state in the bit-cycle pipeline advances on a
@@ -203,7 +209,7 @@ This means:
   not a dedicated pipeline stage --- the inline shape was needed
   to close Fmax, matching the v0 finding) until SCL releases or
   `MoleConfig.stretchTimeoutCycles` fabric cycles elapse
-  (default 2^20 ≈ 22 ms at 48 MHz, counted in a 21-bit
+  (default 2^20 ≈ 44 ms at 24 MHz, counted in a 21-bit
   countdown with a pipelined zero-comparator). PP-class
   `BUS_MODE` slaves that stretch are treated as compliance
   violations: immediate HALT with status `STATUS_TRAP`, no
