@@ -660,8 +660,7 @@ fn all_four_sticky_flags_observable_in_decoded_ring() {
     let halt_timeout = halt_word_status(STATUS_TIMEOUT_OBSERVED);
     let ring = decode_ring(&build_ring((0, 0), &[], halt_timeout, 4)).unwrap();
     assert_eq!(
-        ring.halt.status,
-        STATUS_TIMEOUT_OBSERVED,
+        ring.halt.status, STATUS_TIMEOUT_OBSERVED,
         "TIMEOUT must be observable via the 5-bit HALT status field"
     );
     assert!(!ring.halt.mismatch);
