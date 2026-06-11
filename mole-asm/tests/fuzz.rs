@@ -30,13 +30,24 @@ use proptest::prelude::*;
 /// random UTF-8 does, stressing paths after lexer acceptance.
 fn structured_line_strategy() -> impl Strategy<Value = String> {
     let mnemonic = prop_oneof![
+        // Live v0.2 mnemonics, sugar forms, AND a deliberate sprinkling
+        // of retired-in-v0.2 names (EMIT_BIT, EMIT_QUARTER, EMIT_BYTE,
+        // DEC_BRANCH) plus never-existed names (NOP). This mix stresses
+        // both the accept paths (must produce valid bytecode) and the
+        // reject paths (must produce a clean diagnostic, not panic).
         Just("HALT"),
-        Just("EMIT_BIT"),
-        Just("EMIT_QUARTER"),
-        Just("EMIT_BYTE"),
+        Just("EMIT_BIT"),     // retired: E-LEX-001
+        Just("EMIT_BIT_IMM"), // live
+        Just("EMIT_BIT_REG"), // live
+        Just("EMIT_QUARTER"), // retired: E-LEX-001
+        Just("EMIT_QUARTER_IMM"),
+        Just("EMIT_QUARTER_REG"),
+        Just("EMIT_BYTE"),     // retired: E-LEX-006 (was sugar; replaced)
+        Just("EMIT_BYTE_IMM"), // live
+        Just("EMIT_BYTE_REG"), // live
         Just("LOAD_IMM"),
-        Just("LOAD_LOOP"),
-        Just("DEC_BRANCH"),
+        Just("LOAD_LOOP"),  // sugar for LOAD_IMM R6
+        Just("DEC_BRANCH"), // retired: E-LEX-001 (v0 fused form)
         Just("BRANCH_ON"),
         Just("WAIT_ON"),
         Just("SET_BUS_MODE"),

@@ -1281,49 +1281,64 @@ sim-side and can be done by any agent on any machine without a
 board in hand. (c), (d), (e) require physical hardware and are
 the cross-machine hand-off targets.
 
-#### C.11.a (host-side) --- re-port `tmp108.moleasm` to v0.2
+#### C.11.a (host-side) --- optionally re-port `tmp108.moleasm` to use `EMIT_BYTE_IMM`
 
-**Where:** `mole-asm/tests/fixtures/tmp108.moleasm` (v0 source,
-already in tree) and a new `mole-asm/tests/fixtures/tmp108.molecode`
-(v0.2 byte-exact golden fixture). Note `tmp108.moleasm` currently
-uses bare `EMIT_BYTE` (sugar for `EMIT_BYTE_REG`) preceded by
-`LOAD_IMM R7, <byte>` for every fixed byte (I2C address, register
-pointer). The v0.2 port should replace those pairs with
-`EMIT_BYTE_IMM <byte>, ...` — exactly the case the EMIT_BYTE_IMM
-opcode was designed for (POST-C.8 entry above).
+**Status note:** the v0 → v0.2 syntax port that this sub-task was
+originally framed around is **already done**. There is no
+back-compat layer for v0 source; `mole-asm/tests/fixtures/tmp108.moleasm`
+is already v0.2-native (uses `EMIT_BIT_IMM`, `EMIT_QUARTER_IMM`, the
+v0.2 `tx_symbol` vocabulary, flag triples). The retired bare
+`EMIT_BYTE` mnemonic is rejected by the assembler with E-LEX-006
+(see the project AGENTS.md §"EMIT_BYTE and byte-level emits").
 
-**Procedure:**
-1. Read the v0 fixture; identify every `LOAD_IMM R7, <const>;
-   EMIT_BYTE_REG ...` pair where `<const>` is known at compile
-   time.
-2. Rewrite each pair as a single `EMIT_BYTE_IMM <const>, ...`
-   carrying the same flag triple.
-3. Run `cargo run --bin mole-asm -- assemble
-   mole-asm/tests/fixtures/tmp108.moleasm -o
-   /tmp/tmp108.molecode` and golden-diff `/tmp/tmp108.molecode`
-   against the existing fixture to confirm wire-shape is
-   semantically identical (record count, flag positions; the
-   word count will drop).
-4. Add the new `.molecode` to `mole-asm/tests/fixtures/` so the
-   Scala `InstructionGoldenCrossCheckSim` consumes it
-   automatically.
-5. Run `cargo test -p mole-asm` (must stay green) and
-   `make sim-isa` (must stay green; the golden cross-check
-   reads the new fixture).
+**Where:** `mole-asm/tests/fixtures/tmp108.moleasm` (already v0.2);
+the open question is whether to *additionally* re-port it to use
+`EMIT_BYTE_IMM` for the I2C address and register-pointer bytes.
 
-**Caveat the user wants to discuss before this lands:** there
-is a complication with the v0 → v0.2 syntax port that affects
-whether this sub-task can be done before hardware bring-up or
-needs to be done with the board in hand. **Ask the user before
-starting C.11.a.** Context lives in the chat session that
-opened this hand-off (not in tree); if no context is
-reachable, the conservative default is "defer C.11.a to the
-hardware bring-up session and have the board on the bench
-while assembling the v0.2 fixture".
+**Open design call (ask the user, do not pick unilaterally):** the
+current fixture spells out every bus bit explicitly via
+`EMIT_BIT_IMM`. That has two virtues: (a) every wire bit is
+visible in the source, which makes scope-debugging trivial during
+silicon bring-up; (b) it exercises the WIRE group of the engine
+end-to-end without depending on the multi-cycle `EMIT_BYTE_*`
+opcode FSMs. Switching to `EMIT_BYTE_IMM` for the 3 known bytes
+(I2C address `0x48 << 1`, register pointer `0x00`, repeated-start
+address `(0x48 << 1) | 1`) collapses ~27 lines of EMIT_BIT_IMM
+into 3 lines and *also* exercises the EMIT_BYTE_IMM ACK-slot
+semantics on silicon for the first time. Without the re-port the
+EMIT_BYTE_IMM hardware path is sim-only at Phase 0 release.
 
-**Acceptance:** new fixture in tree; `cargo test -p mole-asm` and
-`make sim-isa` both green; word count in the v0.2 fixture
-strictly less than v0 (proves the IMM opcode is doing its job).
+**If re-port chosen, procedure:**
+1. Identify each contiguous span of 8 `EMIT_BIT_IMM` instructions
+   that emits a compile-time-known byte (look for the canonical
+   `dominant/recessive/...` pattern that encodes a 7-bit address
+   + R/W bit, or a register pointer).
+2. Replace each 9-line span (8 EMIT_BIT_IMM + 1 ACK EMIT_BIT_IMM)
+   with one `EMIT_BYTE_IMM imm=<byte>` carrying the same flag
+   triple on the ACK slot (`expect=0 mask=1 capture=1` for ACK
+   check; `expect=X mask=0` for fire-and-forget; spec §5.5b).
+3. Regenerate both goldens:
+   `cargo run --release --bin mole-asm -- assemble
+   mole-asm/tests/fixtures/tmp108.moleasm
+   -o mole-asm/tests/fixtures/tmp108.molecode --frame
+   --frame-output mole-asm/tests/fixtures/tmp108.mole.bin`.
+4. Run `cargo test -p mole-asm` (golden tests) and
+   `make sim-isa` (Scala golden cross-check) — both must stay
+   green.
+5. Hand-inspect the disassembly:
+   `cargo run --release --bin mole-asm -- disassemble
+   mole-asm/tests/fixtures/tmp108.molecode` --- the wire-byte
+   sequence should round-trip identically.
+
+**Acceptance (if re-port chosen):** new goldens in tree; both
+test suites green; word count in the v0.2 fixture strictly less
+than the prior version (proves IMM is doing its job).
+
+**Acceptance (if re-port deferred):** no change. The fixture
+stays bit-by-bit for C.11.d hardware regression. EMIT_BYTE_IMM
+hardware coverage waits for a separate v0.2 fixture (e.g.
+i2c-write-one-byte.moleasm, which is already in
+`mole-asm/tests/fixtures/`) executed against silicon.
 
 #### C.11.b (sim-side) --- re-port `MoleTopSim` family from `attic/`
 

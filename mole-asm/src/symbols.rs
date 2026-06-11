@@ -89,7 +89,10 @@ pub(crate) const MNEMONICS: &[&str] = &[
     "EMIT_QUARTER_REG",
     "EMIT_BYTE_IMM",
     "EMIT_BYTE_REG",
-    "EMIT_BYTE", // sugar → EMIT_BYTE_REG (§12.3)
+    // NOTE: bare "EMIT_BYTE" was sugar for EMIT_BYTE_REG in early
+    // v0.2 sources. It is retired (E-LEX-006) --- the lexer
+    // detects it explicitly and emits a "use _IMM or _REG" hint
+    // before reaching the general "unknown mnemonic" path.
     "SAMPLE_BIT_ON_SCL",
     "DRIVE_BIT_ON_SCL",
     "STRETCH_SCL_IMM",
@@ -125,6 +128,20 @@ pub(crate) const MNEMONICS: &[&str] = &[
 /// future use.
 #[allow(dead_code)]
 pub(crate) const LOOP_GROUP_MNEMONICS: &[&str] = &[];
+
+/// Mnemonics that existed as sugar in earlier v0.2 drafts and have
+/// been retired. The lexer special-cases these *before* the general
+/// `MNEMONICS.contains` check so the diagnostic can point at the
+/// canonical replacement (E-LEX-006) instead of the generic
+/// "unknown mnemonic" message (E-LEX-001).
+///
+/// Tuple is `(retired_name, replacement_hint)`. The replacement
+/// hint is interpolated into the error message verbatim --- it
+/// should be a short noun phrase listing the replacement(s).
+pub(crate) const RETIRED_MNEMONICS: &[(&str, &str)] = &[(
+    "EMIT_BYTE",
+    "EMIT_BYTE_IMM (compile-time-known byte) or EMIT_BYTE_REG (R7-sourced byte)",
+)];
 
 /// True iff `name` is a reserved built-in that user-defined labels
 /// and `.equ` names must not shadow.

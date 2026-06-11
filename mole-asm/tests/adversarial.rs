@@ -62,7 +62,7 @@ fn opcode_field_positions_for_all_mnemonics() {
         ("EMIT_BIT_REG src=R0\n", 0b00_0001),
         ("EMIT_QUARTER_IMM sda=dom scl=dom\n", 0b00_0010),
         ("EMIT_QUARTER_REG src=R0\n", 0b00_0011),
-        ("EMIT_BYTE\n", 0b00_0100),
+        ("EMIT_BYTE_REG\n", 0b00_0100),
         ("SAMPLE_BIT_ON_SCL\n", 0b00_0101),
         ("DRIVE_BIT_ON_SCL tx=dom\n", 0b00_0110),
         ("STRETCH_SCL_IMM 0\n", 0b00_0111),
@@ -116,7 +116,7 @@ fn flag_triple_lives_at_bits_2_0_for_bearer_opcodes() {
     // exactly at [2:0].  Sweep e,m,c on two bearers; verify placement.
     let bearers: &[&str] = &[
         "EMIT_BIT_IMM tx=dom expect={e} mask={m} capture={c}\n",
-        "EMIT_BYTE expect={e} mask={m} capture={c}\n",
+        "EMIT_BYTE_REG expect={e} mask={m} capture={c}\n",
     ];
     // Only test where c=1 implies paired (to avoid E-WIRE-003 on EMIT_BYTE).
     // Simplest: use EMIT_BIT_IMM (no pairing constraint).
@@ -581,7 +581,7 @@ fn load_loop_out_of_range_rejected() {
 
 #[test]
 fn emit_byte_mask1_without_pair_is_error() {
-    let src = "EMIT_BYTE expect=0 mask=1\nHALT\n";
+    let src = "EMIT_BYTE_REG expect=0 mask=1\nHALT\n";
     let err = assemble(src, "<t>").unwrap_err();
     assert_eq!(syntax_kind(&err), Some(Kind::Operand));
     let msg = format!("{err}");
@@ -593,33 +593,33 @@ fn emit_byte_mask1_without_pair_is_error() {
 
 #[test]
 fn emit_byte_mask0_no_pair_needed() {
-    assert!(assemble("EMIT_BYTE\nHALT\n", "<t>").is_ok());
-    assert!(assemble("EMIT_BYTE mask=0\nHALT\n", "<t>").is_ok());
+    assert!(assemble("EMIT_BYTE_REG\nHALT\n", "<t>").is_ok());
+    assert!(assemble("EMIT_BYTE_REG mask=0\nHALT\n", "<t>").is_ok());
 }
 
 #[test]
 fn emit_byte_paired_branch_on_mismatch() {
-    let src = "EMIT_BYTE expect=0 mask=1\nBRANCH_ON MISMATCH, nak\nnak:\nHALT\n";
+    let src = "EMIT_BYTE_REG expect=0 mask=1\nBRANCH_ON MISMATCH, nak\nnak:\nHALT\n";
     assert!(assemble(src, "<t>").is_ok());
 }
 
 #[test]
 fn emit_byte_paired_flag_clear_bit0() {
-    let src = "EMIT_BYTE expect=0 mask=1\nFLAG_CLEAR 0b00001\nHALT\n";
+    let src = "EMIT_BYTE_REG expect=0 mask=1\nFLAG_CLEAR 0b00001\nHALT\n";
     assert!(assemble(src, "<t>").is_ok());
 }
 
 #[test]
 fn emit_byte_paired_flag_clear_bit0_multi() {
     // Any mask with bit 0 set qualifies.
-    let src = "EMIT_BYTE expect=0 mask=1\nFLAG_CLEAR 0b11111\nHALT\n";
+    let src = "EMIT_BYTE_REG expect=0 mask=1\nFLAG_CLEAR 0b11111\nHALT\n";
     assert!(assemble(src, "<t>").is_ok());
 }
 
 #[test]
 fn emit_byte_not_paired_by_flag_clear_no_bit0() {
     // FLAG_CLEAR with bit 0 clear is NOT a valid pair.
-    let src = "EMIT_BYTE expect=0 mask=1\nFLAG_CLEAR 0b11110\nHALT\n";
+    let src = "EMIT_BYTE_REG expect=0 mask=1\nFLAG_CLEAR 0b11110\nHALT\n";
     let err = assemble(src, "<t>").unwrap_err();
     assert_eq!(syntax_kind(&err), Some(Kind::Operand));
 }
@@ -628,13 +628,13 @@ fn emit_byte_not_paired_by_flag_clear_no_bit0() {
 fn emit_byte_label_between_pair_is_ok() {
     // Labels between EMIT_BYTE and pair do not break the pairing
     // analysis (§5.5: "ignoring labels").
-    let src = "EMIT_BYTE expect=0 mask=1\nmy_label:\nBRANCH_ON MISMATCH, my_label\nHALT\n";
+    let src = "EMIT_BYTE_REG expect=0 mask=1\nmy_label:\nBRANCH_ON MISMATCH, my_label\nHALT\n";
     assert!(assemble(src, "<t>").is_ok());
 }
 
 #[test]
 fn raw_pragma_suppresses_emit_byte_wire003() {
-    let src = "(use-raw-primitives)\nEMIT_BYTE expect=0 mask=1\nHALT\n";
+    let src = "(use-raw-primitives)\nEMIT_BYTE_REG expect=0 mask=1\nHALT\n";
     assert!(assemble(src, "<t>").is_ok());
 }
 
@@ -1028,7 +1028,7 @@ fn single_token_no_operands_do_not_panic() {
     let probes = [
         "HALT\n",
         "EMIT_BIT_IMM\n",
-        "EMIT_BYTE\n",
+        "EMIT_BYTE_REG\n",
         "STRETCH_SCL_IMM\n",
         "WAIT_ON\n",
         "BRANCH_ON\n",
@@ -1081,7 +1081,7 @@ fn dw_operand_count_above_max_rejected() {
 #[test]
 fn encoder_is_deterministic() {
     let src = "HALT status=0\nSET_BUS_MODE i3c-PP\nLOAD_IMM R7, 0xFF\n\
-               EMIT_BYTE expect=0 mask=1\nBRANCH_ON MISMATCH, done\n\
+               EMIT_BYTE_REG expect=0 mask=1\nBRANCH_ON MISMATCH, done\n\
                done:\nHALT status=1\n";
     let first = assemble(src, "<det>").unwrap();
     for _ in 0..8 {
@@ -1180,7 +1180,7 @@ fn asm_12_4_mark_label_42() {
 fn emit_byte_pairing_accepts_lowercase_mismatch() {
     // Spec §12: mnemonics and cond codes are case-insensitive.
     // EMIT_BYTE pairing check must accept `BRANCH_ON mismatch, ...`.
-    let src = "EMIT_BYTE expect=0 mask=1\n\
+    let src = "EMIT_BYTE_REG expect=0 mask=1\n\
                BRANCH_ON mismatch, nak\n\
                nak: HALT\n";
     assert!(assemble(src, "<inline>").is_ok());
@@ -1189,7 +1189,7 @@ fn emit_byte_pairing_accepts_lowercase_mismatch() {
 #[test]
 fn emit_byte_pairing_accepts_mixed_case_mismatch() {
     // Also lock mixed case (Mismatch) per spec §12.
-    let src = "EMIT_BYTE expect=0 mask=1\n\
+    let src = "EMIT_BYTE_REG expect=0 mask=1\n\
                BRANCH_ON Mismatch, nak\n\
                nak: HALT\n";
     assert!(assemble(src, "<inline>").is_ok());
@@ -1242,7 +1242,7 @@ fn register_leading_zero_r07_rejected() {
 fn emit_byte_pairing_accepts_equated_flag_clear_mask() {
     // An equate-named mask with bit 0 set must satisfy the pairing rule.
     let src = ".equ ack_mask, 0b00001\n\
-               EMIT_BYTE expect=0 mask=1\n\
+               EMIT_BYTE_REG expect=0 mask=1\n\
                FLAG_CLEAR ack_mask\n\
                HALT\n";
     assert!(assemble(src, "<inline>").is_ok());
@@ -1417,7 +1417,7 @@ fn flag_clear_neg_hex_raises_e_op_009_not_e_wire_003() {
     // Before the fix, parse_int_raw("-0x11") failed → FLAG_CLEAR appeared
     // un-paired → E-WIRE-003.  After the fix it parses to -17 which is
     // out of the 0..31 range → E-OP-009.
-    let src = "EMIT_BYTE expect=0 mask=1\n\
+    let src = "EMIT_BYTE_REG expect=0 mask=1\n\
                FLAG_CLEAR -0x11\n\
                HALT\n";
     let err = assemble(src, "<inline>").expect_err("must fail");

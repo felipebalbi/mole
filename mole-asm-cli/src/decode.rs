@@ -577,11 +577,13 @@ mod tests {
         assert!(d.text.contains("mask=1"), "{}", d.text);
     }
 
-    // §5.5 bare `EMIT_BYTE` source is sugar for EMIT_BYTE_REG;
-    // round-trip should still print the canonical EMIT_BYTE_REG name.
+    // §5.5 EMIT_BYTE_REG decodes to its canonical name. Bare
+    // `EMIT_BYTE` source was sugar for EMIT_BYTE_REG in earlier
+    // v0.2 drafts; it is retired now (E-LEX-006), so the source
+    // form must be the explicit `_REG`.
     #[test]
-    fn decode_emit_byte_sugar_round_trip() {
-        let w = asm_body("EMIT_BYTE\n");
+    fn decode_emit_byte_reg_round_trip() {
+        let w = asm_body("EMIT_BYTE_REG\n");
         assert_eq!(w, 0x1000_0000);
         let d = decode_word(w);
         assert!(d.known);

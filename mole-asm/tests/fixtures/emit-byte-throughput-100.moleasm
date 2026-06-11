@@ -1,15 +1,15 @@
-; emit-byte-throughput-100 --- raw 100-EMIT_BYTE bytecode-size probe.
+; emit-byte-throughput-100 --- raw 100-EMIT_BYTE_REG bytecode-size probe.
 ;
-; Per §5.5 each EMIT_BYTE is a single 32-bit instruction whose E stage
-; iterates 9 SCL pulses (8 data bits from R7[7:0] MSB-first, then one
-; ACK-slot pulse). The point of this probe is NOT runtime throughput
-; (that's a hardware-sim question); it's to lock the BYTECODE size
-; arithmetic for a 100-byte burst so any framing-overhead drift gets
-; caught immediately.
+; Per §5.5 each EMIT_BYTE_REG is a single 32-bit instruction whose E
+; stage iterates 9 SCL pulses (8 data bits from R7[7:0] MSB-first, then
+; one ACK-slot pulse). The point of this probe is NOT runtime
+; throughput (that's a hardware-sim question); it's to lock the
+; BYTECODE size arithmetic for a 100-byte burst so any framing-overhead
+; drift gets caught immediately.
 ;
-; This is a controller-side fire-and-forget burst: every EMIT_BYTE
+; This is a controller-side fire-and-forget burst: every EMIT_BYTE_REG
 ; uses mask=0 (default), exempting it from the §5.5 ACK-pairing rule
-; (E-WIRE-003). Per §5.5: "EMIT_BYTE with mask=0 (fire-and-forget
+; (E-WIRE-003). Per §5.5: "EMIT_BYTE_REG with mask=0 (fire-and-forget
 ; transmit, typical of probe traffic where ACK is intentionally
 ; ignored) is exempt from this requirement; no follow-up is required."
 ;
@@ -21,12 +21,12 @@
 ; -------------------------------------------------------------------------
 ;
 ; Body words:
-;     LOAD_TIMING    1   (§5.17)
-;     SET_BUS_MODE   1   (§5.13)
-;     EMIT_BYTE   x100   (§5.5; each is one 32-bit instruction)
-;     HALT           1   (§5.10)
+;     LOAD_TIMING       1   (§5.17)
+;     SET_BUS_MODE      1   (§5.13)
+;     EMIT_BYTE_REG  x100   (§5.5; each is one 32-bit instruction)
+;     HALT              1   (§5.10)
 ;     ------------------
-;     total        103
+;     total           103
 ;
 ; .molecode (raw SPRAM image: preamble + body, packed LE, no UART
 ; envelope; §10 "Program body" + §10 "Preamble (2 words = 8 bytes)"):
@@ -56,117 +56,117 @@
 ;
 ; Round number, easy to eyeball in a hex dump, and small enough to
 ; stay well inside MAX_PROGRAM_WORDS = 8192. Not a magic number;
-; "many sequential EMIT_BYTE words at the canonical mask=0 default,
+; "many sequential EMIT_BYTE_REG words at the canonical mask=0 default,
 ; with no ACK-pairing follow-ups" is the actual property being
 ; locked.
 
         LOAD_TIMING       reg=0, divider=59
         SET_BUS_MODE      i2c
 
-        ; 100x EMIT_BYTE (mask=0 default → fire-and-forget, exempt
+        ; 100x EMIT_BYTE_REG (mask=0 default → fire-and-forget, exempt
         ; from §5.5 ACK-pairing rule). R7[7:0] is whatever it was
         ; at engine reset (per §8 register file the post-reset value
         ; is implementation-defined; this probe never sets R7 so the
         ; wire bits emitted are sim-only and not asserted here).
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
-        EMIT_BYTE
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
+        EMIT_BYTE_REG
 
         HALT              status=0

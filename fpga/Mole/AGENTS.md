@@ -133,11 +133,17 @@ IMM, every byte costs `LOAD_IMM R7, <byte>; EMIT_BYTE_REG`
 write of 3–6 bytes thus pays 6–12 instructions of glue. With
 IMM the same write is 3–6 instructions flat with no R7 traffic.
 
-In moleasm, bare `EMIT_BYTE` is **sugar for `EMIT_BYTE_REG`**
-(backwards compatibility with v0.1 source). The bare form
-appears in the goldens and existing fixtures; new sources should
-prefer the explicit `_IMM` / `_REG` form per the v0.2 convention
-that mirrors `EMIT_BIT_*`, `EMIT_QUARTER_*`, and `STRETCH_SCL_*`.
+In moleasm, the bare mnemonic `EMIT_BYTE` (no suffix) was sugar
+for `EMIT_BYTE_REG` in early v0.2 drafts. It is **retired**: the
+assembler now raises E-LEX-006 and points at both canonical forms.
+The bare form was the only EMIT_* opcode that allowed an
+unsuffixed mnemonic; removing it makes the WIRE-group naming
+convention uniform with `EMIT_BIT_*`, `EMIT_QUARTER_*`, and
+`STRETCH_SCL_*`. Use `EMIT_BYTE_IMM` when the byte is known at
+compile time (the common case for I2C addresses, CCC, register
+pointers) and `EMIT_BYTE_REG` when the byte comes from R7
+(typical of write-then-read flows where the byte is fetched
+mid-program).
 
 Any review proposing a higher-level byte emit beyond what §5.5
 and §5.5b already define should be treated as a sign the SDK

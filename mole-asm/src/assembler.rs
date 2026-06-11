@@ -16,7 +16,9 @@ use std::collections::HashMap;
 
 use crate::encoder::{self, SHIFT_ARIGHT, SHIFT_LEFT, SHIFT_RIGHT};
 use crate::error::{AsmError, Result, SourceLocation};
-use crate::symbols::{self, BUS_MODES, COND_CODES, MNEMONICS, ROLE_NAMES, SHIFT_DIRS, TX_SYMBOLS};
+use crate::symbols::{
+    self, BUS_MODES, COND_CODES, MNEMONICS, RETIRED_MNEMONICS, ROLE_NAMES, SHIFT_DIRS, TX_SYMBOLS,
+};
 
 // -----------------------------------------------------------------------
 // Wire-format preamble constants (mole_abi)
@@ -350,6 +352,21 @@ pub(crate) fn lex(source: &str, filename: &str) -> Result<(Vec<Statement>, bool)
         // We surface this by checking for a heuristic prefix that would
         // land in the LOOP group. Since we have no LOOP mnemonics, any
         // unrecognised mnemonic just falls through to E-LEX-001.
+
+        // Retired mnemonic check (E-LEX-006): catches bare `EMIT_BYTE`
+        // and similar sugar that existed in earlier v0.2 drafts. Runs
+        // BEFORE the general MNEMONICS.contains check so the diagnostic
+        // can point at the canonical replacement instead of the generic
+        // "unknown mnemonic" message.
+        if let Some((_, hint)) = RETIRED_MNEMONICS.iter().find(|(n, _)| *n == upper.as_str()) {
+            return Err(AsmError::lex(
+                &loc,
+                format!(
+                    "E-LEX-006: '{upper}' was retired in v0.2; \
+                     use {hint}"
+                ),
+            ));
+        }
 
         if !MNEMONICS.contains(&upper.as_str()) {
             return Err(AsmError::lex(
@@ -921,11 +938,12 @@ fn encode_mnemonic(
         }
 
         // -----------------------------------------------------------------
-        // EMIT_BYTE_REG (canonical). Bare `EMIT_BYTE` is sugar for
-        // EMIT_BYTE_REG (§12.3) and lands on the same arm — both forms
-        // produce byte-identical encodings, so legacy fixtures
-        // continue to assemble unchanged.
-        "EMIT_BYTE" | "EMIT_BYTE_REG" => {
+        // EMIT_BYTE_REG (canonical). Bare `EMIT_BYTE` was sugar for
+        // EMIT_BYTE_REG in early v0.2 drafts; it is retired in this
+        // revision (E-LEX-006). The lexer catches the bare form
+        // before this dispatch; this arm only handles the explicit
+        // _REG form.
+        "EMIT_BYTE_REG" => {
             let kv = parse_kv_operands(stmt, &["expect", "mask", "capture"])?;
             let (e, mk, c) = resolve_flag_triple(&kv, loc)?;
 
@@ -1672,35 +1690,55 @@ mod tests {
 
     #[test]
     fn emit_byte_pairing_required_with_mask_1() {
-        // EMIT_BYTE mask=1 without BRANCH_ON MISMATCH or FLAG_CLEAR → E-WIRE-003
-        let src = "EMIT_BYTE expect=0 mask=1\nHALT\n";
+        // EMIT_BYTE_REG mask=1 without BRANCH_ON MISMATCH or FLAG_CLEAR → E-WIRE-003
+        let src = "EMIT_BYTE_REG expect=0 mask=1\nHALT\n";
         let err = assemble(src, "<t>").unwrap_err();
         assert_eq!(err_kind(&err), Some(Kind::Operand));
     }
 
     #[test]
     fn emit_byte_mask_0_no_pairing_required() {
-        // EMIT_BYTE mask=0 is exempt.
-        let src = "EMIT_BYTE\nHALT\n";
+        // EMIT_BYTE_REG mask=0 is exempt.
+        let src = "EMIT_BYTE_REG\nHALT\n";
         assert!(assemble(src, "<t>").is_ok());
     }
 
     #[test]
     fn emit_byte_paired_with_branch_on_mismatch() {
-        let src = "EMIT_BYTE expect=0 mask=1\nBRANCH_ON MISMATCH, nak\nnak:\nHALT\n";
+        let src = "EMIT_BYTE_REG expect=0 mask=1\nBRANCH_ON MISMATCH, nak\nnak:\nHALT\n";
         assert!(assemble(src, "<t>").is_ok());
     }
 
     #[test]
     fn emit_byte_paired_with_flag_clear() {
-        let src = "EMIT_BYTE expect=0 mask=1\nFLAG_CLEAR 0b00001\nHALT\n";
+        let src = "EMIT_BYTE_REG expect=0 mask=1\nFLAG_CLEAR 0b00001\nHALT\n";
         assert!(assemble(src, "<t>").is_ok());
     }
 
     #[test]
     fn raw_pragma_suppresses_emit_byte_pairing_check() {
-        let src = "(use-raw-primitives)\nEMIT_BYTE expect=0 mask=1\nHALT\n";
+        let src = "(use-raw-primitives)\nEMIT_BYTE_REG expect=0 mask=1\nHALT\n";
         assert!(assemble(src, "<t>").is_ok());
+    }
+
+    #[test]
+    fn bare_emit_byte_is_retired_in_v0_2() {
+        // E-LEX-006: bare `EMIT_BYTE` was sugar for EMIT_BYTE_REG in
+        // early v0.2 drafts; this revision retires it. The diagnostic
+        // must point at the canonical replacement (both _IMM and
+        // _REG) rather than the generic "unknown mnemonic" message.
+        let src = "EMIT_BYTE\nHALT\n";
+        let err = assemble(src, "<t>").unwrap_err();
+        assert_eq!(err_kind(&err), Some(Kind::Lex));
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("E-LEX-006"),
+            "expected E-LEX-006 in diagnostic, got: {msg}"
+        );
+        assert!(
+            msg.contains("EMIT_BYTE_IMM") && msg.contains("EMIT_BYTE_REG"),
+            "expected both canonical replacements in diagnostic, got: {msg}"
+        );
     }
 
     #[test]

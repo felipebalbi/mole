@@ -468,7 +468,13 @@ EMIT_BYTE_REG
 EMIT_BYTE_REG expect=0 mask=1 capture=1
 ```
 
-The bare mnemonic `EMIT_BYTE` is sugar for `EMIT_BYTE_REG` (see §12.3).
+The bare mnemonic `EMIT_BYTE` (no suffix) was sugar for `EMIT_BYTE_REG`
+in earlier v0.2 drafts. It is **retired**; the assembler rejects it with
+E-LEX-006 and points at both canonical replacements (`EMIT_BYTE_IMM` for
+compile-time-known bytes, `EMIT_BYTE_REG` for R7-sourced bytes). The bare
+form was the only EMIT_* opcode that allowed an unsuffixed mnemonic;
+removing it makes the WIRE-group naming convention uniform with
+`EMIT_BIT_*`, `EMIT_QUARTER_*`, and `STRETCH_SCL_*`.
 
 **Stage behaviour:** D decodes flags. E iterates eight SCL pulses
 shifting out R7[7:0] MSB first, then one ACK-slot pulse with `hiz` SDA.
@@ -1632,16 +1638,22 @@ rejects it.
 
 ### 12.3 Sugar forms
 
-| Sugar                | Expands to              | Notes                             |
-|----------------------|-------------------------|-----------------------------------|
-| `JMP <label>`        | `BRANCH_ON ALWAYS, <label>` | Unconditional jump            |
-| `LOAD_LOOP n`        | `LOAD_IMM R6, n`        | Prime loop counter in R6          |
-| `EMIT_BYTE [...]`    | `EMIT_BYTE_REG [...]`   | Backwards-compat: bare mnemonic   |
-| `HALT`               | `HALT status=0`         | Default status 0                  |
+| Sugar                | Expands to                  | Notes                             |
+|----------------------|-----------------------------|-----------------------------------|
+| `JMP <label>`        | `BRANCH_ON ALWAYS, <label>` | Unconditional jump                |
+| `LOAD_LOOP n`        | `LOAD_IMM R6, n`            | Prime loop counter in R6          |
+| `HALT`               | `HALT status=0`             | Default status 0                  |
 
 `LOAD_LOOP n` is sugar only. It does not expose a reg argument; the
 register is always R6. If you need a different register, write
 `LOAD_IMM Rx, n` directly.
+
+**Retired sugar:** Bare `EMIT_BYTE` was sugar for `EMIT_BYTE_REG` in
+earlier v0.2 drafts. It is retired; the assembler raises E-LEX-006
+(see §13) and points at the two canonical forms (`EMIT_BYTE_IMM` for
+compile-time-known bytes, `EMIT_BYTE_REG` for R7-sourced bytes). This
+keeps the WIRE-group naming uniform with `EMIT_BIT_*`,
+`EMIT_QUARTER_*`, and `STRETCH_SCL_*`, none of which have a bare form.
 
 ### 12.4 Worked examples (one per live opcode)
 
@@ -1812,6 +1824,7 @@ stable contract; gaps may appear when codes are removed (noted below).
 | E-LEX-003  | LOOP group mnemonic used                       | `LOOP group is entirely reserved; use '.dw' for raw injection`                |
 | E-LEX-004  | Unknown condition-code token                   | `cond code '<TOK>' is not named (allowed: [list])`                            |
 | E-LEX-005  | Unknown directive                              | `unknown directive '<DIR>' (allowed: .equ, .dw)`                             |
+| E-LEX-006  | Retired mnemonic (v0.2 transition)             | `'<MNE>' was retired in v0.2; use <canonical replacement(s)>`                |
 | E-SYM-001  | Duplicate label                                | `label '<LBL>' re-defined (prior label on line N)`                            |
 | E-SYM-002  | Duplicate `.equ`                               | `equate '<NAME>' re-defined (prior equate on line N)`                         |
 | E-SYM-003  | Unresolved label in branch target              | `undefined branch target: '<LBL>'`                                            |

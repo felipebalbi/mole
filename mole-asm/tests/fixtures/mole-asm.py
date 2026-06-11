@@ -163,7 +163,9 @@ MNEMONICS = frozenset([
     "EMIT_BIT_IMM", "EMIT_BIT_REG",
     "EMIT_QUARTER_IMM", "EMIT_QUARTER_REG",
     "EMIT_BYTE_IMM", "EMIT_BYTE_REG",
-    "EMIT_BYTE",  # sugar → EMIT_BYTE_REG (§12.3)
+    # NOTE: bare "EMIT_BYTE" was sugar for EMIT_BYTE_REG in early
+    # v0.2 drafts. It is retired (E-LEX-006); see RETIRED_MNEMONICS
+    # below for the special-case diagnostic.
     "SAMPLE_BIT_ON_SCL", "DRIVE_BIT_ON_SCL",
     "STRETCH_SCL_IMM", "STRETCH_SCL_REG",
     # CTRL group
@@ -178,6 +180,20 @@ MNEMONICS = frozenset([
     # Sugar forms
     "JMP", "LOAD_LOOP",
 ])
+
+
+# Mnemonics that existed as sugar in earlier v0.2 drafts and have
+# been retired. The lexer special-cases these BEFORE the general
+# MNEMONICS check so the diagnostic can point at the canonical
+# replacement (E-LEX-006) instead of the generic "unknown mnemonic"
+# (E-LEX-001).
+#
+# Mirrors `mole-asm/src/symbols.rs::RETIRED_MNEMONICS`.
+RETIRED_MNEMONICS = {
+    "EMIT_BYTE":
+        "EMIT_BYTE_IMM (compile-time-known byte) "
+        "or EMIT_BYTE_REG (R7-sourced byte)",
+}
 
 
 def is_reserved_name(name: str) -> bool:
@@ -1034,6 +1050,13 @@ def lex(source: str, filename: str) -> Tuple[List[Statement], bool]:
 
         # Mnemonic: case-insensitive; normalise to UPPER.
         upper = head.upper()
+        # Retired-mnemonic check (E-LEX-006) runs first so the
+        # diagnostic can point at the canonical replacement.
+        if upper in RETIRED_MNEMONICS:
+            raise AsmError("E-LEX-006",
+                           f"'{upper}' was retired in v0.2; "
+                           f"use {RETIRED_MNEMONICS[upper]}",
+                           line=line_no, filename=filename)
         if upper not in MNEMONICS:
             raise AsmError("E-LEX-001",
                            f"unknown mnemonic: '{upper}' "
@@ -1389,9 +1412,10 @@ def _encode_mnemonic(mne: str, stmt: Statement, pc: int,
         return enc_emit_quarter_reg(src, e, mk, c, ln, fn)
 
     # ------------------------------------------------------------------
-    # EMIT_BYTE_REG (canonical). Bare `EMIT_BYTE` is sugar for
-    # EMIT_BYTE_REG (§12.3); both forms hit this branch.
-    if mne in ("EMIT_BYTE", "EMIT_BYTE_REG"):
+    # EMIT_BYTE_REG (canonical). Bare `EMIT_BYTE` was sugar for
+    # EMIT_BYTE_REG in early v0.2 drafts; the bare form is retired
+    # (E-LEX-006, raised at lex time before reaching here).
+    if mne == "EMIT_BYTE_REG":
         kv = _parse_kv_operands(stmt, ["expect", "mask", "capture"])
         e, mk, c = _resolve_flag_triple(kv, stmt)
         # §5.5 E-WIRE-003: mask=1 must be followed by pairing instruction.
@@ -2027,11 +2051,10 @@ def _self_check() -> int:
         fail("raw .dw", str(e))
 
     # ------------------------------------------------------------------
-    # 8. EMIT_BYTE_REG pairing check error (bare EMIT_BYTE = sugar form;
-    # E-WIRE-003 fires for the lowered EMIT_BYTE_REG mnemonic).
+    # 8. EMIT_BYTE_REG pairing check error (E-WIRE-003).
     raised_e_wire_003 = False
     try:
-        assemble("EMIT_BYTE expect=0 mask=1\nHALT\n", "<inline>")
+        assemble("EMIT_BYTE_REG expect=0 mask=1\nHALT\n", "<inline>")
     except AsmError as e:
         if "E-WIRE-003" in e.code or "E-WIRE-003" in str(e):
             raised_e_wire_003 = True
@@ -2053,7 +2076,7 @@ def _self_check() -> int:
     # ------------------------------------------------------------------
     # 9. EMIT_BYTE_REG mask=0 exemption (no error).
     try:
-        words = assemble("EMIT_BYTE expect=0 mask=0\nHALT\n", "<inline>")
+        words = assemble("EMIT_BYTE_REG expect=0 mask=0\nHALT\n", "<inline>")
         check("EMIT_BYTE_REG mask=0 exempt from pairing check",
               len(words) >= 3,
               "unexpectedly got empty result")
@@ -2080,22 +2103,30 @@ def _self_check() -> int:
           raised_e_rng_001,
           "expected AsmError with code E-RNG-001")
 
-    # 9d. EMIT_BYTE sugar lowers to EMIT_BYTE_REG (byte-identical).
+    # 9d. Bare EMIT_BYTE is retired (E-LEX-006); the diagnostic must
+    # point at both canonical replacements (_IMM and _REG).
+    raised_e_lex_006 = False
+    msg_has_imm = False
+    msg_has_reg = False
     try:
-        sugar = assemble("EMIT_BYTE\nHALT\n", "<inline>")
-        canon = assemble("EMIT_BYTE_REG\nHALT\n", "<inline>")
-        check("bare EMIT_BYTE is sugar for EMIT_BYTE_REG (byte-identical)",
-              sugar == canon,
-              f"sugar={[f'{w:#010x}' for w in sugar]} "
-              f"canon={[f'{w:#010x}' for w in canon]}")
+        assemble("EMIT_BYTE\nHALT\n", "<inline>")
     except AsmError as e:
-        fail("EMIT_BYTE sugar round-trip", f"raised {e!r}")
+        if "E-LEX-006" in e.code or "E-LEX-006" in str(e):
+            raised_e_lex_006 = True
+        msg_has_imm = "EMIT_BYTE_IMM" in str(e)
+        msg_has_reg = "EMIT_BYTE_REG" in str(e)
+    check("E-LEX-006 raised for bare EMIT_BYTE", raised_e_lex_006,
+          "expected AsmError with code E-LEX-006")
+    check("E-LEX-006 message names EMIT_BYTE_IMM", msg_has_imm,
+          "diagnostic must point at the IMM replacement")
+    check("E-LEX-006 message names EMIT_BYTE_REG", msg_has_reg,
+          "diagnostic must point at the REG replacement")
 
     # ------------------------------------------------------------------
     # 10. Case-insensitive MISMATCH pairing (regression M1)
     try:
         words = assemble(
-            "EMIT_BYTE expect=0 mask=1\n"
+            "EMIT_BYTE_REG expect=0 mask=1\n"
             "BRANCH_ON mismatch, nak\n"
             "nak: HALT\n",
             "<inline>",
