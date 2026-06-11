@@ -106,7 +106,10 @@ the design contract.
 - [x] **Verde retarget to 24 MHz `engineClk`.** After the X.1–X.5 perf chain plateaued at ~32 MHz best across 10 seeds, the design call was made to drop the Verde target back to 24 MHz — the same fabric clock the v0 engine ran on against silicon at Step 17. Rationale: chasing a moving Fmax target eats engineering time better spent on Phase 0 features; 24 MHz gives ~30 % margin off the worst observed v0.2 Fmax (X.5: 31.87 MHz best); the 5-stage pipeline still pays in IPC even at the same clock (a v0-equivalent program runs in roughly the same wall-time despite the lower clock); Rojo (ECP5-45K) is the headroom SKU for 48+ MHz work and gets there structurally, not by chasing UP5K Fmax. Changes: `MolePllUp5k` DIVQ 3 → 4 (VCO 384 MHz / 16 = 24 MHz, was / 8 = 48 MHz); `clkOutUart` wired directly to `PLLOUTGLOBAL` instead of through the toggle-FF divider (1:1 ratio on Verde, the toggle-FF path is dead code now); `MoleConfig.fabricFreqHz` 48 → 24 MHz; `uartFreqHz` stays 24 MHz; ratio require relaxed from `== 2` to `∈ {1, 2}` (2:1 stays available for Rojo); Makefile `--freq 48 --seed 3` → `--freq 24 --seed 3`; integer-divider audit confirmed at 24 MHz for every standard rate. Spec §2 clock-domain table updated. AGENTS.md `Fabric frequency targets` block rewritten to document the X.1–X.5 plateau + the call. Commit `1356477`.
 - [x] **C.10 --- host-side closure for the sticky-flag observability contract.** The placeholder `#[ignore]` test `all_four_sticky_flags_observable_in_decoded_ring` in `mole-loader/tests/adversarial.rs` was written against a model in which all four sticky flags were expected to acquire dedicated HALT-word bits; v0.2 settled instead on a split — MISMATCH ships in HALT bit `[28]`, TIMEOUT / START / STOP are observable via program logic (BRANCH_ON consumes the flag, HALTed status code encodes the outcome; spec §6 + §11). Test re-authored to exercise the loader-side contract on both channels: any (status, mismatch, overflow) tuple round-trips through `decode_ring` without conflation. The engine-side "does it actually set the flag?" question stays with `BitCycleEngineSim` / `EnginePipelineSim`. Result: `cargo test --workspace` is 393 passed / 0 failed / 0 ignored. Commit `fea7f7e` (plus the orthogonal Makefile column-tidy `1c7228a`). Note: the v0 `MoleTopSim` family stashed in `attic/` is **not** resurrected here; that work is queued as C.11.b under the Phase C acceptance gate below.
 
-**Phase C status:** 29/29 sim targets green via `make sim`. C.1–C.10 complete. **C.11 (end-to-end acceptance gate)** is split into five sub-tasks (a, b host/sim-side; c, d, e hardware-side); see the `### 🔲 Step 18 / Phase C.11 acceptance gate` block in Phase 3 below for the hand-off contract.
+- [x] **C.11.a --- tmp108 fixture re-port to EMIT_BYTE_IMM.** 3 compile-time-known bytes (I2C address `0x90`, register pointer `0x00`, repeated-start address `0x91`) collapsed from 9 `EMIT_BIT_IMM` each into 1 `EMIT_BYTE_IMM` apiece. Word count drops 70 → 48 body words (-31 %). `(use-raw-primitives)` pragma added (fire-and-forget-capture semantics; spec §5.5 E-WIRE-003 pairing rule would otherwise reject the masked EMIT_BYTE_IMM without a downstream BRANCH_ON MISMATCH). Goldens regenerated; `cargo test --workspace` 394/0/0. EMIT_BYTE_IMM gets its first hardware exercise at C.11.d. Commit `65c2c03`.
+- [x] **C.11.b --- v0 MoleTopSim family re-ported as v0.2 SpinalSim.** 3 sims (`MoleTopSim`, `MoleTopFlowControlSim`, `MoleTopCtsViolationSim`) under `fpga/Mole/src/sim/` driving full host-link chain end-to-end (host frame → loader → SPRAM → engine → drainer → host decode) under a shared `MoleTopSimDut`. **Finding:** the sims surfaced an engine-side glue gap (engine PC=0 fetches the v0.2 preamble's MAGIC word and traps). Carried forward as new sub-task **C.11.f** (engine PC start past preamble). The 3 sims are kept in tree as forward regression target but **not** in aggregate `make sim`; run individually via `make sim-top` etc. Aggregate `make sim` stays at 29/29 green. Commit `b1dc3c1`.
+
+**Phase C status:** 29/29 sim targets green via aggregate `make sim`; 3 new MoleTopSim-family sims (sim-top, sim-top-flow-control, sim-top-cts-violation) in tree but excluded from aggregate pending C.11.f. C.1–C.10 complete; C.11.a/C.11.b complete; **C.11.f (engine PC past preamble) is now a prerequisite for the hardware sub-tasks C.11.c/d/e.** See `### 🔲 Step 18 / Phase C.11` block in Phase 3 below for the full hand-off contract including C.11.f.
 
 ---
 
@@ -1281,118 +1284,148 @@ sim-side and can be done by any agent on any machine without a
 board in hand. (c), (d), (e) require physical hardware and are
 the cross-machine hand-off targets.
 
-#### C.11.a (host-side) --- optionally re-port `tmp108.moleasm` to use `EMIT_BYTE_IMM`
+#### ✅ C.11.a --- tmp108 fixture re-port to use `EMIT_BYTE_IMM`
 
-**Status note:** the v0 → v0.2 syntax port that this sub-task was
-originally framed around is **already done**. There is no
-back-compat layer for v0 source; `mole-asm/tests/fixtures/tmp108.moleasm`
-is already v0.2-native (uses `EMIT_BIT_IMM`, `EMIT_QUARTER_IMM`, the
-v0.2 `tx_symbol` vocabulary, flag triples). The retired bare
-`EMIT_BYTE` mnemonic is rejected by the assembler with E-LEX-006
-(see the project AGENTS.md §"EMIT_BYTE and byte-level emits").
+**What landed (commit `65c2c03`):**
 
-**Where:** `mole-asm/tests/fixtures/tmp108.moleasm` (already v0.2);
-the open question is whether to *additionally* re-port it to use
-`EMIT_BYTE_IMM` for the I2C address and register-pointer bytes.
+- **Files:** `mole-asm/tests/fixtures/tmp108.moleasm` rewritten;
+  `.molecode` and `.mole.bin` goldens regenerated.
+- **Change:** the 3 compile-time-known byte spans (I2C address
+  `0x90`, register pointer `0x00`, repeated-start address `0x91`)
+  collapsed from 9 lines of `EMIT_BIT_IMM` each into a single
+  `EMIT_BYTE_IMM imm=<byte> expect=0 mask=1 capture=1`. Slave-
+  sourced data bytes (16-bit temperature MSB + LSB) stay
+  bit-by-bit so each read bit gets its own CAPTURE record.
+- **Wire-shape equivalence:** under `BUS_MODE.i2c` (OD class),
+  `recessive` and `hiz` both decode to `(driveLow=0, driveHigh=0)`
+  --- electrically identical. The wire shape the TMP108 sees is
+  unchanged; only the instruction count drops.
+- **`(use-raw-primitives)` pragma added:** `EMIT_BYTE_IMM mask=1`
+  normally triggers §5.5 E-WIRE-003 (program must BRANCH_ON
+  MISMATCH or FLAG_CLEAR after the byte). The fixture is
+  fire-and-forget-capture: each ACK lands in the ring for host
+  post-mortem analysis. The bit-by-bit version had the same
+  semantics without raising E-WIRE-003 because the rule is gated
+  to EMIT_BYTE_*; the pragma documents that the asymmetry is
+  deliberate.
+- **Word count:** body drops 70 → 48 words (-22, -31 %). Frame
+  drops 296 → 200 bytes; .mole.bin drops 300 → 204 bytes.
+- **Tests:** `cargo test --workspace` 394/0/0 (unchanged count;
+  the golden cross-check consumes the re-ported fixture).
+- **EMIT_BYTE_IMM hardware coverage:** with the re-port,
+  EMIT_BYTE_IMM gets its first hardware exercise at C.11.d
+  (TMP108 regression on PMOD1A). Without it, the opcode would
+  remain sim-only at Phase 0 release.
 
-**Open design call (ask the user, do not pick unilaterally):** the
-current fixture spells out every bus bit explicitly via
-`EMIT_BIT_IMM`. That has two virtues: (a) every wire bit is
-visible in the source, which makes scope-debugging trivial during
-silicon bring-up; (b) it exercises the WIRE group of the engine
-end-to-end without depending on the multi-cycle `EMIT_BYTE_*`
-opcode FSMs. Switching to `EMIT_BYTE_IMM` for the 3 known bytes
-(I2C address `0x48 << 1`, register pointer `0x00`, repeated-start
-address `(0x48 << 1) | 1`) collapses ~27 lines of EMIT_BIT_IMM
-into 3 lines and *also* exercises the EMIT_BYTE_IMM ACK-slot
-semantics on silicon for the first time. Without the re-port the
-EMIT_BYTE_IMM hardware path is sim-only at Phase 0 release.
+#### ✅ C.11.b --- MoleTopSim family re-ported as v0.2 SpinalSim end-to-end
 
-**If re-port chosen, procedure:**
-1. Identify each contiguous span of 8 `EMIT_BIT_IMM` instructions
-   that emits a compile-time-known byte (look for the canonical
-   `dominant/recessive/...` pattern that encodes a 7-bit address
-   + R/W bit, or a register pointer).
-2. Replace each 9-line span (8 EMIT_BIT_IMM + 1 ACK EMIT_BIT_IMM)
-   with one `EMIT_BYTE_IMM imm=<byte>` carrying the same flag
-   triple on the ACK slot (`expect=0 mask=1 capture=1` for ACK
-   check; `expect=X mask=0` for fire-and-forget; spec §5.5b).
-3. Regenerate both goldens:
-   `cargo run --release --bin mole-asm -- assemble
-   mole-asm/tests/fixtures/tmp108.moleasm
-   -o mole-asm/tests/fixtures/tmp108.molecode --frame
-   --frame-output mole-asm/tests/fixtures/tmp108.mole.bin`.
-4. Run `cargo test -p mole-asm` (golden tests) and
-   `make sim-isa` (Scala golden cross-check) — both must stay
-   green.
-5. Hand-inspect the disassembly:
-   `cargo run --release --bin mole-asm -- disassemble
-   mole-asm/tests/fixtures/tmp108.molecode` --- the wire-byte
-   sequence should round-trip identically.
+**What landed (commit `b1dc3c1`):**
 
-**Acceptance (if re-port chosen):** new goldens in tree; both
-test suites green; word count in the v0.2 fixture strictly less
-than the prior version (proves IMM is doing its job).
+- **Files:** 3 new sims under `fpga/Mole/src/sim/`:
+  `MoleTopSim.scala`, `MoleTopFlowControlSim.scala`,
+  `MoleTopCtsViolationSim.scala`. Each is a v0.2 re-port of the
+  corresponding `.v0-stash` file under `src/attic/`.
+- **Shared DUT:** `MoleTopSimDut` wraps `MoleTop(useBlackBox =
+  false)` with sim-side `UartTx`/`UartRx` so the test harness
+  drives bytes through Spinal Streams instead of bit-banging the
+  UART wire. Shared helpers (CRC, frame builder, send/recv,
+  reset, testCfg, simConfig) live in `MoleTopSimSupport`
+  object --- v0 stash duplicated them per sim because each
+  `extends App` body fired on import; this v0.2 port dedupes.
+- **Cases ported:**
+  - `MoleTopSim`: short-halt round-trip, bad-CRC + recovery,
+    back-to-back frames. (Bus-toggle case from v0 stash skipped:
+    v0.2 `MoleTop` does not expose `sim_sdaDrive*` /
+    `sim_sclDrive*` taps; adding them would require editing the
+    frozen HDL per the C.11 hand-off contract.)
+  - `MoleTopFlowControlSim`: 4 cases (CTS asserted in
+    acceptLoad; CTS deasserted during run+drain; RTS-deasserted
+    TX backpressure; mid-drain halt + resume).
+  - `MoleTopCtsViolationSim`: 1 case (stray UART RX during
+    running phase sets the sticky observable).
+- **v0.2 frame format:** `MoleTopSimSupport.buildFrame` builds a
+  v0.2 UART frame (2-word preamble `MAGIC + body_len` + N 32-bit
+  body words + CRC trailer), split into 16-bit half-words on the
+  wire per the `MoleLoaderFsm` contract. Mirror of
+  `mole-asm::frame::build_frame`.
+- **Finding (Carried forward as new sub-task C.11.f below):**
+  The 3 new sims **fail today** because the engine fetches the
+  v0.2 preamble (`MAGIC = 0x0002_4D4C`) at PC=0 and traps on the
+  magic word's reserved bits. The `MoleLoaderFsm` +
+  `LoaderWidthAdapter` write the preamble verbatim into
+  SPRAM[0..1]; there is no preamble-strip step in `MoleTop` or
+  the engine. This is exactly the kind of inter-component glue
+  bug C.11.b was meant to catch.
+- **Treatment of the 3 failing sims:** kept in tree as a forward
+  regression target. **Not** in the aggregate `make sim` target
+  so they don't break the green light for the existing 29 sim
+  targets. Run individually via `make sim-top` /
+  `sim-top-flow-control` / `sim-top-cts-violation` to reproduce.
+  Each sim's header carries the finding + proposed fix shape.
+- **Tests:** `make sim` still reports 29/29 sim targets green
+  (the 3 new ones are isolated). Workspace tests unchanged.
+- **Cleanup deferred:** the `.v0-stash` files under `src/attic/`
+  are kept for now as intent reference. Delete them once C.11.f
+  closes and the live sims pass.
 
-**Acceptance (if re-port deferred):** no change. The fixture
-stays bit-by-bit for C.11.d hardware regression. EMIT_BYTE_IMM
-hardware coverage waits for a separate v0.2 fixture (e.g.
-i2c-write-one-byte.moleasm, which is already in
-`mole-asm/tests/fixtures/`) executed against silicon.
+#### 🔲 C.11.f (engine fix, NEW) --- engine PC start past v0.2 frame preamble
 
-#### C.11.b (sim-side) --- re-port `MoleTopSim` family from `attic/`
+**Discovered by:** C.11.b (commit `b1dc3c1`). The first
+end-to-end SpinalSim of the full host-link chain surfaced an
+engine glue gap that was invisible to the 29 pre-existing
+component sims.
 
-**Where:** `fpga/Mole/src/attic/MoleTopSim.scala.v0-stash`,
-`MoleTopFlowControlSim.scala.v0-stash`,
-`MoleTopCtsViolationSim.scala.v0-stash` are intent-only v0
-references. The corresponding v0.2 sims need to drive the
-**v0.2 frame format** (MAGIC + body_len + body + CRC; see
-`mole-abi/src/lib.rs`) into `MoleLoaderFsm`, watch the engine
-execute, and decode the drainer output through `mole-loader`'s
-`decode_ring` host-side function.
+**Symptom:** with the engine PC starting at 0 and the loader
+writing the v0.2 frame preamble (`MAGIC + body_len`) into
+SPRAM[0..1] verbatim, the engine's first fetch lands on
+`MAGIC = 0x0002_4D4C`. Decoded as an instruction this is opcode
+group=00 sub=0x0 (= `EMIT_BIT_IMM`) with non-zero reserved bits.
+The engine should trap with STATUS_TRAP at the first fetch and
+HALT before any program instruction runs.
 
-**Why it has value even without hardware:** validates the v0.2
-frame → loader → SPRAM → engine → drainer → host decode chain
-end-to-end in SpinalSim. This is the largest gap in the current
-sim coverage — every component sim is green individually but no
-sim drives the full chain under one DUT compile. A regression
-in any inter-component contract (e.g. SPRAM byte ordering,
-loader address generation, drainer ring word count) would be
-caught here, not in any of the 29 existing sims.
+**Proposed fix shapes** (pick one before implementing; the spec
+does not currently mandate which):
 
-**Procedure:**
-1. Read the three v0 stash files; each documents a specific
-   end-to-end scenario (short halt round-trip; CTS / RTS flow
-   control; bad-CRC recovery and back-to-back frames).
-2. Re-author each as a v0.2 sim using:
-   - `mole-asm` (called from Scala via `sys.process` or
-     pre-assembled to a hex string in the sim source) to
-     generate the v0.2 frame bytes.
-   - `MoleLoaderFsm` driven by a sim-side UART TX
-     (`UartTx` in slave mode).
-   - The full pipelined `EnginePipeline` (not a stubbed
-     engine).
-   - `MoleDrainerFsm` to flush the ring back through a
-     sim-side UART RX.
-   - Host-side decode in the sim (a Scala port of the
-     `mole-loader::decode_ring` happy path is fine; doesn't
-     need to be exhaustive, only the assertions the v0 sims
-     made).
-3. Add three new Makefile targets `sim-top`,
-   `sim-top-flow-control`, `sim-top-cts-violation`. Update
-   the aggregate `sim:` target to depend on them.
-4. Delete the `.v0-stash` files from `attic/` once their v0.2
-   replacements are landing green. Keep `attic/README.md`
-   noting they were resurrected.
+- **(a) `pcReg init U(PREAMBLE_WORDS, _)`** --- simplest possible
+  change in `EnginePipeline.scala`. Engine starts at PC=2,
+  fetching body word 0 directly. Preamble is written to SPRAM
+  but never read. **Downside:** no magic verification; a host
+  that sends a frame with a corrupted preamble (e.g. wrong
+  format version) gets silently executed.
 
-**Caveat:** C.11.b can land before C.11.a. The order is
-independent.
+- **(b) Add `programOffset` input to `EnginePipeline.io`;
+  `MoleTop` drives it to `Instruction.PREAMBLE_WORDS`.** Same
+  net behaviour as (a) but the constant lives in `MoleTop`
+  rather than `EnginePipeline`. Slightly cleaner separation:
+  the engine doesn't bake-in the frame format. Same magic-check
+  downside as (a).
 
-**Acceptance:** `make sim` reports 32/32 sim targets green
-(29 today + 3 new). At least one of the new sims exercises a
-known-good short HALT-0 program through the entire chain and
-asserts the decoded HALT word matches `tag=11, status=0,
-overflow=0, mismatch=0`.
+- **(c) Add a preamble-verify-and-strip step in
+  `MoleLoaderFsm` or `LoaderWidthAdapter`.** The loader consumes
+  the first `PREAMBLE_WORDS` 32-bit words, verifies word 0
+  equals `mole_abi::MAGIC` (raising a new E-FPGA-* fault on
+  mismatch) and word 1 equals the expected body word count,
+  then writes body words to SPRAM starting at index 0. Engine
+  PC stays at 0. **This is the cleanest option** because it
+  gives `MoleTop` a place to reject bad-magic frames before the
+  engine ever fetches; the current design has no engine-side
+  or host-link-side magic check at all (the host-side
+  `mole-loader::verify_frame` checks magic but only on the host
+  side --- once the frame reaches the wire, MoleTop accepts any
+  16-bit count of words verbatim).
+
+**Acceptance:** the 3 sims under `MoleTop{,FlowControl,CtsViolation}Sim.scala`
+pass; add them to the aggregate `sim:` target in
+`fpga/Mole/Makefile`; delete the `.v0-stash` files from
+`src/attic/`; close C.11.f with a "What landed" body matching
+the C.11.a/b style.
+
+**Dependency:** **C.11.c (iCEbreaker bring-up) is also blocked
+on C.11.f.** Without preamble handling, a fresh v0.2 bitstream
+will trap immediately on any frame sent by `mole-loader-cli`.
+The hardware sub-tasks below should be re-sequenced as:
+  C.11.f (engine fix) → C.11.c (iCEbreaker smoke) →
+  C.11.d (TMP108 regression) → C.11.e (MCXA268 I3C soak).
 
 #### C.11.c (hardware) --- iCEbreaker bitstream flash + smoke HALT
 
