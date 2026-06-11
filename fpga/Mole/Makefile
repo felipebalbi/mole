@@ -129,13 +129,24 @@ report: $(REPORT) ## Generate nextpnr report (gen/<TOP>.report.json)
 # Aggregate sim target. Per-block sim targets land as the project
 # grows (see TODO.md). Keep this list and .PHONY in sync.
 #
-# Phase C in flight: some v0 sims are stashed in src/attic/ pending
-# resurrection at the appropriate C.x commit. The aggregate `sim`
-# target lists only sims that exist in src/sim/ today. C.8 brought
-# back sim-engine-full, sim-engine-target, sim-engine-stretch, and
-# sim-engine-jmp-boundary. Still pending: C.10 end-to-end → sim-top,
-# sim-top-flow-control, sim-top-cts-violation. As stashed sims come
-# back online, re-add them here and to .PHONY.
+# Phase C status: C.10 closed the host-side gap (sticky-flag
+# observability test); C.11.b re-ported the v0 MoleTopSim family
+# from src/attic/ as v0.2 SpinalSim end-to-end coverage. The
+# attic/ stash files remain as intent reference; the live v0.2
+# sims are src/sim/MoleTop{,FlowControl,CtsViolation}Sim.scala.
+#
+# **NOT IN AGGREGATE YET (C.11.b finding):** sim-top, sim-top-
+# flow-control, and sim-top-cts-violation **fail today** because
+# the engine's PC starts at 0 and fetches the v0.2 frame preamble
+# (MAGIC + body_len) as instructions, trapping immediately. The
+# MoleLoaderFsm + LoaderWidthAdapter write the preamble verbatim
+# into SPRAM[0..1]; there is no preamble-strip step in MoleTop or
+# the engine. This is a real glue gap surfaced by C.11.b ---
+# exactly the kind of inter-component bug the end-to-end sim was
+# meant to catch. Fix is engine-side (HDL frozen on branch v0.2;
+# defer to a future C.x fix commit). Run the 3 sims individually
+# to reproduce: `make sim-top` etc. See TODO.md §"C.11.b" for
+# detail.
 sim: sim-config sim-opendrain sim-baud-gen sim-rx-sync \
      sim-tx-shiftreg sim-rx-shiftreg sim-tx-fsm sim-rx-fsm \
      sim-uart-tx sim-uart-rx sim-uart sim-spram sim-isa \
