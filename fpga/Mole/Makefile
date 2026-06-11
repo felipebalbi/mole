@@ -73,13 +73,13 @@ $(JSON): $(V)
 # that sweep selects a new pin, `--seed 3` is kept as the
 # auditable default that matches v0 bring-up history.
 $(ASC): $(JSON) $(PCF)
-	$(NEXTPNR) \
+	$(NEXTPNR)              \
 		--up5k          \
 		--package sg48  \
 		--pcf $(PCF)    \
-		--json $< \
-		--asc $@  \
-		--freq 24 \
+		--json $<       \
+		--asc $@        \
+		--freq 24       \
 		--seed 3
 
 # 4. Pack (ASC -> BIN)
