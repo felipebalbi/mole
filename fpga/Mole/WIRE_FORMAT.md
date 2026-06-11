@@ -1,293 +1,135 @@
-# Mole host link wire format (v0)
+# Mole host link wire format (v0.2)
 
-This document is the **stable contract** between any host tool and
-the Mole engine on the iCEbreaker. Once the Phase 2 bitstream ships
-a tagged release, the format below is a wire contract --- breaking
-it requires a bytecode-format version bump (see `../../AGENTS.md`
-§3.17, §6 "Breaking changes").
+This document covers the **iCEbreaker-side** UART link contract:
+pin mapping, baud, flow control, resync rule. The **bit-level
+frame and ring encoding** is in
+[`../../docs/MOLE-0.2-SPEC.md`](../../docs/MOLE-0.2-SPEC.md);
+that file is normative and takes precedence whenever this
+document and it disagree. The v0 wire format (16-bit
+instructions, `len + payload + crc` framing) is **retired** ---
+v0 bytecode is not cross-compatible with the v0.2 engine. The
+v0-era contents of this file are preserved in commit history;
+this revision is the v0.2 replacement.
 
-The wire format is **raw binary on the UART**. There is no ASCII
-escaping, no SLIP framing, no start-of-frame byte. Frames are
-delimited by **idle time** on the line (see §"Resync rule").
+## 1. v0.2 wire format pointer
 
-UART settings: **1 000 000 baud, 8N1, RTS/CTS hardware flow
-control** (active-low, FT2232H convention). The iCEbreaker's
-FT2232H channel A is `/dev/ttyUSB0` on Linux and typically `COM3`
-or higher on Windows.
+The host-to-Mole frame is a **little-endian byte stream** on the
+UART carrying a v0.2 program: 8-byte preamble (magic + length) +
+N × 4-byte instruction words + CRC-16/XMODEM trailer. See:
 
-Flow control: `io_uCts` (PMOD1A pin 18, MoleTop OUT -> FT2232H
-CTS#) is asserted (LOW) only while the top-level phase FSM is in
+- [`../../docs/MOLE-0.2-SPEC.md`](../../docs/MOLE-0.2-SPEC.md)
+  §10 (wire format) for the preamble layout, the magic value
+  (`0x0002_4D4C`), `MAX_PROGRAM_WORDS`, and the byte-order
+  conventions.
+- [`../../docs/MOLE-0.2-SPEC.md`](../../docs/MOLE-0.2-SPEC.md)
+  §11 for the 32-bit HALT word layout
+  (`tag[31:30]=0b11 | overflow[29] | mismatch[28] | status[27:23]
+  | reserved[22:0]=0`) and the 5-bit status partitioning
+  (user `0x00..0x1C`, reserved `0x1D..0x1E`, engine-trap `0x1F`).
+- [`../../docs/MOLE-0.2-SPEC.md`](../../docs/MOLE-0.2-SPEC.md)
+  §13 for the loader/runtime error catalogue (E-FRM-, E-PRG-,
+  E-RNG-, E-RAW-, E-OP-, E-OPD- families) including which frame
+  errors the loader rejects pre-write (§16.4 pre-scan) vs which
+  surface as runtime traps.
+
+The host-side encoder is the `mole-asm` crate at
+[`../../mole-asm/`](../../mole-asm/) (CLI front-end in
+[`../../mole-asm-cli/`](../../mole-asm-cli/)). The host-side
+loader + ring decoder is the `mole-loader` crate at
+[`../../mole-loader/`](../../mole-loader/) (CLI front-end in
+[`../../mole-loader-cli/`](../../mole-loader-cli/)). The ABI
+constants are in [`../../mole-abi/`](../../mole-abi/). For
+bring-up, prefer driving the link via `mole-loader-cli` rather
+than hand-encoding frames; the only reason to hand-encode is to
+exercise a corner of the wire format the host crates do not yet
+support, in which case file an issue first.
+
+## 2. UART settings (board-specific)
+
+UART link: **1 000 000 baud, 8N1, RTS/CTS hardware flow control**
+(active-low, FT2232H convention). The iCEbreaker's FT2232H
+channel A is `/dev/ttyUSB0` on Linux and typically `COM3` or
+higher on Windows; on macOS it enumerates as
+`/dev/tty.usbserial-ibXXXXXX` (the exact suffix depends on the
+device's chip-side serial number).
+
+The engine clock and the UART clock are **both 24 MHz on Verde**
+(1:1 ratio off `PLLOUTGLOBAL`; see
+[`../../docs/MOLE-0.2-SPEC.md`](../../docs/MOLE-0.2-SPEC.md) §2
+clock-domain table). 1 Mbaud is 24× the baud, which is well
+above the textbook 16× oversample floor; no PLL trimming
+needed.
+
+## 3. Flow control --- `crtscts` is mandatory
+
+`io_uCts` (PMOD1A pin 18, MoleTop OUT → FT2232H CTS#) is
+asserted (LOW) only while the top-level phase FSM is in
 `acceptLoadState`. A host driver with `crtscts` enabled
 therefore holds its TX off whenever Mole is running a program or
 draining the result ring --- this is what enforces the spec
 invariant *"while program is not HALTED, don't accept data"*.
-`io_uRts` (PMOD1A pin 19, MoleTop IN <- FT2232H RTS#) is
-asserted (LOW) when the host's USB pipe has room. The drainer's
-TX stream is gated on this, so when the host falls behind the
+
+`io_uRts` (PMOD1A pin 19, MoleTop IN ← FT2232H RTS#) is asserted
+(LOW) when the host's USB pipe has room. The drainer's TX
+stream is gated on this, so when the host falls behind the
 drainer stops issuing new bytes --- but, per standard
 HW-flow-control semantics, an in-flight UART frame completes on
 the wire regardless. The FPGA pin enables an internal pull-up
 so an unwired board reads HIGH = RTS#-deasserted = drainer
-halted (visible failure rather than metastable garbage). See
-[`BRINGUP.md`](BRINGUP.md) §3 for a working `stty` line.
+halted (visible failure rather than metastable garbage).
 
----
+A working `stty` line for raw bring-up:
 
-## 1. Frame layout (host -> engine: program upload)
-
-```
-   offset  size  field
-   ------  ----  -----
-        0     2  len           (16-bit, little-endian)
-        2     2  word[0]       (16-bit opcode, little-endian)
-        4     2  word[1]       (16-bit opcode, little-endian)
-        ...
-   2+2(N-1)   2  word[N-1]     (16-bit opcode, little-endian)
-        ?     2  crc           (16-bit CRC-16/XMODEM, little-endian)
+```sh
+stty -F /dev/ttyUSB0 1000000 cs8 -cstopb -parenb \
+    crtscts -ixon -ixoff -ixany raw
 ```
 
-Total frame size in bytes:
+`crtscts` enables the HW flow control; `-ixon -ixoff -ixany`
+explicitly disables any software (XON/XOFF) flow control ---
+Mole does not speak it and accidentally enabling it on the host
+turns arbitrary frame bytes into XON/XOFF and breaks the link.
 
-```
-   frame_size = 2 + 2 * len + 2
-              = 4 + 2 * len     bytes
-```
-
-Worked-out examples:
-
-```
-   len = 1   -> frame_size =  6 bytes  (2 len + 2 program + 2 crc)
-   len = 2   -> frame_size =  8 bytes
-   len = 4   -> frame_size = 12 bytes
-   len = 16  -> frame_size = 36 bytes
-   len = 2048 (max) -> frame_size = 4100 bytes
-```
-
-### 1.1 The `len` field
-
-- `len` is the **number of 16-bit opcode words** in the program.
-- `len` does **not** include itself.
-- `len` does **not** include the trailing CRC.
-- Valid range: `1 <= len <= 2048`. `len = 0` is rejected (no
-  program to run). `len > 2048` is rejected (exceeds
-  `MoleConfig.programWordCount`, which is itself capped at 2048
-  by the 11-bit `JMP` absolute-address field; see
-  `../../ROADMAP.md` §"Encoding width").
-- Encoded **little-endian**: the low byte (`len & 0xFF`) goes on
-  the wire first, then the high byte (`(len >> 8) & 0xFF`).
-
-### 1.2 The program words
-
-- Each opcode is exactly **16 bits** (`../../ROADMAP.md`
-  §"Encoding width" and `AGENTS.md` §3.9).
-- Each word is transmitted **little-endian**: low byte first,
-  then high byte.
-- Words are transmitted in program-counter order: `word[0]` is
-  the instruction at SPRAM address 0, `word[1]` at address 1,
-  and so on.
-- The host is responsible for ensuring `word[N-1]` either halts
-  the engine (`HALT`) or jumps somewhere that eventually does.
-  The engine does not insert an implicit halt; if your program
-  falls off the end, it runs whatever uninitialised SPRAM
-  contains.
-
-### 1.3 The CRC field
-
-- 16-bit CRC over **all preceding bytes** (the `len` field +
-  every program byte). The CRC bytes themselves are **not**
-  covered by the CRC.
-- Encoded **little-endian**: low byte first, then high byte.
-- Algorithm: **CRC-16/XMODEM**. Full parameters in §3 below.
-
----
-
-## 2. Frame layout (engine -> host: result drain)
-
-When the engine completes a run (executes `HALT`), MoleTop sweeps
-the entire **result ring** out the UART, low byte of each 16-bit
-ring word first.
-
-```
-   total_bytes = MoleConfig.resultRingByteCount   (default: 8192)
-```
-
-There is no length prefix on the result drain. The host knows
-exactly how many bytes to expect (it is a build-time constant of
-the bitstream; the host learns it from the bring-up procedure,
-not from the wire). The host decodes records from the ring by
-inspecting tag bits inside each record and stops processing when
-it hits the `HALT` record near the end.
-
-The first 4 bytes of the ring are always the **Revision word**
-(see `src/hw/Revision.scala`): `major (1 byte) | minor (1 byte) |
-patch (2 bytes)`, little-endian per the 16-bit ring grain.
-
-A drain always streams the **full ring**, padded with stale data
-from previous runs if the engine wrote fewer bytes than the ring
-holds. Hosts MUST decode by tag-bit until they see `HALT`; bytes
-after `HALT` are not meaningful.
-
----
-
-## 3. CRC-16/XMODEM --- full specification
-
-Every CRC reference catalogue uses a slightly different name for
-this variant. Mole uses what `pycrc` and the Rocksoft CRC catalogue
-call **CRC-16/XMODEM** (also known as CRC-16/ZMODEM, CRC-16/ACORN,
-CRC-CCITT-FALSE's non-reflected cousin). The full parameter set:
-
-| Parameter      | Value     | Notes                                  |
-|----------------|-----------|----------------------------------------|
-| Width          | 16        | bits                                   |
-| Polynomial     | `0x1021`  | normal form, x^16 + x^12 + x^5 + 1     |
-| Initial value  | `0x0000`  | CRC register init                      |
-| Reflect input  | false     | bytes processed MSB-first              |
-| Reflect output | false     | final register used as-is              |
-| XOR output     | `0x0000`  | no final XOR                           |
-| Check          | `0x31C3`  | CRC of the ASCII string `"123456789"`  |
-
-Note on residue: CRC-16/XMODEM's catalogue residue is `0x0000`,
-but that property only holds when the CRC trailer is appended
-**big-endian** (high byte first). Mole appends the trailer
-**little-endian**, so feeding `payload || crc_lo || crc_hi` back
-through the algorithm does **not** yield zero. The correct loader
-pattern is: compute the CRC over the payload bytes only, then
-compare against the 16-bit trailer reassembled from
-`(crc_hi << 8) | crc_lo`. The hardware loader follows that pattern;
-hosts validating their own builders should do the same.
-
-### 3.1 Reference algorithm (bytewise, MSB-first)
-
-```c
-uint16_t crc16_xmodem_update(uint16_t crc, uint8_t byte) {
-    crc ^= ((uint16_t)byte) << 8;
-    for (int i = 0; i < 8; i++) {
-        if (crc & 0x8000) {
-            crc = (crc << 1) ^ 0x1021;
-        } else {
-            crc = crc << 1;
-        }
-    }
-    return crc & 0xFFFF;
-}
-
-uint16_t crc16_xmodem(const uint8_t *data, size_t len) {
-    uint16_t crc = 0x0000;       /* init */
-    for (size_t i = 0; i < len; i++) {
-        crc = crc16_xmodem_update(crc, data[i]);
-    }
-    return crc;                  /* no final XOR */
-}
-```
-
-Python equivalent:
-
-```python
-def crc16_xmodem(data: bytes) -> int:
-    crc = 0x0000
-    for b in data:
-        crc ^= b << 8
-        for _ in range(8):
-            crc = ((crc << 1) ^ 0x1021) & 0xFFFF if crc & 0x8000 \
-                  else (crc << 1) & 0xFFFF
-    return crc
-```
-
-### 3.2 Test vectors
-
-Use these to validate any independent host implementation:
-
-| Input bytes                       | Expected CRC (hex) |
-|-----------------------------------|--------------------|
-| empty (zero bytes)                | `0x0000`           |
-| `0x00`                            | `0x0000`           |
-| `0xFF`                            | `0x1EF0`           |
-| ASCII `"123456789"`               | `0x31C3`           |
-| `0x00 0x00`                       | `0x0000`           |
-| `0xAA 0x55`                       | `0xF8E5`           |
-| Example frame payload (see §6)    | `0x9FDF`           |
-
-The `"123456789"` vector is the standard catalogue check value
-and is the one to look for if you are diffing against `pycrc`,
-crccalc.com, or the Boost CRC implementations.
-
-### 3.3 Standard library quick-references
-
-If you do not want to roll your own:
-
-```python
-# Python: install with `pip install crcmod`
-import crcmod
-crc16 = crcmod.mkCrcFun(0x11021, initCrc=0x0000,
-                        rev=False, xorOut=0x0000)
-crc16(b"123456789")        # -> 0x31C3
-```
-
-```rust
-// Rust: crc = "3"
-use crc::{Crc, CRC_16_XMODEM};
-const X: Crc<u16> = Crc::<u16>::new(&CRC_16_XMODEM);
-X.checksum(b"123456789");  // -> 0x31C3
-```
-
-In every case the parameter set above is what to verify against;
-the library is just a convenience.
-
-### 3.4 What gets CRC'd
-
-The CRC covers the bytes in this order:
-
-```
-   len_lo, len_hi,
-   word[0]_lo, word[0]_hi,
-   word[1]_lo, word[1]_hi,
-   ...,
-   word[N-1]_lo, word[N-1]_hi
-```
-
-That is, the `len` field is included; the `crc` field is not. The
-CRC is computed over the **wire byte stream** in transmission
-order (little-endian halves already serialised), not over the
-16-bit values directly. The two views give the same answer because
-CRC-16/XMODEM is byte-oriented, but stating it explicitly removes
-ambiguity for anyone who builds the frame from a list of u16s and
-then runs the CRC over it.
-
----
+`mole-loader-cli` sets these flags on the `serialport::SerialPortBuilder`
+before opening the port; if you are driving the link from another
+host tool you must replicate this. The flags MUST be set on the
+builder, not after `open()` returns --- on Linux this is racy
+enough to drop the first frame's bytes intermittently.
 
 ## 4. Resync rule
 
-The wire format has no in-band start-of-frame marker. If anything
-goes wrong --- bad length, bad CRC, UART RX framing/parity/overrun
-error --- the loader latches a fault, lights the red LED, and
-enters a **Resync** state in which it drops every incoming byte
-until the RX line has been continuously high for **at least two
-UART byte-times** (~20 bit periods, ~20 microseconds at 1 Mbaud).
+The wire format has no in-band start-of-frame marker beyond the
+magic word. If anything goes wrong --- bad CRC, bad length,
+UART RX framing / parity / overrun error --- the loader latches
+a fault, lights the red LED, and enters a **Resync** state in
+which it drops every incoming byte until the RX line has been
+continuously high for **at least two UART byte-times**
+(~20 bit periods, ~20 µs at 1 Mbaud).
 
 The host is therefore obligated to:
 
 1. **After any host-side abort or retransmit:** stop sending,
-   wait at least 20 microseconds (a safe round number is 1 ms),
-   then send the next frame from byte 0.
+   wait at least 20 µs (a safe round number is 1 ms), then send
+   the next frame from byte 0.
 2. **Between back-to-back frames:** the host SHOULD wait for the
    result drain to complete before sending the next program. If
    the host sends a frame while the engine is running or the
-   result ring is still draining, the loader applies back-
-   pressure on its UART input. The host's UART driver will see
-   buffer-full conditions. The loader does NOT silently buffer.
+   result ring is still draining, the loader applies
+   back-pressure on its UART input via CTS#. The host's
+   `crtscts`-enabled UART driver will see buffer-full conditions.
+   The loader does NOT silently buffer.
 3. **First frame after power-up or reset:** the line has been
    idle since boot, so no extra delay is needed beyond the usual
    "open the serial port, then send".
 
 The two-byte-time threshold gives the loader enough margin to
-distinguish frame boundaries from intra-frame inter-character gaps
-that are technically legal at the UART layer but disallowed by
-Mole's contract: **once a frame begins, all of its bytes MUST
-follow without 10+ microsecond gaps**. In practice any host that
-calls `write()` once with the full frame buffer satisfies this
-trivially.
-
----
+distinguish frame boundaries from intra-frame inter-character
+gaps that are technically legal at the UART layer but disallowed
+by Mole's contract: **once a frame begins, all of its bytes MUST
+follow without 10+ µs gaps**. In practice any host that calls
+`write()` once with the full frame buffer satisfies this
+trivially. `mole-loader-cli` builds the full frame in memory
+before issuing one `write_all()`.
 
 ## 5. Engine start
 
@@ -297,82 +139,71 @@ write retires. This keeps the wire format minimal --- there is
 exactly one frame type to encode --- and matches the typical use
 case (build a frame, send it, observe the result).
 
----
+## 6. Result drain
 
-## 6. Worked example: a 2-word program
-
-The program: `SET_BUS_MODE i2c; HALT 0`.
-
-Suppose the assembler produces:
+When the engine HALTs, MoleTop sweeps the entire **result ring**
+out the UART, low byte of each 16-bit ring word first.
 
 ```
-   word[0] = 0x9000      (SET_BUS_MODE i2c, hypothetical encoding)
-   word[1] = 0x6000      (HALT 0, hypothetical encoding)
+total_bytes = MoleConfig.resultRingByteCount   (default: 8192)
 ```
 
-(The exact encodings are defined in `src/hw/Instruction.scala`;
-the numbers here are illustrative.)
+There is no length prefix on the result drain. The host knows
+exactly how many bytes to expect (it is a build-time constant of
+the bitstream). The host decodes records from the ring by
+inspecting tag bits inside each record and stops processing when
+it hits the **HALT word at `resultLimit`** (the last two 16-bit
+slots, combined little-endian into the 32-bit HALT record per
+§11).
 
-Build the frame:
+The first 4 bytes of the ring are always the **Revision word**
+(see [`src/hw/Revision.scala`](src/hw/Revision.scala)):
+`major (1 byte) | minor (1 byte) | patch (2 bytes)`,
+little-endian per the 16-bit ring grain.
 
-```
-   len = 2          -> bytes: 0x02 0x00
-   word[0] = 0x9000 -> bytes: 0x00 0x90
-   word[1] = 0x6000 -> bytes: 0x00 0x60
-```
+A drain always streams the **full ring**, padded with stale data
+from previous runs if the engine wrote fewer bytes than the ring
+holds. Hosts MUST decode by tag-bit until they reach the
+reserved HALT slot at `resultLimit`; bytes between the last
+emitted record and the HALT slot are *trailing garbage* and must
+not be interpreted as records (this hazard burnt v0 Step 17 ---
+see commits `6edd139` and `5094d4d` in branch history). The
+`mole-loader::decode_ring` function handles this correctly out
+of the box.
 
-So the pre-CRC byte stream is:
+## 7. Result-ring overflow and HALT-word semantics
 
-```
-   0x02 0x00 0x00 0x90 0x00 0x60
-```
+The result ring is bounded: it lives at `[resultBase,
+resultLimit]` where `resultLimit = resultBase + resultWordCount
+- 1`. The top-of-ring slot is **reserved exclusively for the
+HALT status word** so an overflowing record stream cannot
+clobber it. Hosts relying on a clean HALT to terminate the
+decode walk can do so unconditionally.
 
-Compute the CRC over those 6 bytes with the algorithm in §3.1.
-The result is `0x9FDF`. Append it little-endian as
-`crc_lo crc_hi`. The complete 8-byte frame on the wire is:
+A record write is admitted only if its full footprint fits at or
+below `recordLimit = resultLimit - 1`:
 
-```
-   0x02 0x00 0x00 0x90 0x00 0x60 0xDF 0x9F
-```
+- **CAPTURE** (1 word) requires `resultWp ≤ recordLimit`.
+- **MARK** (3 words) requires `resultWp ≤ recordLimit - 2`.
 
-(That sequence is one of the test vectors in §3.2.)
+A write whose footprint does not fit sets the **overflow bit**
+in the HALT word (bit `[29]`) and is silently dropped. The
+engine does **not** abort the program on overflow --- it
+continues fetching and executing; subsequent CAPTURE / MARK
+opcodes that would also overflow are silently dropped in the
+same way.
 
-A complete Python builder (worth copy-pasting for first bring-up):
+The full HALT word layout, status partitioning, and ABI
+constants are in
+[`../../docs/MOLE-0.2-SPEC.md`](../../docs/MOLE-0.2-SPEC.md) §11
+and [`../../mole-abi/src/lib.rs`](../../mole-abi/src/lib.rs).
+Per AGENTS §3.15, the four sticky engine flags (MISMATCH,
+TIMEOUT, START, STOP) surface through two channels: MISMATCH
+ships in HALT bit `[28]`; TIMEOUT / START / STOP are observable
+via program logic (BRANCH_ON consumes the flag and the program
+HALTs with a distinct status code per outcome).
 
-```python
-import struct
-
-def crc16_xmodem(data: bytes) -> int:
-    crc = 0x0000
-    for b in data:
-        crc ^= b << 8
-        for _ in range(8):
-            crc = ((crc << 1) ^ 0x1021) & 0xFFFF if crc & 0x8000 \
-                  else (crc << 1) & 0xFFFF
-    return crc
-
-def build_frame(words: list[int]) -> bytes:
-    if not (1 <= len(words) <= 2048):
-        raise ValueError("len must be in 1..2048")
-    payload = struct.pack("<H", len(words))
-    for w in words:
-        if not (0 <= w <= 0xFFFF):
-            raise ValueError(f"word {w:#06x} does not fit in 16 bits")
-        payload += struct.pack("<H", w)
-    crc = crc16_xmodem(payload)
-    return payload + struct.pack("<H", crc)
-
-# Send it
-import serial
-port = serial.Serial("/dev/ttyUSB0", 1_000_000, timeout=1)
-port.write(build_frame([0x9000, 0x6000]))   # placeholder opcodes
-```
-
----
-
----
-
-## 6a. Bus-safety invariant (INV-BUS-NO-CONTENTION)
+## 8. Bus-safety invariant (INV-BUS-NO-CONTENTION)
 
 This document covers the host-link wire format. The companion
 invariant on the *electrical* bus (SDA / SCL) is that the engine
@@ -383,117 +214,30 @@ of this rule, the decode truth table, and the rationale live in
 [`AGENTS.md`](AGENTS.md) §"Open-drain primitive: custom MoleBus";
 that file is the single source of truth. Defense-in-depth is
 layered: `SymbolDecoder` is structurally incapable of producing
-the contention pair, a sim-time `assert` in `BitCycleEngineCore`
-catches any future writer that bypasses the decoder, and a second
+the contention pair, a sim-time `assert` in the engine catches
+any future writer that bypasses the decoder, and a second
 `assert` in `MoleIoBufUp5k` guards the pad boundary. The
 exhaustive sweep at `sim-symbol-decoder-contention` audits every
 `(BUS_MODE, tx_symbol)` cell on every CI run.
 
----
+## 9. Versioning
 
-## 7. Result-ring overflow and recovery semantics
+This is the **v0.2** wire format. Per the pre-Phase-0 mutability
+caveat in
+[`../../docs/MOLE-0.2-SPEC.md`](../../docs/MOLE-0.2-SPEC.md) §1
+and §10, the format is **not yet a stable contract** --- any
+field may change without a version bump until the first tagged
+Phase 0 encoder release ships. After that point, any change to
+the magic / preamble / instruction encoding / HALT word /
+result-ring layout requires:
 
-The result ring is bounded: it lives at `[resultBase, resultLimit]`
-where `resultLimit = resultBase + resultWordCount - 1`. The
-top-of-ring slot is reserved exclusively for the HALT status
-word so an overflowing record stream cannot clobber it. Hosts
-relying on a clean HALT to terminate the decode walk can do so
-unconditionally.
-
-### 7.1 Reserved HALT slot at `resultLimit`
-
-The slot at `resultLimit` is **reserved** for the HALT status
-word. The engine never writes a CAPTURE or MARK record into
-that slot; the record bound is `recordLimit = resultLimit - 1`.
-On `HALT`, the engine writes the status word into the reserved
-slot regardless of how much of the ring the record stream
-consumed.
-
-### 7.2 Per-record bound logic
-
-A record write is admitted only if its full footprint fits at
-or below `recordLimit`:
-
-- **CAPTURE** (1 word) requires `resultWp <= recordLimit`.
-- **MARK** (3 words) requires `resultWp <= recordLimit - 2`.
-
-A write whose footprint does not fit sets the **overflow flag**
-(see §7.3) and is silently dropped. The engine does **not** abort
-the program on overflow --- it continues fetching and executing
-instructions; subsequent CAPTURE / MARK opcodes that would also
-overflow are silently dropped in the same way.
-
-### 7.3 Overflow flag in the HALT word
-
-The HALT status word (tag `11` at `resultLimit`) carries an
-`overflow` bit at `[13]`:
-
-```
-HALT word [15:14] = 11           (tag: HALT)
-          [13]    = overflow     (1 = at least one record dropped)
-          [12]    = mismatchAtHalt
-          [11:8]  = status       (caller-defined; see §1.2 / TODO Step 11)
-          [7:0]   = 0            (reserved; must be zero)
-```
-
-`overflow` latches `True` the first time any record write was
-refused for lack of space and stays set until the next `io.start`.
-A clean run reports `overflow = 0`; a run that dropped at least
-one record reports `overflow = 1`. The host loader decodes this
-bit via `HaltStatus.overflow` in `mole-loader/src/ring.rs`.
-
-### 7.4 HALT status codes
-
-The 4-bit `status` field at HALT word bits `[11:8]` carries one
-of three code classes:
-
-| Code range | Class | Meaning |
-|---|---|---|
-| `0x0..0xC` | Caller-defined | The program author chooses. By convention `0x0` = clean exit; higher codes used per-program (e.g. `i2c-soak.moleasm` uses `0x1`/`0x2`/`0x3` to discriminate wedge-handler sites). |
-| `0xD` | **Engine-detected: stretch fault.** | The slave held SCL low past `MoleConfig.stretchTimeoutCycles` at a Q1→Q2 boundary of `EMIT_BIT` under an OD-class `BUS_MODE`, OR the slave stretched at all under a PP-class `BUS_MODE` (a spec violation). `MISMATCH_FLAG` is set on **both** paths; `TIMEOUT_FLAG` is set only on the OD-timeout path. |
-| `0xE` | Reserved | For future engine traps. |
-| `0xF` | **Engine-detected: malformed instruction.** | One of: reserved opcode word, reserved condition code, reserved `tx_symbol` (`0b11`), invalid `SET_BUS_MODE` wire value, JMP target out of range. |
-
-Callers SHOULD restrict their status codes to `0x0..0xC` so the
-host loader can unambiguously distinguish caller halts from engine
-traps. The loader's `HaltStatus` decoder (in
-`mole-loader/src/ring.rs`) reports the raw 4-bit value; downstream
-logic (e.g. the CLI's `halt_indicates_failure` check) decides
-which codes are considered failures.
-
-### 7.5 Sources
-
-- Engine: `BitCycleEngineCore.scala` ---
-  `enterHalt(status)`, `captureWriteState`, `markWriteState`,
-  and the `recordLimit` / `resultLimit` comparisons.
-- Loader: `mole-loader/src/ring.rs` --- `HaltStatus::overflow`
-  decodes bit `[13]` of the HALT word.
-- Bring-up plan: `TODO.md` Step 11 records the format pinning
-  and is preserved as project history; this section is the
-  canonical contract reference.
-
----
-
-## 8. Versioning
-
-This is the **v0** wire format, frozen at the Phase 2 release.
-Any future change to:
-
-- the `len` field width or semantics,
-- the byte order of `len` / opcodes / CRC,
-- the CRC algorithm or its parameters,
-- the resync rule,
-- the result-drain format,
-
-is a **breaking change**. Per `../../AGENTS.md` §3.17 and §6, a
-breaking change requires:
-
-- a bumped wire-format version (introduced as a leading version
-  byte or magic prefix; the v0 format has none, which is why v1
-  will have to introduce one explicitly),
-- a `BREAKING CHANGE:` footer in the commit that lands the
-  change,
+- a bumped `FORMAT_VERSION` in `mole-abi`,
+- a `BREAKING CHANGE:` footer in the commit per `../../AGENTS.md`
+  §6,
+- a matching update to `docs/MOLE-0.2-SPEC.md`,
 - a matching update to this document.
 
-Non-breaking additions (e.g. a new opcode that fits in a reserved
-slot) do not bump the wire format.
+The current `FORMAT_VERSION` is `0x0002`. The v0 format
+(`FORMAT_VERSION = 0x0001`, no magic, 16-bit instructions,
+4-bit HALT status) is incompatible and not supported by the
+v0.2 engine or encoder.

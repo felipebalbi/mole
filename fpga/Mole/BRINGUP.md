@@ -1,14 +1,27 @@
-# Mole bring-up procedure (v0, iCEbreaker)
+# Mole bring-up procedure (v0.2, iCEbreaker)
 
 This doc walks through the first end-to-end smoke of a freshly
 built Mole bitstream on an iCEbreaker board. It assumes a working
 [`open-tool-forge`](https://github.com/open-tool-forge/fpga-toolchain)-style
-toolchain (yosys, nextpnr-ice40, icestorm) and `sbt` on PATH.
+toolchain (yosys, nextpnr-ice40, icestorm), `sbt`, and `cargo` on
+PATH. macOS Homebrew and Linux oss-cad-suite are both
+known-working host toolchains; the nextpnr GUI (`make gui`) is
+Linux-only on oss-cad-suite (see the `gui` target's doc comment
+in [`Makefile`](Makefile)).
 
 For the wire format the host has to speak, see
-[`WIRE_FORMAT.md`](WIRE_FORMAT.md). For the design rationale, see
+[`WIRE_FORMAT.md`](WIRE_FORMAT.md). For the bit-level encoding
+of every opcode, see
+[`../../docs/MOLE-0.2-SPEC.md`](../../docs/MOLE-0.2-SPEC.md).
+For the design rationale, see
 [`../../ROADMAP.md`](../../ROADMAP.md) §"Mole Verde" and
 [`TODO.md`](TODO.md).
+
+For the **cross-machine hand-off procedure** (an agent picking up
+hardware bring-up from a session that frozen the HDL), see
+[`TODO.md`](TODO.md) §"Step 18 / Phase C.11" — it has the same
+information as this file, restructured for an external agent
+coming in cold.
 
 ---
 
@@ -20,15 +33,25 @@ make all          # produces gen/MoleTop.bin (Spinal -> yosys -> nextpnr -> icep
 ```
 
 The chain elaborates `MoleTopVerilog` (12 MHz pad clock, PLL
-multiplied to a 24 MHz fabric clock, SPRAM-backed program and
-result memory), synthesises with `yosys -p synth_ice40`,
-places-and-routes with `nextpnr-ice40 --up5k --package sg48 --freq
-24`, and packs the bitstream with `icepack`. The `--freq 24`
-constraint is the **real** fabric clock; nextpnr will fail the
-build if timing doesn't close at 24 MHz.
+multiplied to a **24 MHz** fabric clock, dual SPRAM-backed
+program and result memory at 32-bit grain), synthesises with
+`yosys -p synth_ice40`, places-and-routes with `nextpnr-ice40
+--up5k --package sg48 --freq 24 --seed 3`, and packs the
+bitstream with `icepack`. The `--freq 24` constraint is the
+**real** fabric clock; nextpnr will fail the build if timing
+doesn't close at 24 MHz on seed 3.
+
+If a future change to the design makes seed 3 stop meeting
+timing, try another seed via `make all SEED=<N>`; do **not**
+raise the target frequency. The Verde target is 24 MHz; see
+the C.X "Verde retarget" entry in [`TODO.md`](TODO.md) for the
+X.1–X.5 plateau history that pinned that call.
 
 Re-derive only the generated Verilog (e.g. to inspect a change)
 via `make gen` --- it lands at `gen/MoleTop.v` and is gitignored.
+Useful diagnostic targets: `make gui` (Qt place-and-route
+viewer, Linux/oss-cad-suite) and `make report` (machine-readable
+JSON timing report).
 
 ## 2. Flash the iCEbreaker
 
@@ -42,104 +65,87 @@ the two channels can be used simultaneously --- you do **not**
 need to power-cycle the board between flashing and talking to
 the engine. On Linux the UART side of channel A typically shows
 up as `/dev/ttyUSB0` (or `/dev/ttyUSB1` depending on the order
-in which channel A and channel B claim ttyUSB indices); on
-Windows look in Device Manager for a "USB Serial Port (COMx)"
-that shares the FT2232H's USB device with the JTAG side.
+in which channel A and channel B claim ttyUSB indices); on macOS
+look for `/dev/tty.usbserial-ibXXXXXX` (the exact suffix depends
+on the device's chip-side serial number); on Windows look in
+Device Manager for a "USB Serial Port (COMx)" that shares the
+FT2232H's USB device with the JTAG side.
+
+Expected post-flash behaviour: `iceprog` reports "VERIFY OK";
+the blue heartbeat LED on the iCEbreaker pulses at ~1 Hz; the
+green LED is off (engine idle).
 
 ## 3. Talk to the engine
 
-Open the UART at **1 000 000 baud, 8N1, RTS/CTS hardware flow
-control** (active-low, FT2232H convention) and send a frame in the
-format from [`WIRE_FORMAT.md`](WIRE_FORMAT.md). The engine
-auto-runs on a CRC-valid frame and streams the result ring back.
-Total round-trip:
-
-```
-frame_size  = 4 + 2 * len     bytes   (host -> engine)
-drain_size  = resultRingByteCount     bytes   (engine -> host)
-```
-
-With default `MoleConfig`, `resultRingByteCount = 8192` --- every
-halt drains 8 192 bytes regardless of how many records the engine
-actually wrote, since the wire format does not signal
-end-of-record. The host decodes records by their high-2-bit tag
-until it hits the HALT word at the last two bytes of the drain.
-
-A working `stty` line on Linux:
+The supported host tool is `mole-loader-cli`. From the repo
+root:
 
 ```sh
-stty -F /dev/ttyUSB0 1000000 cs8 -cstopb -parenb \
-    crtscts -ixon -ixoff -ixany raw
+cargo build --release -p mole-asm-cli -p mole-loader-cli
+# These produce target/release/mole-asm and target/release/mole-loader.
 ```
 
-`crtscts` enables the HW flow control; `-ixon -ixoff -ixany`
-explicitly disables any software (XON/XOFF) flow control --- Mole
-does not speak it and accidentally enabling it on the host turns
-arbitrary frame bytes into XON/XOFF and breaks the link.
-
-The pinout, named from the **FT2232H's** perspective (active-low):
-
-- **PMOD1A pin 19 / FT2232H channel A `RTS#`** -> Mole's
-  `io_uRts` input. The FT asserts RTS# (line LOW) when its USB
-  pipe has room; Mole's drainer pushes bytes only while this
-  line is LOW. Internal pull-up enabled on the FPGA pin, so an
-  unwired board reads HIGH = RTS#-deasserted = drainer halted
-  (a visible failure mode, not silent corruption).
-- **PMOD1A pin 18 / FT2232H channel A `CTS#`** -> Mole's
-  `io_uCts` output. Mole asserts CTS# (line LOW) only while the
-  top-level phase FSM is in `acceptLoadState` (no program
-  running, no drain in progress). A host with `crtscts`
-  enabled holds its TX off whenever CTS# is HIGH, which
-  enforces the spec invariant *"while program is not HALTED,
-  don't accept data"*.
+The CLIs set `crtscts` on the serial port builder automatically.
+If you want to drive the link from a different host tool, the
+UART must be opened at **1 000 000 baud, 8N1, RTS/CTS hardware
+flow control** (active-low, FT2232H convention); see
+[`WIRE_FORMAT.md`](WIRE_FORMAT.md) §3 for the full requirement
+and the `stty` line for raw bring-up.
 
 ## 4. Three smoke programs
 
-These are hand-encoded (not shipped as `.mole.bin`; see AGENTS
-§3.4 / §4 --- we don't commit binary build artefacts) and cover
-the three distinct observation channels: UART round-trip, LEDs,
-and the SDA/SCL pads on the scope.
+These exercise the three distinct observation channels: UART
+round-trip, LEDs, and the SDA/SCL pads on the scope. All are
+written in moleasm and assembled with `mole-asm` — no
+hand-encoded bytes.
 
 ### 4.1 Short halt (UART round-trip proof)
 
-```
+Save as `/tmp/halt.moleasm`:
+
+```moleasm
 SET_BUS_MODE i2c
-HALT         0
+HALT         status=0
 ```
 
-Hex (little-endian on the wire, including the framing):
+Assemble and send:
 
-```
-02 00                      ; len = 2
-00 38                      ; SET_BUS_MODE i2c   (opcode 0x7, i2c.position=0, encoded as (7<<11)|(0<<8) = 0x3800 -> 00 38)
-00 00                      ; HALT 0             (opcode 0x0, status=0, encoded as 0x0000 -> 00 00)
-<crc lo> <crc hi>          ; CRC-16/XMODEM over the 6 payload bytes
+```sh
+target/release/mole-asm assemble /tmp/halt.moleasm \
+    -o /tmp/halt.molecode
+target/release/mole-loader \
+    --port /dev/ttyUSB0 \
+    --frame /tmp/halt.molecode \
+    --ring-bytes 8192
 ```
 
 Expected: the result ring streams back almost immediately. The
-first **four bytes** are the Revision (low word first); the
-**last two bytes** are the HALT word (`0xC000` for a clean
-status-0 halt: `[15:14]=11`, no overflow, no mismatch, status=0,
-reserved=0). The middle bytes are whatever the SPRAM previously
-held --- ignore them on a short program.
+loader-cli decodes a `HaltStatus { status: 0, mismatch: false,
+overflow: false }`. The full 8192-byte ring contains
+`Revision { major: 0, minor: 2, patch: 0 }` (or whatever the
+build was tagged at) in the first 4 bytes; trailing garbage in
+the middle; a clean HALT word in the last 4 bytes.
 
-Validates: loader -> engine -> drainer -> UART TX path with no
-bus activity to scope.
+Validates: loader → engine → drainer → UART TX path with no bus
+activity to scope. Sufficient to declare C.11.c (iCEbreaker
+smoke) done.
 
 ### 4.2 Visible-LED run (long / infinite, green LED proof)
 
-```
+Save as `/tmp/blinky.moleasm`:
+
+```moleasm
 SET_BUS_MODE i2c
-MARK         0       ; loop label
-EMIT_BIT     sda=dom
-EMIT_BIT     sda=hiz
-JMP          mark0
+loop:
+    EMIT_BIT_IMM tx=dominant
+    EMIT_BIT_IMM tx=hiz
+    JMP loop
 ```
 
-Expected: the **green LED stays solid** (`!engine.done` is the
-green-LED drive); the **blue heartbeat stops** (blue is gated on
-`engine.done`); the red LED stays off. SDA toggles low/high at
-the configured bit rate forever.
+Assemble and send. Expected: the **green LED stays solid**
+(`!engine.done` is the green-LED drive); the **blue heartbeat
+stops** (blue is gated on `engine.done`); the red LED stays off.
+SDA toggles low/high at the configured bit rate forever.
 
 Press the user button (`io_reset`, active-low) to recover: the
 reset bridge re-runs the 2-FF chain, the phase FSM resets to
@@ -148,28 +154,31 @@ reset bridge re-runs the 2-FF chain, the phase FSM resets to
 
 ### 4.3 Bus toggle (oscilloscope proof)
 
-```
+Save as `/tmp/scope.moleasm`:
+
+```moleasm
 SET_BUS_MODE i2c
-EMIT_BIT     sda=dom
-EMIT_BIT     sda=hiz
-EMIT_BIT     scl=dom    ; encoded via EMIT_QUARTER with sda=hiz, scl=dom
-EMIT_BIT     scl=hiz    ; encoded via EMIT_QUARTER with sda=hiz, scl=hiz
-HALT         0
+EMIT_BIT_IMM tx=dominant       ; SDA low for one bit
+EMIT_BIT_IMM tx=hiz            ; SDA released
+EMIT_QUARTER_IMM sda=hiz, scl=dominant   ; SCL pulled low
+EMIT_QUARTER_IMM sda=hiz, scl=hiz        ; SCL released
+HALT         status=0
 ```
 
-Note: `EMIT_BIT` encodes SDA only; the engine generates SCL
-automatically from the configured bit rate. To explicitly drive
-SCL (e.g. for the smoke program above) use `EMIT_QUARTER`, which
-encodes both SDA and SCL symbols per ROADMAP §"When to use
-EMIT_QUARTER".
+Note: `EMIT_BIT_IMM` encodes SDA only; the engine generates SCL
+automatically from the configured bit rate (canonical 4-quarter
+shape, see [`AGENTS.md`](AGENTS.md) §"Quarter-bit is the timing
+unit on the wire"). To explicitly drive SCL (e.g. for the smoke
+program above) use `EMIT_QUARTER_IMM`, which encodes both SDA
+and SCL symbols per ROADMAP §"When to use EMIT_QUARTER".
 
 Expected on the scope (PMOD1A.1 = SCL, PMOD1A.2 = SDA):
 
-- Quarter-bit-spaced edges paced by the `quarterPeriodCyclesReset`
-  divider in `MoleConfig` --- default `6` cycles per quarter at
-  24 MHz fabric = **1 MHz bit rate**.
-- SDA drops low for the first `EMIT_BIT`, releases for the
-  second; then SCL toggles via the two `EMIT_QUARTER`s.
+- Quarter-bit-spaced edges paced by the active `LOAD_TIMING`
+  divider (defaults to 6 fabric cycles per quarter at 24 MHz =
+  **1 MHz bit rate**).
+- SDA drops low for the first `EMIT_BIT_IMM`, releases for the
+  second; then SCL toggles via the two `EMIT_QUARTER_IMM`s.
 - All edges respect the external pull-up resistor's RC --- the
   rising edge is the pull-up's RC, the falling edge is sharper
   (NMOS pulls the line to GND directly).
@@ -183,21 +192,34 @@ external pull-ups against the I2C edge rates.
 
 ## 5. Troubleshooting
 
-| Symptom                                | Likely cause                                                                                                                                                                                                                                                                                                                                                                                              |
-|----------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| Red LED pulses, nothing drains         | Bad CRC, wrong `len`, or a UART RX error mid-frame. The loader is in resync. Stop sending for **>= 20 UART bit times** (~20 us at 1 Mbaud) of idle-high on the line so the loader returns to `idleState`, then retry. See [`WIRE_FORMAT.md`](WIRE_FORMAT.md) §"Resync rule" --- this is the host's contract.                                                                                              |
-| Green LED solid, nothing drains        | The program is in an infinite loop. Press the user button to reset; verify the program eventually hits a `HALT`.                                                                                                                                                                                                                                                                                          |
-| No LEDs change, no drain               | PLL never locked, or the bitstream did not flash. Power-cycle, re-flash via `make flash`, and check `dmesg` for FT2232H enumeration. The PLL-locked deassertion is what releases the fabric reset --- without it the engine sits in reset forever and `io_ledG` stays low.                                                                                                                                |
-| Drain comes back but the HALT word looks wrong | Read the last two bytes (low byte first) of the drain. Bit `[13]` set in the assembled 16-bit word means **overflow**: the engine tried to write more records than the result ring could hold. Bit `[12]` set means **MISMATCH_FLAG was high at HALT entry** (a sampled bit failed an `expect` compare). Bits `[11:8]` are the program-provided status code; `0xF` is the engine's reserved-opcode trap. |
-| Bus edges look glitchy or droop slowly | Pull-up too weak (or missing). For I2C use 4.7 kohm to 3.3 V; for I3C-OD windows use 1 kohm. PMOD1A doesn't have on-board pull-ups; you have to wire them externally. The engine drives PP-high only under `i3c-PP` / `hdr-ddr` modes; in I2C / I3C-OD modes the rising edge is RC-limited.                                                                                                               |
-| Frame sent but nothing drains back     | RTS#/CTS# is mis-wired or the host driver has `crtscts` disabled. The drainer halts whenever `io_uRts` reads HIGH (= RTS#-deasserted). With pin 19 internally pulled up, an unwired board reads HIGH and the drainer never sends. Verify the wiring (PMOD1A pins 18+19 -> FT2232H channel A CTS#+RTS#) and re-run the `stty` line from §3 (`crtscts -ixon -ixoff -ixany`).                                |
-| Host driver drops bytes mid-frame      | The host did **not** enable `crtscts` and ignored Mole's CTS# deassertion. Mole holds CTS# HIGH while a program is running or the result is draining; a host that doesn't honour it will pump bytes into the FT2232H's USB pipe that the FPGA loader will never accept (CTS# is checked at the FT, not at the FPGA UART RX). Re-run the `stty` line from §3.                                              |
+| Symptom                                | Likely cause                                                                                                                                                                                                                                                                                                                                            |
+|----------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| Red LED pulses, nothing drains         | Bad CRC, bad magic, wrong `body_len`, or a UART RX error mid-frame. The loader is in resync. Stop sending for **≥ 20 µs** (~20 UART bit times at 1 Mbaud) of idle-high on the line so the loader returns to `idleState`, then retry. See [`WIRE_FORMAT.md`](WIRE_FORMAT.md) §4 --- this is the host's contract.                                          |
+| Green LED solid, nothing drains        | The program is in an infinite loop. Press the user button to reset; verify the program eventually hits a `HALT`.                                                                                                                                                                                                                                          |
+| No LEDs change, no drain               | PLL never locked, or the bitstream did not flash. Power-cycle, re-flash via `make flash`, and check `dmesg` for FT2232H enumeration. The PLL-locked deassertion is what releases the fabric reset --- without it the engine sits in reset forever and `io_ledG` stays low.                                                                                |
+| Drain comes back but the HALT word looks wrong | Decode the HALT word via `mole-loader` (`HaltStatus`). Bit `[29]` set = **overflow** (record stream exceeded the ring; later records dropped). Bit `[28]` set = **mismatch** (sampled bit failed an `expect` compare somewhere). Bits `[27:23]` = 5-bit status code; `0x1F` is the engine's STATUS_TRAP (malformed instruction, reserved opcode, out-of-range BRANCH, etc.). See [`../../docs/MOLE-0.2-SPEC.md`](../../docs/MOLE-0.2-SPEC.md) §11.   |
+| Bus edges look glitchy or droop slowly | Pull-up too weak (or missing). For I2C use 4.7 kΩ to 3.3 V; for I3C-OD windows use 1 kΩ to 1.8 V. PMOD1A doesn't have on-board pull-ups; you have to wire them externally. The engine drives PP-high only under `i3c-PP` / `hdr-ddr` modes; in I2C / I3C-OD modes the rising edge is RC-limited.                                                            |
+| Frame sent but nothing drains back     | RTS#/CTS# is mis-wired or the host driver has `crtscts` disabled. The drainer halts whenever `io_uRts` reads HIGH (= RTS#-deasserted). With pin 19 internally pulled up, an unwired board reads HIGH and the drainer never sends. Verify the wiring (PMOD1A pins 18+19 → FT2232H channel A CTS#+RTS#) and re-run the `stty` line from [`WIRE_FORMAT.md`](WIRE_FORMAT.md) §3 (`crtscts -ixon -ixoff -ixany`).                                              |
+| Host driver drops bytes mid-frame      | The host did **not** enable `crtscts` and ignored Mole's CTS# deassertion. Mole holds CTS# HIGH while a program is running or the result is draining; a host that doesn't honour it will pump bytes into the FT2232H's USB pipe that the FPGA loader will never accept (CTS# is checked at the FT, not at the FPGA UART RX). Use `mole-loader-cli` (sets the flag for you) or re-run the `stty` line.                                                      |
+| Loader rejects program before serial port opens | `mole-loader-cli` runs the §16.4 pre-scan on the assembled body before opening the serial port. If a program contains a HALT word with reserved status `0x1D` or `0x1E`, or any other §16.4 violation, the CLI exits with code 4 ("program validation failed") and never touches the wire. Inspect the error message; this is the loader being strict on your behalf.   |
 
 ## 6. Next steps
 
-Once smoke passes, the host-side `mole-asm` crate (already
-landed at the repo root) is what produces the binary frame
-described in `WIRE_FORMAT.md`. Until you switch over to it, any
-host language that can talk to a serial port and compute
-CRC-16/XMODEM works (Python with `pyserial` + `crcmod`, C with
-`tio`, etc.).
+Once smoke passes:
+
+- **C.11.d (TMP108 regression):** the v0 fixture
+  `mole-asm/tests/fixtures/tmp108.moleasm` needs a v0.2 re-port
+  using `EMIT_BYTE_IMM` for compile-time-known bytes (I2C
+  address, register pointer). See [`TODO.md`](TODO.md)
+  §"C.11.a" and §"C.11.d".
+- **C.11.e (MCXA268 I3C target soak):** the v0.2 acceptance
+  gate. See [`TODO.md`](TODO.md) §"C.11.e".
+
+The host-side `mole-asm` crate at
+[`../../mole-asm/`](../../mole-asm/) is the v0.2 program
+encoder; the `mole-loader` crate at
+[`../../mole-loader/`](../../mole-loader/) is the v0.2 frame /
+ring decoder. Until the Scheme SDK lands (Phase 0+, ROADMAP
+§"Layer 1"), moleasm is the source language; both crates are
+production-quality (393 passing tests at the latest tree
+verification).
