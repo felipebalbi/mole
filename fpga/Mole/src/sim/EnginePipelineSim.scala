@@ -397,6 +397,8 @@ object EnginePipelineSim {
 
       var ringWriteCount = 0
       var firstRingWord = 0L
+      var firstRingAddr = 0L
+      var secondRingWord = 0L
       fork {
         while (true) {
           if (
@@ -405,6 +407,10 @@ object EnginePipelineSim {
             ringWriteCount += 1
             if (ringWriteCount == 1) {
               firstRingWord = dut.io.ringWrite.payload.data.toLong & 0xffffffffL
+              firstRingAddr = dut.io.ringWrite.payload.addr.toLong & 0xffffffffL
+            } else if (ringWriteCount == 2) {
+              secondRingWord =
+                dut.io.ringWrite.payload.data.toLong & 0xffffffffL
             }
           }
           dut.clockDomain.waitSampling()
@@ -430,12 +436,29 @@ object EnginePipelineSim {
         s"[caseFetchSequence] haltStatus: expected 5 (first HALT) got ${dut.io.haltStatus.toInt}"
       )
 
+      // Expect exactly 2 ring writes: the one-shot REVISION header at
+      // resultBase, followed by the HALT word at resultLimit.
+      // (Spec §11.1 ring layout.)
       assert(
-        ringWriteCount == 1,
-        s"[caseFetchSequence] ringWriteCount: expected 1 got $ringWriteCount"
+        ringWriteCount == 2,
+        s"[caseFetchSequence] ringWriteCount: expected 2 (REVISION + HALT) got $ringWriteCount"
       )
 
-      val ringStatus = ((firstRingWord >> 23) & 0x1fL).toInt
+      val resultBase = simCfg.programWordCount.toLong
+      assert(
+        firstRingAddr == resultBase,
+        s"[caseFetchSequence] first ring write addr: expected $resultBase (REVISION) got $firstRingAddr"
+      )
+      val expectedRevision =
+        ((mole.Revision.major.toLong & 0xff) << 24) |
+          ((mole.Revision.minor.toLong & 0xff) << 16) |
+          (mole.Revision.patch.toLong & 0xffff)
+      assert(
+        firstRingWord == expectedRevision,
+        f"[caseFetchSequence] REVISION word: expected 0x$expectedRevision%08x got 0x$firstRingWord%08x"
+      )
+
+      val ringStatus = ((secondRingWord >> 23) & 0x1fL).toInt
       assert(
         ringStatus == 5,
         s"[caseFetchSequence] ring status: expected 5 got $ringStatus"
@@ -556,6 +579,217 @@ object EnginePipelineSim {
   }
 
   // --------------------------------------------------------------------------
+  // Case 7b: EMIT_BIT_IMM with capture=1 emits a CAPTURE record (spec §11.3).
+  //
+  // The test drives SDA externally to a known value, asserts EMIT_BIT_IMM
+  // with capture=1 fires a CAPTURE word (tag=0b00 at [31:30], sampled SDA
+  // at [0]) into the ring at ring slot 1 (just past REVISION). The R7
+  // writeback also lands per §8 but is not the subject of this test.
+  // --------------------------------------------------------------------------
+  def caseCaptureRecordToRing(): Unit = {
+    compileDut().doSim("capture-record-to-ring") { dut =>
+      dut.clockDomain.forkStimulus(period = 10)
+      initInputs(dut)
+      dut.clockDomain.waitSampling(4)
+
+      // EMIT_BIT_IMM tx=hiz capture=1: tx=10 (hiz) at [4:3], capture=1
+      // at [0]. group=00 sub=0000 → opcode [31:26] = 0. Result:
+      // (10 << 3) | 1 = 0x11.
+      val emitBitHizCapture: Long = 0x00000011L
+      val haltZero: Long = 0x40000000L
+
+      val mem = Array.fill(
+        simCfg.programWordCount + (simCfg.resultRingByteCount + 3) / 4
+      )(0L)
+      mem(0) = emitBitHizCapture
+      mem(1) = haltZero
+      forkSpramModel(dut, mem)
+
+      // Hold SDA high (recessive in OD); engine should sample 1.
+      // Hold SCL high so the engine's stretch-aware Q1→Q2 guard does
+      // not wait for an external SCL release (the testbench is not
+      // driving SCL).
+      dut.io.sda.read #= true
+      dut.io.scl.read #= true
+
+      val ringRecords =
+        scala.collection.mutable.ArrayBuffer.empty[(Long, Long)]
+      fork {
+        while (true) {
+          if (
+            dut.io.ringWrite.valid.toBoolean && dut.io.ringWrite.ready.toBoolean
+          ) {
+            ringRecords += ((
+              dut.io.ringWrite.payload.addr.toLong & 0xffffL,
+              dut.io.ringWrite.payload.data.toLong & 0xffffffffL
+            ))
+          }
+          dut.clockDomain.waitSampling()
+        }
+      }
+
+      dut.io.programLength #= 2
+      dut.io.engineStart #= true
+
+      waitFor(
+        dut,
+        2000,
+        dut.io.halted.toBoolean,
+        "[caseCaptureRecordToRing] engine did not halt"
+      )
+      dut.clockDomain.waitSampling(4)
+
+      // Expect 3 ring writes: REVISION, CAPTURE, HALT.
+      assert(
+        ringRecords.size == 3,
+        s"[caseCaptureRecordToRing] expected 3 ring writes (REVISION + CAPTURE + HALT), got " +
+          s"${ringRecords.size}: " +
+          ringRecords
+            .map { case (a, d) => f"(0x$a%x→0x$d%08x)" }
+            .mkString(", ")
+      )
+
+      val resultBase = simCfg.programWordCount.toLong
+      val resultLimit = resultBase + ((simCfg.resultRingByteCount + 3) / 4) - 1
+
+      // CAPTURE record at resultBase + 1 (REVISION sat at resultBase).
+      val (capAddr, capWord) = ringRecords(1)
+      assert(
+        capAddr == resultBase + 1,
+        s"[caseCaptureRecordToRing] CAPTURE addr: expected ${resultBase + 1} got $capAddr"
+      )
+      val capTag = ((capWord >> 30) & 0x3L).toInt
+      val capSda = (capWord & 0x1L).toInt
+      val capReserved = capWord & 0x3fff_fffeL // [29:1]
+      assert(
+        capTag == 0,
+        s"[caseCaptureRecordToRing] CAPTURE tag: expected 0b00 got $capTag (word=0x${capWord.toHexString})"
+      )
+      assert(
+        capSda == 1,
+        s"[caseCaptureRecordToRing] CAPTURE sda: expected 1 (line held high) got $capSda"
+      )
+      assert(
+        capReserved == 0,
+        f"[caseCaptureRecordToRing] CAPTURE [29:1] reserved bits non-zero: 0x$capReserved%x"
+      )
+
+      // HALT record at resultLimit.
+      val (haltAddr, haltW) = ringRecords(2)
+      assert(
+        haltAddr == resultLimit,
+        s"[caseCaptureRecordToRing] HALT addr: expected $resultLimit got $haltAddr"
+      )
+      assert(
+        ((haltW >> 30) & 0x3L) == 0x3,
+        f"[caseCaptureRecordToRing] HALT tag: expected 0b11 got 0x$haltW%08x"
+      )
+
+      println("[caseCaptureRecordToRing] PASS")
+    }
+  }
+
+  // --------------------------------------------------------------------------
+  // Case 7c: WIRE capture writes R7 observably via REG_ZERO_FLAG +
+  // BRANCH_ON REG_ZERO (regression: pre-Phase-F engines silently dropped
+  // R7 writes from WIRE captures).
+  //
+  // Background: prior to Phase F the WIRE mini-FSM's combinational
+  // `xWireWritesReg := True` pulse fired on the same cycle X was
+  // halted by the FSM's own `xWireRunning` stall. The X→W flop
+  // captured WRITES_REG=False on the cycle X eventually fired, so
+  // R7 never received the sampled bit. The pre-existing target sim
+  // documented this gap explicitly in its file header:
+  //
+  //   "v0.2 SAMPLE does not emit a ring CAPTURE record either"
+  //   (BitCycleEngineTargetSim.scala:30)
+  //
+  // Phase F latched (writes_req, addr, data) into Regs that hold
+  // across the X stall-release boundary, fixing R7 capture writes
+  // AND adding CAPTURE-to-ring as a side effect (same data path).
+  //
+  // This test exercises the R7 path specifically: it drives SDA
+  // high, runs EMIT_BIT_IMM capture=1 (samples 1 into R7), then
+  // DEC R7 (R7 := 0), then BRANCH_ON REG_ZERO +1, then HALT 5
+  // (fail path), HALT 0 (pass path). A pass HALT means R7 actually
+  // received 1 and DEC wrapped it to 0; a fail HALT means R7 still
+  // held its reset value and DEC produced 0xFFFFFFFF (non-zero).
+  // --------------------------------------------------------------------------
+  def caseCaptureWritesR7Observable(): Unit = {
+    compileDut().doSim("capture-writes-r7-observable") { dut =>
+      dut.clockDomain.forkStimulus(period = 10)
+      initInputs(dut)
+      dut.clockDomain.waitSampling(4)
+
+      // Word 0: EMIT_BIT_IMM tx=hiz capture=1
+      //   opcode group=00 sub=0000 → [31:26]=0
+      //   tx=10 (hiz) at [4:3] → 0x10
+      //   capture=1 at [0] → 0x01
+      //   Final = 0x11.
+      val emitBitHizCapture: Long = 0x00000011L
+
+      // Word 1: DEC R7
+      //   opcode group=10 sub=0011 → [31:26] = (2<<4)|3 = 0x23
+      //   word top = 0x23 << 26 = 0x8C00_0000
+      //   dst=R7 at [25:23] = 7<<23 = 0x0380_0000
+      //   src=R7 at [22:20] = 7<<20 = 0x0070_0000
+      //   Final = 0x8FF0_0000.
+      val decR7: Long = 0x8ff00000L
+
+      // Word 2: BRANCH_ON REG_ZERO, pcRelOffset=+1 (skip the fail HALT).
+      //   opcode group=01 sub=0001 → [31:26] = (1<<4)|1 = 0x11
+      //   word top = 0x11 << 26 = 0x4400_0000
+      //   cond=10 (REG_ZERO) at [16:13] = 10<<13 = 0x0001_4000
+      //     (cond-code list in EnginePipeline.scala xCondCode switch:
+      //      0=ALWAYS, 1=MISMATCH, 2=NOT_MISMATCH, 3=START_SEEN,
+      //      4=STOP_SEEN, 5=SDA_LOW, 6=SDA_HIGH, 7=SCL_HIGH,
+      //      8=TIMEOUT, 9=NOT_TIMEOUT, 10=REG_ZERO, 11=NOT_REG_ZERO).
+      //   pcRelOffset=+1 at [12:3] = 1<<3 = 0x8
+      //   Final = 0x4401_4008.
+      val branchOnRegZeroPlus1: Long = 0x44014008L
+
+      // Word 3: HALT 5 (fail path: R7 was not 1)
+      val haltFail: Long = 0x40000028L // status=5 at [7:3] = 5<<3 = 0x28
+      // Word 4: HALT 0 (pass path: R7 was 1, DEC brought it to 0)
+      val haltPass: Long = 0x40000000L
+
+      val mem = Array.fill(
+        simCfg.programWordCount + (simCfg.resultRingByteCount + 3) / 4
+      )(0L)
+      mem(0) = emitBitHizCapture
+      mem(1) = decR7
+      mem(2) = branchOnRegZeroPlus1
+      mem(3) = haltFail
+      mem(4) = haltPass
+      forkSpramModel(dut, mem)
+
+      // SDA high so EMIT_BIT_IMM samples 1 into R7. SCL high so the
+      // engine's stretch-aware Q1→Q2 guard does not wait.
+      dut.io.sda.read #= true
+      dut.io.scl.read #= true
+
+      dut.io.programLength #= 5
+      dut.io.engineStart #= true
+
+      waitFor(
+        dut,
+        2000,
+        dut.io.halted.toBoolean,
+        "[caseCaptureWritesR7Observable] engine did not halt"
+      )
+
+      assert(
+        dut.io.haltStatus.toInt == 0,
+        s"[caseCaptureWritesR7Observable] expected HALT status=0 (R7=1 after capture, DEC→0, " +
+          s"REG_ZERO_FLAG set, branched over fail) got 0x${dut.io.haltStatus.toInt.toHexString} " +
+          "— this means WIRE capture did NOT write R7 (regression of Phase F)"
+      )
+
+      println("[caseCaptureWritesR7Observable] PASS")
+    }
+  }
+
+  // --------------------------------------------------------------------------
   // C.8 smoke cases — one per new CTRL opcode (BRANCH_ON, MARK, LOAD_TIMING).
   //
   // The full v0.2 ISA coverage lives in `BitCycleEngineSim` (C.8 sim suite,
@@ -672,23 +906,39 @@ object EnginePipelineSim {
         "[caseMarkBasic] engine did not halt"
       )
 
-      // Expect 4 ring writes: MARK header, ts_lo, ts_hi, HALT.
+      // Expect 5 ring writes: REVISION, MARK header, ts_lo, ts_hi, HALT.
+      // (Spec §11.1: REVISION at resultBase, record stream after.)
       assert(
-        ringRecords.size == 4,
-        s"[caseMarkBasic] expected 4 ring writes (mark x3 + halt), got " +
+        ringRecords.size == 5,
+        s"[caseMarkBasic] expected 5 ring writes (revision + mark x3 + halt), got " +
           s"${ringRecords.size}: " +
           ringRecords
             .map { case (a, d) => f"(0x$a%x→0x$d%08x)" }
             .mkString(", ")
       )
-      // ---- MARK records: header, ts_lo, ts_hi at resultBase + {0,1,2}. ----
+      // ---- REVISION at resultBase --------------------------------------
       val resultBase = simCfg.programWordCount.toLong
       val resultLimit = resultBase + ((simCfg.resultRingByteCount + 3) / 4) - 1
-      val (mhdrAddr, markHeader) = ringRecords(0)
+      val (revAddr, revWord) = ringRecords(0)
       assert(
-        mhdrAddr == resultBase,
-        s"[caseMarkBasic] mark header addr: expected 0x${resultBase.toHexString}" +
-          f" (resultBase), got 0x$mhdrAddr%x"
+        revAddr == resultBase,
+        s"[caseMarkBasic] revision addr: expected 0x${resultBase.toHexString}" +
+          f" (resultBase), got 0x$revAddr%x"
+      )
+      val expectedRevision =
+        ((mole.Revision.major.toLong & 0xff) << 24) |
+          ((mole.Revision.minor.toLong & 0xff) << 16) |
+          (mole.Revision.patch.toLong & 0xffff)
+      assert(
+        revWord == expectedRevision,
+        f"[caseMarkBasic] revision word: expected 0x$expectedRevision%08x got 0x$revWord%08x"
+      )
+      // ---- MARK records: header, ts_lo, ts_hi at resultBase + {1,2,3}. ----
+      val (mhdrAddr, markHeader) = ringRecords(1)
+      assert(
+        mhdrAddr == resultBase + 1,
+        s"[caseMarkBasic] mark header addr: expected 0x${(resultBase + 1).toHexString}" +
+          f" (resultBase+1, post-REVISION), got 0x$mhdrAddr%x"
       )
       val markTag = ((markHeader >> 30) & 0x3L).toInt
       val markLabel = (markHeader & 0x3fffL).toInt
@@ -702,20 +952,20 @@ object EnginePipelineSim {
         s"[caseMarkBasic] mark label: expected 0x1234 got " +
           f"0x$markLabel%x (word=0x${markHeader.toHexString})"
       )
-      val (mtloAddr, _) = ringRecords(1)
+      val (mtloAddr, _) = ringRecords(2)
       assert(
-        mtloAddr == resultBase + 1,
-        s"[caseMarkBasic] ts_lo addr: expected 0x${(resultBase + 1).toHexString}" +
+        mtloAddr == resultBase + 2,
+        s"[caseMarkBasic] ts_lo addr: expected 0x${(resultBase + 2).toHexString}" +
           f", got 0x$mtloAddr%x"
       )
-      val (mthiAddr, _) = ringRecords(2)
+      val (mthiAddr, _) = ringRecords(3)
       assert(
-        mthiAddr == resultBase + 2,
-        s"[caseMarkBasic] ts_hi addr: expected 0x${(resultBase + 2).toHexString}" +
+        mthiAddr == resultBase + 3,
+        s"[caseMarkBasic] ts_hi addr: expected 0x${(resultBase + 3).toHexString}" +
           f", got 0x$mthiAddr%x"
       )
       // ---- HALT record at the reserved resultLimit slot. ------------------
-      val (haltAddr, haltW) = ringRecords(3)
+      val (haltAddr, haltW) = ringRecords(4)
       assert(
         haltAddr == resultLimit,
         s"[caseMarkBasic] halt addr: expected 0x${resultLimit.toHexString}" +
@@ -781,9 +1031,11 @@ object EnginePipelineSim {
     caseFetchSequence()
     caseProgramLengthZero()
     caseEmitBitDrivesSclLow()
+    caseCaptureRecordToRing()
+    caseCaptureWritesR7Observable()
     caseBranchOnAlwaysSkip()
     caseMarkBasic()
     caseLoadTimingBasic()
-    println("EnginePipelineSim: all 10 cases passed")
+    println("EnginePipelineSim: all 12 cases passed")
   }
 }

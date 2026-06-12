@@ -399,7 +399,7 @@ object MoleLoaderFsmSim extends App {
   }
 
   // ----------------------------------------------------------------
-  // 7. UART error mid-frame: framing error on a wordLo byte
+  // 7. UART error mid-frame: framing error on a body word byte
   // ----------------------------------------------------------------
 
   compiled.doSim("uart-err-mid-frame") { dut =>
@@ -411,10 +411,11 @@ object MoleLoaderFsmSim extends App {
 
     val words = Seq(0x1111, 0x2222)
     val frame = buildFrame(words)
-    // Bytes 0 and 1 are len; bytes 2 and 3 are word0; bytes 4 and 5
-    // are word1. Inject the framing error on byte 4 (word1 lo, which
-    // arrives in wordLoState after one full word has been written).
-    val errIdx = 4
+    // v0.2 wire layout: bytes 0-3 MAGIC, 4-7 LEN, 8-11 word 0, 12-15
+    // word 1, 16-17 CRC. Inject the framing error on byte 12 (the
+    // first byte of word 1, which arrives in wordB0State after one
+    // full body word has been written to SPRAM).
+    val errIdx = 12
     for ((b, i) <- frame.zipWithIndex.take(errIdx + 1)) {
       driveByte(dut, b, framingError = (i == errIdx))
     }

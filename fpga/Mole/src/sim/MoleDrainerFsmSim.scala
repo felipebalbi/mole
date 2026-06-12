@@ -62,7 +62,7 @@ object MoleDrainerFsmSim extends App {
       // Sim-only pre-load port; not part of the real top-level wiring.
       val simWriteValid = in Bool ()
       val simWriteAddr = in UInt (addrWidth bits)
-      val simWriteData = in Bits (16 bits)
+      val simWriteData = in Bits (32 bits)
       // Exposed for the sim address monitor (the real wiring has this
       // only on the SpramController side).
       val readCmdValid = out Bool ()
@@ -70,7 +70,7 @@ object MoleDrainerFsmSim extends App {
     }
 
     val drainer = MoleDrainerFsm(resultBase, resultWordCount, addrWidth)
-    val mem = Mem(Bits(16 bits), 1 << addrWidth)
+    val mem = Mem(Bits(32 bits), 1 << addrWidth)
 
     // Sim-only pre-load. Single port: simWriteValid wins when high,
     // drainer's read path is idle during pre-load by convention.
@@ -111,12 +111,13 @@ object MoleDrainerFsmSim extends App {
   }
 
   // Pre-load the ring at offsets 0..resultWordCount-1 with the given
-  // word sequence. Drives the sim-only write port one word per cycle.
+  // 32-bit word sequence. Drives the sim-only write port one word
+  // per cycle. v0.2 ring grain is 32 bits.
   def preloadRing(dut: DrainerSimDut, base: Int, words: Seq[Int]): Unit = {
     for ((w, i) <- words.zipWithIndex) {
       dut.io.simWriteValid #= true
       dut.io.simWriteAddr #= base + i
-      dut.io.simWriteData #= w & 0xffff
+      dut.io.simWriteData #= w & 0xffffffffL
       dut.clockDomain.waitSampling()
     }
     dut.io.simWriteValid #= false
@@ -130,10 +131,18 @@ object MoleDrainerFsmSim extends App {
     dut.io.triggerDrain #= false
   }
 
-  // Convert a sequence of 16-bit words into the byte stream the
-  // drainer should produce: low byte first, then high byte, per word.
+  // Convert a sequence of 32-bit words into the byte stream the drainer
+  // should produce: little-endian per 32-bit word (b0 first, then b1,
+  // b2, b3). v0.2 drainer grain is 32 bits.
   def expectedBytes(words: Seq[Int]): Seq[Int] =
-    words.flatMap(w => Seq(w & 0xff, (w >> 8) & 0xff))
+    words.flatMap(w =>
+      Seq(
+        w & 0xff,
+        (w >> 8) & 0xff,
+        (w >> 16) & 0xff,
+        (w >> 24) & 0xff
+      )
+    )
 
   /** Aggregated monitor state. Cycles are simulation cycle counts (each
     * `waitSampling` ticks the counter by 1) so we can assert cycle alignment

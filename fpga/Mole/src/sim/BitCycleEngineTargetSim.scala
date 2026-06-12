@@ -172,15 +172,27 @@ object BitCycleEngineTargetSim extends App {
         f"$label: HALT status 0x${h.status}%02x != 0x00"
       )
 
-      // Two MARK records, each 3 words, written consecutively from
-      // ringWrPtr=0. So:
-      //   resultBase+0 = mark1 header
-      //   resultBase+1 = mark1 ts_lo
-      //   resultBase+2 = mark1 ts_hi
-      //   resultBase+3 = mark2 header
-      //   resultBase+4 = mark2 ts_lo
-      //   resultBase+5 = mark2 ts_hi
-      val w = (0 until 6).map(off => debugRead(dut, resultBase + off))
+      // Ring layout (spec §11): REVISION at resultBase+0, record stream
+      // starts at resultBase+1. Two MARK records, each 3 words, written
+      // consecutively from ringWrPtr=1 (post-REVISION). So:
+      //   resultBase+0 = REVISION
+      //   resultBase+1 = mark1 header
+      //   resultBase+2 = mark1 ts_lo
+      //   resultBase+3 = mark1 ts_hi
+      //   resultBase+4 = mark2 header
+      //   resultBase+5 = mark2 ts_lo
+      //   resultBase+6 = mark2 ts_hi
+      val revisionWord = debugRead(dut, resultBase)
+      val expectedRevision =
+        ((mole.Revision.major.toLong & 0xff) << 24) |
+          ((mole.Revision.minor.toLong & 0xff) << 16) |
+          (mole.Revision.patch.toLong & 0xffff)
+      assert(
+        (revisionWord & 0xffffffffL) == expectedRevision,
+        f"$label: REVISION word at resultBase = 0x$revisionWord%08x, " +
+          f"expected 0x$expectedRevision%08x"
+      )
+      val w = (0 until 6).map(off => debugRead(dut, resultBase + 1 + off))
 
       def checkMark(idx: Int, expectLabel: Int): Long = {
         val header = w(idx * 3)

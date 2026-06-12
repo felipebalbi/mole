@@ -289,6 +289,23 @@ case class EnginePipeline(cfg: MoleConfig) extends Component {
   val haltedReg = Reg(Bool()) init False
   val haltStatusReg = Reg(UInt(5 bits)) init 0
 
+  // REVISION emission gate (spec §11.2).
+  //
+  // High at reset; cleared after the engine commits a one-shot REVISION
+  // word to ring slot 0 (resultBase + 0) on engineStart. `fetchActive`
+  // is gated to wait for `!revisionPending` so the engine never fetches
+  // an instruction before the host can see the REVISION at the head of
+  // the ring.
+  //
+  // Defensive: also cleared on `flush` (i.e., on HALT or BRANCH redirect)
+  // so if a future MoleTop adds back-to-back program support without an
+  // FPGA-level reset, the next REVISION emit fires off the same gate.
+  // Today the cleanup is moot (MoleTop relies on full reset between
+  // programs) but the explicit clear matches the rest of the per-program
+  // bookkeeping (haltedReg, ringWrPtr, ringOverflow are TODO at the
+  // architectural level).
+  val revisionPending = Reg(Bool()) init True
+
   // Sticky engine flags (spec §7).
   // One-cycle forwarding model: written at W, read from these regs in D.
   // mismatchFlagReg / timeoutFlagReg are written by the WIRE mini-FSM.
@@ -478,7 +495,8 @@ case class EnginePipeline(cfg: MoleConfig) extends Component {
   val pcReg = Reg(UInt(progAddrWidth bits)) init 0
 
   // fetchActive: engine is running, not halted, in-range, AND no
-  // HALT/trap is in flight downstream.
+  // HALT/trap is in flight downstream, AND the REVISION header has
+  // been committed.
   //
   // The last clause prevents an SPRAM-read/result-write deadlock: the
   // SPRAM controller's `resultWrite.ready := !readCmd.valid` arbitration
@@ -492,10 +510,16 @@ case class EnginePipeline(cfg: MoleConfig) extends Component {
   // that simply HALT while pcReg is still well inside programLength)
   // never observe the halt.
   //
+  // The `!revisionPending` gate uses the same SPRAM-arbitration
+  // argument: holding back F1 fetches while the REVISION writer drives
+  // the ring port keeps the one-shot REVISION write from racing F1's
+  // first read.
+  //
   // The in-flight HALT check itself is wired below (after the CtrlLinks
   // are declared); we declare a Bool now and assign it later.
   val haltInFlight = Bool()
   val fetchActive = io.engineStart && !haltedReg && !haltInFlight &&
+    !revisionPending &&
     (pcReg < io.programLength.resize(progAddrWidth bits))
 
   // --------------------------------------------------------------------------
@@ -585,6 +609,34 @@ case class EnginePipeline(cfg: MoleConfig) extends Component {
   val xWireWritesReg = Bool()
   val xWireWriteAddr = UInt(3 bits)
   val xWireWriteData = Bits(32 bits)
+
+  // Latched write-pending state (Phase F CAPTURE-to-ring fix).
+  //
+  // The WIRE mini-FSM's `xWireWritesReg := True` pulse is combinational
+  // and fires for one cycle (the same cycle the FSM transitions to
+  // WS_IDLE / sets xWireDone). On that cycle the X stage is still
+  // halted (xWireRunning is computed from the *current* xWireState,
+  // which is still WS_EMIT_* until end-of-cycle). The next cycle X
+  // releases its stall and fires — but `xWireWritesReg` is False that
+  // cycle and the X→W payload latch captures a False WRITES_REG.
+  //
+  // Without latching, R7 capture writes and CAPTURE-ring writes never
+  // reach W. (Pre-Phase-F engines silently dropped both; spec §8 and
+  // BitCycleEngineTargetSim's comment block both document this gap.)
+  //
+  // The fix: latch (writes_req, addr, data) into Regs on the cycle of
+  // the combinational pulse. The Regs hold until X actually fires;
+  // x.up(WRITES_REG / RING_WRITE_VALID / ...) is driven from the
+  // latched values. The Regs auto-clear when X fires so a fresh WIRE
+  // opcode starts clean.
+  val xPendingWrite = Reg(Bool()) init False
+  val xPendingWriteAddr = Reg(UInt(3 bits)) init 0
+  val xPendingWriteData = Reg(Bits(32 bits)) init B(0, 32 bits)
+  when(xWireWritesReg) {
+    xPendingWrite := True
+    xPendingWriteAddr := xWireWriteAddr
+    xPendingWriteData := xWireWriteData
+  }
   xWireHaltReq := False
   xWireHaltWord := B(0, 32 bits)
   xWireWritesReg := False
@@ -886,9 +938,26 @@ case class EnginePipeline(cfg: MoleConfig) extends Component {
   // Both replacement signals are payloads written at D and registered
   // across the d→r→x StageLinks, so they cut the combinational chain from
   // X-stage state to r.haltWhen entirely.
-  regFile.io.eValid := x.isValid && x(PipeStageables.IS_LOAD_USE)
-  regFile.io.eWriteAddr := x(PipeStageables.DATA_DST)
-  regFile.io.eIsLoadUse := x(PipeStageables.IS_LOAD_USE)
+  //
+  // WIRE-capture extension (Phase F): the Pending* Regs are Reg-stable
+  // (they hold across the WIRE FSM stall window), so wiring them in
+  // here does not re-introduce the combinational X→D long path that
+  // X.2 fixed. They cover the case where a capture-bearing WIRE op
+  // is about to write R7 and the next instruction reads R7 (spec
+  // §14 RAW table: EMIT_BIT_* / EMIT_QUARTER_* / EMIT_BYTE_* /
+  // SAMPLE_BIT_ON_SCL / DRIVE_BIT_ON_SCL with capture=1 → R7).
+  // Without this extension, R7 captures landed in the regfile too
+  // late for the immediately-following reader; the consumer would
+  // get the pre-capture R7 value (regression: caseCaptureWritesR7Observable).
+  regFile.io.eValid := x.isValid &&
+    (x(PipeStageables.IS_LOAD_USE) || xPendingWrite)
+  regFile.io.eWriteAddr := Mux(
+    xPendingWrite,
+    xPendingWriteAddr,
+    x(PipeStageables.DATA_DST)
+  )
+  regFile.io.eIsLoadUse :=
+    x(PipeStageables.IS_LOAD_USE) || xPendingWrite
 
   // --------------------------------------------------------------------------
   // X: Execute
@@ -1094,15 +1163,52 @@ case class EnginePipeline(cfg: MoleConfig) extends Component {
     x.up(PipeStageables.PC_REDIRECT_TARGET) := x(PipeStageables.PC)
   }
 
-  // ---- WIRE capture writeback (driven from component-scope xWireWritesReg) --
+  // ---- WIRE capture writeback (driven from xPending* Regs) ----------------
   // These are combinatorial wires set by the mini-FSM body (see below).
   // They feed the x.up() Payloads so the WIRE-completed cycle passes the
   // capture data to W.
-  // Override the unconditional default assignments when xWireWritesReg is True.
-  when(xWireWritesReg) {
+  //
+  // The Pending* Regs are latched on the cycle xWireWritesReg pulses
+  // (the final WIRE FSM cycle, which is also the cycle X is still
+  // halted). The Regs hold across the stall-release boundary so the
+  // cycle X fires sees a valid WRITES_REG payload. The Regs auto-
+  // clear when X fires (see end-of-block).
+  when(xPendingWrite) {
     x.up(PipeStageables.WRITES_REG) := True
-    x.up(PipeStageables.WRITE_REG_ADDR) := xWireWriteAddr
-    x.up(PipeStageables.WRITE_REG_DATA) := xWireWriteData
+    x.up(PipeStageables.WRITE_REG_ADDR) := xPendingWriteAddr
+    x.up(PipeStageables.WRITE_REG_DATA) := xPendingWriteData
+
+    // Also emit a CAPTURE record to the result ring (spec §11.3).
+    //
+    // The W stage's RING_WRITE_VALID/RING_WRITE_DATA payloads are the
+    // one-write-per-firing path already used for HALT and WIRE-inline
+    // traps. CAPTURE is also one-write-per-firing (one record per
+    // capture-bearing WIRE opcode), so the same path applies.
+    //
+    // The CAPTURE record format (spec §11.3):
+    //   [31:30] tag      = 0b00  (CAPTURE)
+    //   [29: 1] reserved = 0
+    //   [ 0]    sda      (captured SDA sample)
+    //
+    // `xPendingWriteData` holds `B(0, 31 bits) ## sampledSda` for
+    // every capture-setting site below (EMIT_BIT, EMIT_QUARTER,
+    // EMIT_BYTE ACK, SAMPLE_BIT_ON_SCL, DRIVE_BIT_ON_SCL). That word
+    // IS the CAPTURE record verbatim: tag=00 in [31:30] is satisfied
+    // by the 31-bit zero prefix, and the sampled bit is in [0]. So
+    // we reuse it directly.
+    //
+    // CAPTURE writes are subject to the W-stage ring-overflow guard
+    // (drop + latch overflow when ringWrPtr would step on the
+    // reserved HALT slot). The mutex against MARK and HALT is
+    // implicit: capture happens at the end of a WIRE opcode's X
+    // residency, and the W stage's writer is one-write-per-firing,
+    // so no two writers compete for the ring port on the same cycle.
+    x.up(PipeStageables.RING_WRITE_VALID) := True
+    x.up(PipeStageables.RING_WRITE_DATA) := xPendingWriteData
+  }
+  // Auto-clear the latch when X actually fires the write through.
+  when(xPendingWrite && x.down.isFiring) {
+    xPendingWrite := False
   }
 
   // Override HALT/RING outputs for WIRE-inline traps.
@@ -1123,13 +1229,16 @@ case class EnginePipeline(cfg: MoleConfig) extends Component {
   // direct drive matches the inline-stretch-guard and per-quarter WIRE
   // FSM precedents (see AGENTS.md §"Pipeline framework note").
   //
-  // Header word (phase 0): [31:30] = 0b10 (MARK tag, spec §11), [29:14] = 0,
-  // [13:0] = label.
-  // ts_lo (phase 1): low 16 bits of timestamp, padded with 0 in [31:16].
-  // ts_hi (phase 2): high 16 bits of timestamp, padded with 0 in [31:16].
-  // (Two halves rather than one 32-bit slice keeps the host-side decode
-  // simple and matches the v0-era 16-bit-grain ring shape the host
-  // already parses; the SPRAM word is 32 bits so the upper 16 are zero.)
+  // Spec §11.4 (MARK record):
+  //   Header   (phase 0): [31:30]=0b10 tag, [29:14]=0, [13:0]=label.
+  //   ts_lo    (phase 1): [31:16]=0, [15:0]=timestamp[15:0].
+  //   ts_hi    (phase 2): [31:16]=0, [15:0]=timestamp[31:16].
+  // The two timestamp halves carry their useful bits in the low 16 of each
+  // 32-bit SPRAM word; the high 16 are reserved-zero. This split is a v0
+  // 16-bit-grain relic preserved across the 32-bit-grain rework so MARK
+  // record framing is stable; a future format bump can fold the timestamp
+  // into a single 32-bit word.
+  //
   // MARK header reads MARK_LABEL straight from the X-stage payload. The
   // MARK instruction is held in X for the entire 3-cycle commit (X stalls
   // via xMarkStalling), so the payload is stable across all phases — no
@@ -2031,6 +2140,39 @@ case class EnginePipeline(cfg: MoleConfig) extends Component {
     )
   w.haltWhen(wWillIssueRingWrite && !io.ringWrite.ready)
 
+  // ---- REVISION direct ring drive (spec §11.2) --------------------------
+  // The engine writes the 32-bit REVISION word (`Revision.hw`) at
+  // ring slot 0 (resultBase + 0) on every program start, before any
+  // user instruction is fetched. `revisionPending` gates both this
+  // writer (high = drive) and the F1 fetch path (`fetchActive` is
+  // gated False while pending), so REVISION wins the SPRAM ring port
+  // uncontested with respect to fetches.
+  //
+  // Mutex chain:
+  //   1. W stage HALT/CAPTURE wins (drives io.ringWrite first; this
+  //      block respects `!wDrainingRingWrite`).
+  //   2. REVISION (this block) next.
+  //   3. X-stage MARK last (extended mutex below also respects
+  //      `!revisionDrivingRing`).
+  //
+  // REVISION fires only while `revisionPending && io.engineStart`, so
+  // it never competes with HALT or MARK in practice (those happen
+  // after the user program has started, which requires fetchActive,
+  // which requires `!revisionPending`). The mutex chain is
+  // defense-in-depth.
+  val wDrainingRingWrite = w.down.isFiring && w(PipeStageables.RING_WRITE_VALID)
+  val revisionDriveRing =
+    revisionPending && io.engineStart && !wDrainingRingWrite
+  when(revisionDriveRing) {
+    io.ringWrite.valid := True
+    io.ringWrite.payload.addr := U(resultBase, spramAddrWidth bits)
+    io.ringWrite.payload.data := Revision.hw
+    when(io.ringWrite.ready) {
+      ringWrPtr := ringWrPtr + 1
+      revisionPending := False
+    }
+  }
+
   // ---- C.8 MARK direct ring drive (Option 1) ----------------------------
   // MARK is the only opcode that needs >1 ring write per instruction
   // (header, ts_lo, ts_hi). The W-stage ring path is one-write-per-firing
@@ -2051,9 +2193,16 @@ case class EnginePipeline(cfg: MoleConfig) extends Component {
   // Whole-or-nothing overflow: xMarkSkip (set at phase 0 when no room)
   // suppresses io.ringWrite.valid for the whole MARK and the FSM body
   // above fast-forwards to phase 3.
-  val wDrainingRingWrite = w.down.isFiring && w(PipeStageables.RING_WRITE_VALID)
+  //
+  // Extended mutex (post-REVISION rework): also block on
+  // `revisionDriveRing`. REVISION fires only while `revisionPending`,
+  // and `fetchActive` is gated False under the same condition, so a
+  // MARK could not be live in X when REVISION runs in practice —- but
+  // gating here too matches the defensive-coding pattern used for W
+  // contention and survives any future change that loosens the
+  // fetchActive gate.
   val xMarkDriveRing = xMarkActive && (xMarkPhase < 3) && !xMarkSkip
-  when(xMarkDriveRing && !wDrainingRingWrite) {
+  when(xMarkDriveRing && !wDrainingRingWrite && !revisionDriveRing) {
     // Override the component-scope idle defaults (and any W-stage
     // assignment, which is gated False by the mutex above).
     io.ringWrite.valid := True
@@ -2105,6 +2254,10 @@ case class EnginePipeline(cfg: MoleConfig) extends Component {
     xMarkDone := False
     xWaitOnActive := False
     xWaitOnDone := False
+    // Clear any pending capture writeback so a flush (HALT, trap, or
+    // taken BRANCH that flushed mid-WIRE) does not leak a stale
+    // capture into the post-flush stream.
+    xPendingWrite := False
     // Clear the F2 instruction-latch state so the post-flush refetch
     // forces a fresh SPRAM-response capture. Without this clear, the
     // stale f2InstrReg (from the pre-flush in-flight fetch that the

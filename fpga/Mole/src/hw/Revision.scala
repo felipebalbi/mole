@@ -2,8 +2,7 @@ package mole
 
 import spinal.core._
 
-/** Compile-time engine revision word emitted on `HALT` (and, in later phases,
-  * on `MARK` with a reserved label id).
+/** Compile-time engine revision word emitted at program start (spec §11.2).
   *
   * The major/minor/patch triple is the single source of truth for the engine's
   * binary identity. Values are sourced from JVM system properties
@@ -12,7 +11,8 @@ import spinal.core._
   * `REVISION_*` macros so a bare `sbt runMain mole.MoleTopVerilog` outside
   * `make` still produces the canonical word.
   *
-  * Wire layout per `fpga/Mole/AGENTS.md` §"REVISION word convention":
+  * Wire layout per `fpga/Mole/AGENTS.md` §"REVISION word convention" and spec
+  * §11.2:
   *
   * {{{
   *   [31:24] = major   (8 bits)
@@ -20,10 +20,10 @@ import spinal.core._
   *   [15: 0] = patch  (16 bits)
   * }}}
   *
-  * The result ring is 16-bit-word grained; the engine emits the word in two
-  * writes (low word first --- [[wordLo]] then [[wordHi]]) so the host reading
-  * the byte stream sees the bytes in little-endian order matching the rest of
-  * the Mole protocol.
+  * The engine writes the 32-bit REVISION word at `word[0]` of the result ring
+  * on every program start (see [[EnginePipeline]] revision-emission logic). The
+  * drainer then streams it as 4 LE bytes to the host. There is no 16-bit-half
+  * split; the result ring is 32-bit-grained from C.3 onward.
   */
 object Revision {
 
@@ -62,32 +62,15 @@ object Revision {
     s"REVISION patch=$patch must fit in 16 bits unsigned (0..65535)"
   )
 
-  /** Bit width of the full revision word. */
-  val WORD_WIDTH: Int = 32
-
-  /** Bit width of one result-ring write (the engine emits the 32-bit word as
-    * two of these, low half first).
+  /** Bit width of the full revision word (32, matches the result-ring grain).
     */
-  val HALF_WIDTH: Int = 16
+  val WORD_WIDTH: Int = 32
 
   /** Full 32-bit revision word, as a plain `Int`. */
   val word: Int = (major << 24) | (minor << 16) | patch
 
-  /** Low 16 bits of [[word]] --- the first half-word written into the result
-    * ring on `HALT`.
+  /** Hardware view of [[word]]: a fixed 32-bit [[Bits]] literal suitable for
+    * driving a result-ring write port.
     */
-  val wordLo: Int = word & 0xffff
-
-  /** High 16 bits of [[word]] --- the second half-word written into the result
-    * ring on `HALT`.
-    */
-  val wordHi: Int = (word >>> 16) & 0xffff
-
-  /** Hardware view of [[wordLo]]: a fixed [[Bits]] literal suitable for driving
-    * a result-ring write port.
-    */
-  def hwLo: Bits = B(wordLo, HALF_WIDTH bits)
-
-  /** Hardware view of [[wordHi]]. */
-  def hwHi: Bits = B(wordHi, HALF_WIDTH bits)
+  def hw: Bits = B(word, WORD_WIDTH bits)
 }

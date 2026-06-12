@@ -392,8 +392,6 @@ object MoleTopSim extends App {
   // resultLimit (the engine reserves the top 32-bit slot for HALT
   // exclusively, see spec §11 + project AGENTS §"REVISION word
   // convention").
-  val revisionLo = Revision.wordLo & 0xffff
-  val revisionHi = Revision.wordHi & 0xffff
   val cleanHalt32 = cleanHaltWord32(0)
 
   /** Read the 32-bit HALT word at the tail of the result ring. */
