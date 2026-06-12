@@ -53,18 +53,19 @@ import spinal.lib.fsm._
   *   - `issueReadState`: drives `readCmd.valid := True` until fire.
   *   - `waitRespState`: waits for `readResp.valid` (1 cycle); latches into
   *     `wordReg`.
-  *   - `sendB0State` / `sendB1State` / `sendB2State` / `sendB3State`: byte
-  *     stream out (little-endian: b0=LSB first, then b1, b2, b3=MSB), with
-  *     proper back-pressure. The final fire in `sendB3` pulses
-  *     `drainComplete` and returns to `idleState` in one step.
+  *   - `sendLoState` / `sendHiState`: byte stream out, with proper
+  *     back-pressure. The final fire in `sendHi` pulses `drainComplete` and
+  *     returns to `idleState` in one step.
   *
-  * Seven states total (idle + issueRead + waitResp + 4 byte sends).
+  * Five states total --- the plan called out seven (`Advance` / `Done` as
+  * separate stages); we collapsed the increment and completion into `sendHi`'s
+  * fire branch to honour the "pulse on fire" spec.
   *
   * @param resultBase
   *   SPRAM word address of the first ring word (= `programWordCount` in the
   *   standard layout).
   * @param resultWordCount
-  *   number of **32-bit** words in the ring (v0.2 ISA grain).
+  *   number of 16-bit words in the ring.
   * @param addrWidth
   *   SPRAM address width (matches `SpramController.addrWidth`).
   */
@@ -99,19 +100,17 @@ case class MoleDrainerFsm(
     val readCmd = master Stream UInt(addrWidth bits)
 
     /** SPRAM read response port. `valid` arrives exactly one cycle after
-      * `readCmd.fire`; `payload` is the **32-bit** word at the requested
-      * address (v0.2 ISA grain).
+      * `readCmd.fire`; `payload` is the 16-bit word at the requested address.
       */
-    val readResp = slave Flow Bits(32 bits)
+    val readResp = slave Flow Bits(16 bits)
 
-    /** Byte stream sink. Drives the controller's `UartTx.data` port. Bytes
-      * of each 32-bit word stream out in little-endian order: b0 (LSB)
-      * first, then b1, b2, b3 (MSB).
+    /** Byte stream sink. Drives the controller's `UartTx.data` port. Low byte
+      * of each word goes first, then high byte.
       */
     val txData = master Stream Bits(8 bits)
 
-    /** Single-cycle pulse the SAME cycle the final byte (highest byte of
-      * the last ring word) fires on `txData`.
+    /** Single-cycle pulse the SAME cycle the final byte (high byte of the last
+      * ring word) fires on `txData`.
       */
     val drainComplete = out Bool ()
 
@@ -129,9 +128,9 @@ case class MoleDrainerFsm(
   val addrReg = Reg(UInt(addrWidth bits)) init U(0, addrWidth bits)
   val resultLimit: UInt = U(resultBase + resultWordCount - 1, addrWidth bits)
 
-  // Latched 32-bit word from SPRAM. Captured in waitRespState; consumed
-  // in sendB0/B1/B2/B3.
-  val wordReg = Reg(Bits(32 bits)) init B(0, 32 bits)
+  // Latched word from SPRAM. Captured in waitRespState; consumed in
+  // sendLoState / sendHiState.
+  val wordReg = Reg(Bits(16 bits)) init B(0, 16 bits)
 
   // --------------------------------------------------------------------
   // Defaults --- overridden inside the FSM as needed.
@@ -180,52 +179,34 @@ case class MoleDrainerFsm(
       whenIsActive {
         when(io.readResp.valid) {
           wordReg := io.readResp.payload
-          goto(sendB0State)
+          goto(sendLoState)
         }
       }
     }
 
-    // sendB0: emit byte 0 (LSB).
-    val sendB0State: State = new State {
+    // sendLo: present the low byte of wordReg. Hold valid until the
+    // UART takes it (txData.ready high). MUST NOT advance state on
+    // valid && !ready -- the UART is busy serialising the previous
+    // byte and our byte would be silently dropped.
+    val sendLoState: State = new State {
       whenIsActive {
         io.txData.valid := True
         io.txData.payload := wordReg(7 downto 0)
         when(io.txData.ready) {
-          goto(sendB1State)
+          goto(sendHiState)
         }
       }
     }
 
-    // sendB1: emit byte 1.
-    val sendB1State: State = new State {
-      whenIsActive {
-        io.txData.valid := True
-        io.txData.payload := wordReg(15 downto 8)
-        when(io.txData.ready) {
-          goto(sendB2State)
-        }
-      }
-    }
-
-    // sendB2: emit byte 2.
-    val sendB2State: State = new State {
-      whenIsActive {
-        io.txData.valid := True
-        io.txData.payload := wordReg(23 downto 16)
-        when(io.txData.ready) {
-          goto(sendB3State)
-        }
-      }
-    }
-
-    // sendB3: emit byte 3 (MSB). On the final-word fire, pulse
+    // sendHi: present the high byte of wordReg. Same handshake
+    // discipline as sendLo. On the final-word fire, pulse
     // drainComplete and return to idle in one edge -- the phase FSM
     // sees completion on the same cycle as the byte hitting the UART.
     // On non-final fire, increment addrReg and go back to issueRead.
-    val sendB3State: State = new State {
+    val sendHiState: State = new State {
       whenIsActive {
         io.txData.valid := True
-        io.txData.payload := wordReg(31 downto 24)
+        io.txData.payload := wordReg(15 downto 8)
         when(io.txData.ready) {
           when(addrReg === resultLimit) {
             io.drainComplete := True

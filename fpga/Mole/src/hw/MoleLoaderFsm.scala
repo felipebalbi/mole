@@ -210,15 +210,12 @@ case class MoleLoaderFsm(
 
   // programWrite defaults; writeWord overrides.
   io.programWrite.valid := False
-  // Body words land at SPRAM[0..N-1]. The preamble words (indices
-  // 0..PREAMBLE_WORDS-1) are consumed from the UART, fed into CRC, but
-  // NOT written to SPRAM --- the engine fetches from PC=0 and would
-  // otherwise execute the magic word as an instruction.
-  val bodyAddr =
-    (wordIndex - U(Instruction.PREAMBLE_WORDS, wordIndexWidth bits))
-      .resize(addrWidth bits)
-  io.programWrite.payload.addr := bodyAddr
-  // Assemble 32-bit word from the four byte registers, little-endian.
+  io.programWrite.payload.addr := wordIndex.resize(addrWidth bits)
+  // Assemble 32-bit word from the four byte registers, little-endian:
+  // b0 is the LSB, b3 is the MSB. All four bytes are latched into Regs
+  // so writeWordState's data path is stable across SPRAM back-pressure
+  // (no dependency on `io.rx.payload` which is a transient input valid
+  // only for one cycle).
   io.programWrite.payload.data := wordB3Reg ## wordB2Reg ## wordB1Reg ## wordB0Reg
 
   io.programLength := programLengthReg
@@ -272,15 +269,9 @@ case class MoleLoaderFsm(
 
           val newLen = (io.rx.payload ## lenLoReg).asUInt
           frameLen := newLen
-          // programLength is the BODY word count (= total - preamble),
-          // since the loader strips preamble before writing to SPRAM.
-          // The engine fetches PC=0..bodyLen-1.
-          programLengthReg :=
-            (newLen - U(Instruction.PREAMBLE_WORDS, lenWidth bits))
-              .resize(wordIndexWidth bits)
+          programLengthReg := newLen.resize(wordIndexWidth bits)
 
-          when(newLen < U(Instruction.PREAMBLE_WORDS + 1, lenWidth bits) ||
-            newLen > U(programWordCount + Instruction.PREAMBLE_WORDS, lenWidth bits)) {
+          when(newLen === U(0) || newLen > U(programWordCount, lenWidth bits)) {
             io.fault := True
             goto(resyncState)
           } otherwise {
@@ -361,37 +352,26 @@ case class MoleLoaderFsm(
     }
 
     // ---------------- writeWord ----------------------------------------------
-    // Offer the assembled word to SPRAM. For the first PREAMBLE_WORDS
-    // words (MAGIC, body_len) we **skip the SPRAM write entirely** ---
-    // they were just consumed for CRC + length parsing and are not
-    // executable instructions. Body words (wordIndex >= PREAMBLE_WORDS)
-    // are written to SPRAM at `bodyAddr = wordIndex - PREAMBLE_WORDS`
-    // so body[0] lands at SPRAM[0].
+    // Offer the assembled word to SPRAM. The current word's bytes have
+    // already been validated (any rxErr on lenLo/Hi/wordB0..B3 aborted us
+    // before we got here), so we always complete the write. If a NEW byte
+    // arrives during the SPRAM stall with rxErr set, it sits on the bus
+    // unread (rx.ready=False here) and errorLatch picks up the pulse; the
+    // next consuming state (wordB0 or crcLo) sees errorLatch and aborts
+    // cleanly. This guarantees a clean word that's already mid-write
+    // lands in SPRAM and only the *next* word is rejected.
     //
-    // For preamble words, we just advance state without firing
-    // programWrite (no SPRAM cycle). For body words, the standard
-    // valid/ready handshake holds the word until SPRAM accepts.
+    // The acceptRx-drop catch-all in `always {...}` still fires here, so
+    // an external phase change does interrupt the stall.
     val writeWordState: State = new State {
       whenIsActive {
-        val isPreamble =
-          wordIndex < U(Instruction.PREAMBLE_WORDS, wordIndexWidth bits)
-        when(isPreamble) {
-          // Skip SPRAM write; advance immediately.
+        io.programWrite.valid := True
+        when(io.programWrite.fire) {
           when(isLastWord) {
             goto(crcLoState)
           } otherwise {
             wordIndex := wordIndex + 1
             goto(wordB0State)
-          }
-        } otherwise {
-          io.programWrite.valid := True
-          when(io.programWrite.fire) {
-            when(isLastWord) {
-              goto(crcLoState)
-            } otherwise {
-              wordIndex := wordIndex + 1
-              goto(wordB0State)
-            }
           }
         }
       }
