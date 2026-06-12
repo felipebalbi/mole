@@ -337,15 +337,19 @@ The engine reports back to the host:
 That is the whole result-ring contract.
 
 Result-ring records (canonical reference:
-`docs/MOLE-0.2-SPEC.md` §11 for the HALT word; result-ring
-CAPTURE/MARK/HALT record format is unchanged from v0 ---
-see `mole-abi/src/lib.rs`): the `REVISION` word lives at offset 0
-(low word, high word, little-endian per 16-bit ring grain); the
-record stream follows, made of CAPTURE records (`tag = 00`, 1
-word) and MARK records (`tag = 10`, 3 words); the HALT status
-word (`tag = 11`) is a **32-bit** record at `resultLimit` as a
-reserved slot that overflowing records can never overwrite.
-The HALT word layout is:
+`docs/MOLE-0.2-SPEC.md` §11): the result ring is **32-bit-grained**.
+Every record is a whole number of 32-bit words; the drainer streams
+each SPRAM word as 4 LE bytes. The `REVISION` word lives at word
+offset 0 (a single 32-bit word, `[31:24]=major [23:16]=minor
+[15:0]=patch`); the record stream starts at word 1 and consists of
+CAPTURE records (`tag = 00`, 1 word, sda at `[0]`) and MARK records
+(`tag = 10`, 3 words: header + ts_lo + ts_hi, where the two
+timestamp halves each carry their useful bits in the low 16 of a
+32-bit ring word, `[31:16]` reserved-zero as a v0-grain relic). The
+HALT status word (`tag = 11`) is a 32-bit record at
+`resultLimit = (resultRingByteCount / 4) - 1` as a reserved slot
+that overflowing records can never overwrite. The HALT word layout
+is:
 
 ```text
 [31:30] tag      = 0b11

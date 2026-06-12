@@ -530,6 +530,12 @@ object MoleTopSim extends App {
     // Monitor fault LED, loaderLoaded, and halted for the full resync
     // window. The pulse-stretcher holds the LED high for a long time;
     // loaded/halted are momentary so we sample them every cycle.
+    //
+    // LED polarity: MoleTop's io_ledR is active-low (drive LOW =
+    // pin LOW = LED ON; drive HIGH = pin HIGH = LED OFF) because the
+    // on-board iCEbreaker RGB LED is wired anode-to-3.3V with the
+    // FPGA pin as the cathode. So "fault LED is lit" reads as
+    // `!dut.io.ledR.toBoolean`.
     var faultSeen = false
     var loadedSeen = false
     var haltedSeen = false
@@ -537,7 +543,7 @@ object MoleTopSim extends App {
       val watchCycles = 20 * dut.uartCfg.ticksPerBit * 10
       var n = 0
       while (n < watchCycles) {
-        if (dut.io.ledR.toBoolean) faultSeen = true
+        if (!dut.io.ledR.toBoolean) faultSeen = true
         if (dut.io.loaderLoaded.toBoolean) loadedSeen = true
         if (dut.io.halted.toBoolean) haltedSeen = true
         dut.clockDomain.waitSampling()

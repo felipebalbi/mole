@@ -108,8 +108,9 @@ the design contract.
 
 - [x] **C.11.a --- tmp108 fixture re-port to EMIT_BYTE_IMM.** 3 compile-time-known bytes (I2C address `0x90`, register pointer `0x00`, repeated-start address `0x91`) collapsed from 9 `EMIT_BIT_IMM` each into 1 `EMIT_BYTE_IMM` apiece. Word count drops 70 → 48 body words (-31 %). `(use-raw-primitives)` pragma added (fire-and-forget-capture semantics; spec §5.5 E-WIRE-003 pairing rule would otherwise reject the masked EMIT_BYTE_IMM without a downstream BRANCH_ON MISMATCH). Goldens regenerated; `cargo test --workspace` 394/0/0. EMIT_BYTE_IMM gets its first hardware exercise at C.11.d. Commit `65c2c03`.
 - [x] **C.11.b --- v0 MoleTopSim family re-ported as v0.2 SpinalSim.** 3 sims (`MoleTopSim`, `MoleTopFlowControlSim`, `MoleTopCtsViolationSim`) under `fpga/Mole/src/sim/` driving full host-link chain end-to-end (host frame → loader → SPRAM → engine → drainer → host decode) under a shared `MoleTopSimDut`. **Finding:** the sims surfaced an engine-side glue gap (engine PC=0 fetches the v0.2 preamble's MAGIC word and traps). Carried forward as new sub-task **C.11.f** (engine PC start past preamble). The 3 sims are kept in tree as forward regression target but **not** in aggregate `make sim`; run individually via `make sim-top` etc. Aggregate `make sim` stays at 29/29 green. Commit `b1dc3c1`.
+- [x] **C.11.f --- host↔FPGA wire-format rewrite (loader strips preamble) + result-ring 32-bit grain.** Two correlated fixes. (1) The host-to-Mole UART frame rewritten from `[len:2B][magic_word|len_word|body words][crc:2B]` (v0-inherited) to `[MAGIC:4B][LEN:4B][body:4*N B][CRC:2B]`: the loader now verifies and strips MAGIC + LEN before writing body words to SPRAM[0..N-1], so the engine fetches body[0] at PC=0. Commit `4a3f088`. (2) The result-ring grain documented and implemented as **32-bit-grained** end-to-end: spec §11 grew explicit REVISION / CAPTURE / MARK / HALT subsections; the engine emits a REVISION word at ring[0] on every program start (new `revisionPending` gate); capture-bearing WIRE opcodes emit 32-bit CAPTURE records into the ring (new `xPendingWrite` latch); R7 captures finally land (pre-existing silent regression of spec §8); the host decoder rewritten as a 32-bit-grain walker (`Revision::from_words` → `from_word`; `Record::Mark.label` widened u8 → u14; `RingError::NoHaltAtTail.word` u16 → u32). Commits `d107331` (spec + ABI), `04eefc1` (engine + engine sims), `46e1486` (host decoder). MoleTopSim family now passes end-to-end and is wired into the aggregate `make sim` target (32 sim targets green).
 
-**Phase C status:** 29/29 sim targets green via aggregate `make sim`; 3 new MoleTopSim-family sims (sim-top, sim-top-flow-control, sim-top-cts-violation) in tree but excluded from aggregate pending C.11.f. C.1–C.10 complete; C.11.a/C.11.b complete; **C.11.f (engine PC past preamble) is now a prerequisite for the hardware sub-tasks C.11.c/d/e.** See `### 🔲 Step 18 / Phase C.11` block in Phase 3 below for the full hand-off contract including C.11.f.
+**Phase C status:** 32/32 sim targets green via aggregate `make sim` (incl. the 3 end-to-end MoleTopSim variants); C.1–C.10 complete; C.11.a/C.11.b/C.11.f complete; hardware sub-tasks C.11.c/d/e ready to run when the bench is available. See `### 🔲 Step 18 / Phase C.11` block in Phase 3 below for the full hand-off contract for the hardware sub-tasks.
 
 ---
 
@@ -1368,64 +1369,104 @@ the cross-machine hand-off targets.
   are kept for now as intent reference. Delete them once C.11.f
   closes and the live sims pass.
 
-#### 🔲 C.11.f (engine fix, NEW) --- engine PC start past v0.2 frame preamble
+#### ✅ C.11.f --- host↔FPGA wire-format + result-ring 32-bit grain
 
-**Discovered by:** C.11.b (commit `b1dc3c1`). The first
-end-to-end SpinalSim of the full host-link chain surfaced an
-engine glue gap that was invisible to the 29 pre-existing
-component sims.
+**What landed (commits `4a3f088`, `d107331`, `04eefc1`, `46e1486`):**
 
-**Symptom:** with the engine PC starting at 0 and the loader
-writing the v0.2 frame preamble (`MAGIC + body_len`) into
-SPRAM[0..1] verbatim, the engine's first fetch lands on
-`MAGIC = 0x0002_4D4C`. Decoded as an instruction this is opcode
-group=00 sub=0x0 (= `EMIT_BIT_IMM`) with non-zero reserved bits.
-The engine should trap with STATUS_TRAP at the first fetch and
-HALT before any program instruction runs.
+Two correlated changes that closed the C.11.b finding plus a
+deeper grain-mismatch bug found during the bench shakedown.
 
-**Proposed fix shapes** (pick one before implementing; the spec
-does not currently mandate which):
+**1. Host↔FPGA wire format rewrite (commit `4a3f088`).** The v0.2
+wire format inherited the v0 layout `[len:2B][magic_word|len_word|body
+words][crc:2B]`: the host packed MAGIC + body_len as two 32-bit
+"preamble" words inside an outer 2-byte length-prefix-plus-CRC
+envelope; the FPGA `MoleLoaderFsm` parsed only the outer envelope
+and wrote every word (including the preamble MAGIC) into SPRAM
+verbatim. That fed the engine's first fetch with `MAGIC =
+0x0002_4D4C`, which traps on reserved bits, which was the C.11.b
+finding. Fix: rewrote the wire format as a self-describing 8-byte
+preamble `[MAGIC:4B][LEN:4B][body:4*N B][CRC:2B]`; the loader now
+verifies MAGIC bit-exact against `0x0002_4D4C` (raising
+`E-FPGA-magic-mismatch` on fault), latches the 4-byte LEN, then
+writes body words to SPRAM[0..N-1]. The engine fetches body[0] at
+PC=0. Picked fix-shape (c) from the original C.11.f hint --- the
+loader-side strip --- because it gives MoleTop a place to reject
+bad-magic frames before the engine ever fetches. Host
+`mole_asm::frame::build_frame` and `mole_loader::verify_frame`
+updated in lockstep.
 
-- **(a) `pcReg init U(PREAMBLE_WORDS, _)`** --- simplest possible
-  change in `EnginePipeline.scala`. Engine starts at PC=2,
-  fetching body word 0 directly. Preamble is written to SPRAM
-  but never read. **Downside:** no magic verification; a host
-  that sends a frame with a corrupted preamble (e.g. wrong
-  format version) gets silently executed.
+**2. Result-ring 32-bit grain end-to-end (commits `d107331`,
+`04eefc1`, `46e1486`).** The bench shakedown of (1) revealed that
+the result-ring decoder + ABI + spec docstrings all still
+described a v0-era 16-bit-grained ring layout, while the v0.2
+engine writes 32-bit-grained records (post-C.3). Host decoder
+saw garbage records and a fictional revision word (`183.191.10892`
+on the user's first run); the engine never wrote a REVISION word
+at all and never emitted CAPTURE records (only HALT + MARK +
+trap), in contradiction with both the ABI's `record_tag::CAPTURE`
+constant and spec §8's R7-capture clause. Fix:
 
-- **(b) Add `programOffset` input to `EnginePipeline.io`;
-  `MoleTop` drives it to `Instruction.PREAMBLE_WORDS`.** Same
-  net behaviour as (a) but the constant lives in `MoleTop`
-  rather than `EnginePipeline`. Slightly cleaner separation:
-  the engine doesn't bake-in the frame format. Same magic-check
-  downside as (a).
+   - **Spec §11 (`d107331`):** renamed 'HALT word layout' to
+     'Result-ring format' and added explicit subsections
+     §11.1 (layout) / §11.2 (REVISION) / §11.3 (CAPTURE) /
+     §11.4 (MARK) / §11.5 (HALT) / §11.6 (trailing-garbage
+     hazard). All records are whole 32-bit words; drained as
+     4 LE bytes per slot. MAGIC's 16-bit "ML" half and the
+     CRC-16/XMODEM checksum remain the only 16-bit quantities
+     in the host-link protocol.
+   - **ABI (`d107331`):** dropped 16-bit-grain language from
+     `record_tag` and `record_width_words` docstrings. Added
+     new `capture` (SDA bit + reserved-bits mask), `mark`
+     (14-bit label + reserved-bits mask), and `result_ring`
+     (REVISION + record-stream offsets, OVERHEAD_WORDS=2)
+     modules.
+   - **Engine (`04eefc1`):** REVISION emission at engineStart
+     (new `revisionPending` gate; one-shot ring write at
+     resultBase before fetchActive); CAPTURE-to-ring writeback
+     in the WIRE mini-FSM (new `xPendingWrite` latched Regs;
+     reuses the W-stage one-write-per-firing path); R7 capture
+     writes resurrected as a side effect (silent regression of
+     spec §8 since C.7); load-use stall extension to cover the
+     new R7 producer set. `Revision.scala` simplified to a
+     single 32-bit word (dropped `wordLo` / `wordHi` / `hwLo`
+     / `hwHi`).
+   - **Host decoder (`46e1486`):** `mole-loader/src/ring.rs`
+     rewritten as a 32-bit-grain walker; `Revision::from_words`
+     → `from_word`; `Record::Mark.label` widened u8 → u14;
+     `RingError::NoHaltAtTail.word` u16 → u32;
+     `RingError::OddByteCount` now fires on byte counts that
+     are not multiples of 4.
 
-- **(c) Add a preamble-verify-and-strip step in
-  `MoleLoaderFsm` or `LoaderWidthAdapter`.** The loader consumes
-  the first `PREAMBLE_WORDS` 32-bit words, verifies word 0
-  equals `mole_abi::MAGIC` (raising a new E-FPGA-* fault on
-  mismatch) and word 1 equals the expected body word count,
-  then writes body words to SPRAM starting at index 0. Engine
-  PC stays at 0. **This is the cleanest option** because it
-  gives `MoleTop` a place to reject bad-magic frames before the
-  engine ever fetches; the current design has no engine-side
-  or host-link-side magic check at all (the host-side
-  `mole-loader::verify_frame` checks magic but only on the host
-  side --- once the frame reaches the wire, MoleTop accepts any
-  16-bit count of words verbatim).
+**Sims that landed alongside:**
 
-**Acceptance:** the 3 sims under `MoleTop{,FlowControl,CtsViolation}Sim.scala`
-pass; add them to the aggregate `sim:` target in
-`fpga/Mole/Makefile`; delete the `.v0-stash` files from
-`src/attic/`; close C.11.f with a "What landed" body matching
-the C.11.a/b style.
+   - New `EnginePipelineSim.caseCaptureRecordToRing`: EMIT_BIT
+     capture=1 → CAPTURE record at resultBase+1.
+   - New `EnginePipelineSim.caseCaptureWritesR7Observable`: EMIT_BIT
+     capture=1 → DEC R7 → BRANCH_ON REG_ZERO; HALT 0 iff R7
+     actually received the captured bit (regression pin for the
+     silent-R7-write bug).
+   - `BitCycleEngineTargetSim.markRecordFormatAtRingBase`: now
+     reads REVISION at resultBase+0, MARK records at resultBase+1.
+   - `EnginePipelineSim.caseFetchSequence` / `caseMarkBasic`:
+     expectation counts bumped to include REVISION.
+   - `MoleDrainerFsmSim`: sim-side memory widened from 16-bit
+     to 32-bit (pre-existing latent bug; the v0.2 drainer was
+     already 32-bit but its sim DUT preload memory was left at
+     16-bit and would have failed elaboration on the first
+     re-run).
+   - `MoleLoaderFsmSim.uart-err-mid-frame`: errIdx fixed from 4
+     (old format's word-1-lo byte) to 12 (new format's
+     word-1-byte0).
+   - `MoleTopSim` family: now passes end-to-end (short-halt,
+     bad-CRC + recovery, back-to-back frames, flow-control,
+     CTS-violation sticky). Wired into the aggregate `make sim`
+     target.
 
-**Dependency:** **C.11.c (iCEbreaker bring-up) is also blocked
-on C.11.f.** Without preamble handling, a fresh v0.2 bitstream
-will trap immediately on any frame sent by `mole-loader-cli`.
-The hardware sub-tasks below should be re-sequenced as:
-  C.11.f (engine fix) → C.11.c (iCEbreaker smoke) →
-  C.11.d (TMP108 regression) → C.11.e (MCXA268 I3C soak).
+**Acceptance:** 32/32 sim targets green via aggregate `make sim`,
+`cargo test --workspace` 398/0/0 (up from 393/0/0 pre-rework).
+The `src/attic/` `.v0-stash` files removal is left as a chore
+follow-up (they remain as intent reference and don't impact
+synthesis).
 
 #### C.11.c (hardware) --- iCEbreaker bitstream flash + smoke HALT
 

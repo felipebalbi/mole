@@ -142,24 +142,26 @@ case (build a frame, send it, observe the result).
 ## 6. Result drain
 
 When the engine HALTs, MoleTop sweeps the entire **result ring**
-out the UART, low byte of each 16-bit ring word first.
+out the UART, 4 little-endian bytes per 32-bit ring word (b0=LSB
+first).
 
 ```
 total_bytes = MoleConfig.resultRingByteCount   (default: 8192)
+            = 2048 * 4-byte words
 ```
 
 There is no length prefix on the result drain. The host knows
 exactly how many bytes to expect (it is a build-time constant of
 the bitstream). The host decodes records from the ring by
-inspecting tag bits inside each record and stops processing when
-it hits the **HALT word at `resultLimit`** (the last two 16-bit
-slots, combined little-endian into the 32-bit HALT record per
-§11).
+inspecting tag bits inside each 32-bit word and stops processing
+when it hits the **HALT word at `resultLimit`** (the last 32-bit
+slot, decoded directly as a 32-bit record per §11).
 
 The first 4 bytes of the ring are always the **Revision word**
 (see [`src/hw/Revision.scala`](src/hw/Revision.scala)):
 `major (1 byte) | minor (1 byte) | patch (2 bytes)`,
-little-endian per the 16-bit ring grain.
+little-endian as a single 32-bit word at ring offset 0
+(spec §11.2).
 
 A drain always streams the **full ring**, padded with stale data
 from previous runs if the engine wrote fewer bytes than the ring

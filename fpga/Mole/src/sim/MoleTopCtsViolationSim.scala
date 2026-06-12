@@ -108,9 +108,14 @@ object MoleTopCtsViolationSim extends App {
       )
 
       // Red LED must reflect the sticky (OR'd into io_ledR).
+      // LED polarity: io_ledR is active-low (drive LOW = pin LOW =
+      // LED ON; drive HIGH = pin HIGH = LED OFF). When the sticky
+      // ctsViolation latches, MoleTop's `io_ledR := !((counter !=
+      // 0) || ctsViolationObservedReg)` should drive False, so
+      // "LED is lit" reads as `!dut.io.ledR.toBoolean`.
       assert(
-        dut.io.ledR.toBoolean,
-        "io_ledR did not assert when ctsViolationObserved latched"
+        !dut.io.ledR.toBoolean,
+        "io_ledR did not assert (LED off) when ctsViolationObserved latched"
       )
 
       // Stickiness: sample for another 2000 cycles --- must stay True

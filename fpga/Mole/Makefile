@@ -135,18 +135,10 @@ report: $(REPORT) ## Generate nextpnr report (gen/<TOP>.report.json)
 # attic/ stash files remain as intent reference; the live v0.2
 # sims are src/sim/MoleTop{,FlowControl,CtsViolation}Sim.scala.
 #
-# **NOT IN AGGREGATE YET (C.11.b finding):** sim-top, sim-top-
-# flow-control, and sim-top-cts-violation **fail today** because
-# the engine's PC starts at 0 and fetches the v0.2 frame preamble
-# (MAGIC + body_len) as instructions, trapping immediately. The
-# MoleLoaderFsm + LoaderWidthAdapter write the preamble verbatim
-# into SPRAM[0..1]; there is no preamble-strip step in MoleTop or
-# the engine. This is a real glue gap surfaced by C.11.b ---
-# exactly the kind of inter-component bug the end-to-end sim was
-# meant to catch. Fix is engine-side (HDL frozen on branch v0.2;
-# defer to a future C.x fix commit). Run the 3 sims individually
-# to reproduce: `make sim-top` etc. See TODO.md §"C.11.b" for
-# detail.
+# Post-Phase-F: sim-top / sim-top-flow-control / sim-top-cts-violation
+# now pass end-to-end (REVISION + CAPTURE in the ring let the host
+# decoder round-trip correctly). They are wired into the aggregate
+# target below.
 sim: sim-config sim-opendrain sim-baud-gen sim-rx-sync \
      sim-tx-shiftreg sim-rx-shiftreg sim-tx-fsm sim-rx-fsm \
      sim-uart-tx sim-uart-rx sim-uart sim-spram sim-isa \
@@ -158,7 +150,8 @@ sim: sim-config sim-opendrain sim-baud-gen sim-rx-sync \
      sim-engine-jmp-boundary \
      sim-engine-stretch sim-engine-target sim-engine-full \
      sim-engine-data \
-     sim-regfile sim-engine-pipeline ## Run all simulations (Phase C in flight)
+     sim-regfile sim-engine-pipeline \
+     sim-top sim-top-flow-control sim-top-cts-violation ## Run all simulations (Phase C in flight)
 
 # Per-block sim / gen targets land here once their hint blocks in
 # TODO.md flip from 🔲 to ✅. The naming contract is fixed:
