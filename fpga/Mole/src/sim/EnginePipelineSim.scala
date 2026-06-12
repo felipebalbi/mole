@@ -690,6 +690,210 @@ object EnginePipelineSim {
   }
 
   // --------------------------------------------------------------------------
+  // Case 7b' (regression for tmp108 bring-up): EMIT_BIT_IMM with
+  // tx=recessive capture=1 in BUS_MODE=i2c emits a CAPTURE record.
+  //
+  // Bench observation (bench user 2026-06-12 tmp108 ring decode): the 3
+  // EMIT_BYTE_IMM ACK captures landed correctly in the ring but the 16
+  // subsequent EMIT_BIT_IMM tx=recessive capture=1 (the MSB/LSB read
+  // bits) emitted NO CAPTURE records. EnginePipelineSim's existing
+  // caseCaptureRecordToRing covers tx=hiz capture=1 only.
+  //
+  // In BUS_MODE=i2c (OD class), tx=hiz and tx=recessive decode to the
+  // same pad-driver state (both off; the line floats and the external
+  // pull-up wins). So this case is electrically identical to 7b's
+  // tx=hiz case, but covers the tx=recessive code path through the
+  // engine's instruction decoder for completeness.
+  // --------------------------------------------------------------------------
+  def caseCaptureRecordToRingRecessive(): Unit = {
+    compileDut().doSim("capture-record-to-ring-recessive") { dut =>
+      dut.clockDomain.forkStimulus(period = 10)
+      initInputs(dut)
+      dut.clockDomain.waitSampling(4)
+
+      // EMIT_BIT_IMM tx=recessive capture=1: tx=01 (recessive) at [4:3],
+      // capture=1 at [0]. group=00 sub=0000 → opcode [31:26] = 0.
+      // Result: (01 << 3) | 1 = 0x09.
+      val emitBitRecessiveCapture: Long = 0x00000009L
+      val haltZero: Long = 0x40000000L
+
+      val mem = Array.fill(
+        simCfg.programWordCount + (simCfg.resultRingByteCount + 3) / 4
+      )(0L)
+      mem(0) = emitBitRecessiveCapture
+      mem(1) = haltZero
+      forkSpramModel(dut, mem)
+
+      // Hold SDA high, SCL high (no stretch). Default BUS_MODE = i2c.
+      dut.io.sda.read #= true
+      dut.io.scl.read #= true
+
+      val ringRecords =
+        scala.collection.mutable.ArrayBuffer.empty[(Long, Long)]
+      fork {
+        while (true) {
+          if (
+            dut.io.ringWrite.valid.toBoolean && dut.io.ringWrite.ready.toBoolean
+          ) {
+            ringRecords += ((
+              dut.io.ringWrite.payload.addr.toLong & 0xffffL,
+              dut.io.ringWrite.payload.data.toLong & 0xffffffffL
+            ))
+          }
+          dut.clockDomain.waitSampling()
+        }
+      }
+
+      dut.io.programLength #= 2
+      dut.io.engineStart #= true
+
+      waitFor(
+        dut,
+        2000,
+        dut.io.halted.toBoolean,
+        "[caseCaptureRecordToRingRecessive] engine did not halt"
+      )
+      dut.clockDomain.waitSampling(4)
+
+      assert(
+        ringRecords.size == 3,
+        s"[caseCaptureRecordToRingRecessive] expected 3 ring writes (REVISION + CAPTURE + HALT), got " +
+          s"${ringRecords.size}: " +
+          ringRecords
+            .map { case (a, d) => f"(0x$a%x→0x$d%08x)" }
+            .mkString(", ")
+      )
+
+      val resultBase = simCfg.programWordCount.toLong
+      val (capAddr, capWord) = ringRecords(1)
+      assert(
+        capAddr == resultBase + 1,
+        s"[caseCaptureRecordToRingRecessive] CAPTURE addr: expected ${resultBase + 1} got $capAddr"
+      )
+      val capTag = ((capWord >> 30) & 0x3L).toInt
+      val capSda = (capWord & 0x1L).toInt
+      assert(
+        capTag == 0,
+        s"[caseCaptureRecordToRingRecessive] CAPTURE tag: expected 0b00 got $capTag"
+      )
+      assert(
+        capSda == 1,
+        s"[caseCaptureRecordToRingRecessive] CAPTURE sda: expected 1 (line held high) got $capSda"
+      )
+
+      println("[caseCaptureRecordToRingRecessive] PASS")
+    }
+  }
+
+  // --------------------------------------------------------------------------
+  // Case 7b'' (tmp108 read-burst regression): a RUN of N consecutive
+  // EMIT_BIT_IMM tx=recessive capture=1 instructions must emit N
+  // CAPTURE records into the ring.
+  //
+  // Bench observation: tmp108 sends 3 EMIT_BYTE_IMM (each emits 1
+  // CAPTURE) then 8 EMIT_BIT_IMM tx=recessive capture=1 (MSB read).
+  // The 3 EMIT_BYTE_IMM CAPTUREs landed but the 8 EMIT_BIT_IMM
+  // CAPTUREs were absent from the ring. This case exercises the
+  // back-to-back EMIT_BIT_IMM capture sequence specifically.
+  //
+  // Run N=8 EMIT_BIT_IMM tx=recessive capture=1, alternating the
+  // sampled SDA high/low between bits by toggling dut.io.sda.read
+  // mid-program so we can verify each CAPTURE word's sda bit matches
+  // what was on the wire at the sample point.
+  // --------------------------------------------------------------------------
+  def caseCaptureRunOfRecessiveBits(): Unit = {
+    compileDut().doSim("capture-run-of-recessive-bits") { dut =>
+      dut.clockDomain.forkStimulus(period = 10)
+      initInputs(dut)
+      dut.clockDomain.waitSampling(4)
+
+      // 8 EMIT_BIT_IMM tx=recessive capture=1 + HALT.
+      val emitBitRecessiveCapture: Long = 0x00000009L
+      val haltZero: Long = 0x40000000L
+
+      val mem = Array.fill(
+        simCfg.programWordCount + (simCfg.resultRingByteCount + 3) / 4
+      )(0L)
+      val n = 8
+      for (i <- 0 until n) {
+        mem(i) = emitBitRecessiveCapture
+      }
+      mem(n) = haltZero
+      forkSpramModel(dut, mem)
+
+      // Hold SDA high and SCL high for the whole run (no toggling
+      // needed; we just want to verify the CAPTURE words land at all).
+      dut.io.sda.read #= true
+      dut.io.scl.read #= true
+
+      val ringRecords =
+        scala.collection.mutable.ArrayBuffer.empty[(Long, Long)]
+      fork {
+        while (true) {
+          if (
+            dut.io.ringWrite.valid.toBoolean && dut.io.ringWrite.ready.toBoolean
+          ) {
+            ringRecords += ((
+              dut.io.ringWrite.payload.addr.toLong & 0xffffL,
+              dut.io.ringWrite.payload.data.toLong & 0xffffffffL
+            ))
+          }
+          dut.clockDomain.waitSampling()
+        }
+      }
+
+      dut.io.programLength #= (n + 1)
+      dut.io.engineStart #= true
+
+      // 8 EMIT_BIT_IMM × 4 quarters × ~6 cycles/quarter ≈ 200 cycles,
+      // plus pipeline overhead. Give 4000 cycles of slack.
+      waitFor(
+        dut,
+        4000,
+        dut.io.halted.toBoolean,
+        "[caseCaptureRunOfRecessiveBits] engine did not halt"
+      )
+      dut.clockDomain.waitSampling(4)
+
+      // Expect REVISION + n CAPTURE + HALT = n + 2 ring writes.
+      val expected = n + 2
+      assert(
+        ringRecords.size == expected,
+        s"[caseCaptureRunOfRecessiveBits] expected $expected ring writes " +
+          s"(REVISION + ${n} CAPTUREs + HALT), got ${ringRecords.size}: " +
+          ringRecords
+            .map { case (a, d) => f"(0x$a%x→0x$d%08x)" }
+            .mkString(", ")
+      )
+
+      val resultBase = simCfg.programWordCount.toLong
+      // CAPTURE records at resultBase+1 .. resultBase+n.
+      for (i <- 0 until n) {
+        val (capAddr, capWord) = ringRecords(1 + i)
+        val expectAddr = resultBase + 1 + i
+        assert(
+          capAddr == expectAddr,
+          s"[caseCaptureRunOfRecessiveBits] CAPTURE[$i] addr: expected $expectAddr got $capAddr"
+        )
+        val capTag = ((capWord >> 30) & 0x3L).toInt
+        val capSda = (capWord & 0x1L).toInt
+        assert(
+          capTag == 0,
+          s"[caseCaptureRunOfRecessiveBits] CAPTURE[$i] tag: expected 0b00 got $capTag " +
+            f"(word=0x$capWord%08x)"
+        )
+        assert(
+          capSda == 1,
+          s"[caseCaptureRunOfRecessiveBits] CAPTURE[$i] sda: expected 1 got $capSda " +
+            f"(word=0x$capWord%08x)"
+        )
+      }
+
+      println(s"[caseCaptureRunOfRecessiveBits] PASS ($n CAPTUREs landed)")
+    }
+  }
+
+  // --------------------------------------------------------------------------
   // Case 7c: WIRE capture writes R7 observably via REG_ZERO_FLAG +
   // BRANCH_ON REG_ZERO (regression: pre-Phase-F engines silently dropped
   // R7 writes from WIRE captures).
@@ -1032,10 +1236,12 @@ object EnginePipelineSim {
     caseProgramLengthZero()
     caseEmitBitDrivesSclLow()
     caseCaptureRecordToRing()
+    caseCaptureRecordToRingRecessive()
+    caseCaptureRunOfRecessiveBits()
     caseCaptureWritesR7Observable()
     caseBranchOnAlwaysSkip()
     caseMarkBasic()
     caseLoadTimingBasic()
-    println("EnginePipelineSim: all 12 cases passed")
+    println("EnginePipelineSim: all 14 cases passed")
   }
 }
