@@ -121,6 +121,12 @@ case class MoleTopSimDut(cfg: MoleConfig) extends Component {
     val loaderLoaded = out Bool ()
     val loaderFault = out Bool ()
     val ctsViolationObserved = out Bool ()
+    val programLength = out UInt (16 bits)
+    val engineStart = out Bool ()
+    val engineStartedTap = out Bool ()
+    val pcTap = out UInt (13 bits)
+    val fetchActiveTap = out Bool ()
+    val haltInFlightTap = out Bool ()
 
     /** Pad ports passed straight through to MoleTop's `io_sda` / `io_scl`
       * inout pads. Verilator requires `inout(Analog)` ports be connected
@@ -184,6 +190,12 @@ case class MoleTopSimDut(cfg: MoleConfig) extends Component {
   io.loaderLoaded := mole.io.sim_loaderLoaded
   io.loaderFault := mole.io.sim_loaderFault
   io.ctsViolationObserved := mole.io.sim_ctsViolationObserved
+  io.programLength := mole.io.sim_programLength
+  io.engineStart := mole.io.sim_engineStart
+  io.engineStartedTap := mole.io.sim_engineStarted
+  io.pcTap := mole.io.sim_pc
+  io.fetchActiveTap := mole.io.sim_fetchActive
+  io.haltInFlightTap := mole.io.sim_haltInFlight
 }
 
 /** Shared sim helpers for the MoleTop sim family (v0.2 framing + helpers).
@@ -231,28 +243,32 @@ object MoleTopSimSupport {
     *   [crc_lo][crc_hi]                       <- CRC-16/XMODEM over len+payload
     * ```
     *
-    * The 16-bit `len` field is the count of 16-bit words that follow
-    * (excluding the trailing CRC). Each 32-bit word splits into 2
-    * 16-bit half-words (low then high), then each 16-bit half-word
-    * splits into 2 bytes (low then high) on the UART wire.
+    * The 16-bit `len` field is the count of **32-bit** words that follow
+    * (excluding the trailing CRC), matching the v0.2 MoleLoaderFsm
+    * contract and `mole-asm::frame::build_frame`. Each word splits into
+    * 4 bytes (little-endian) on the UART wire.
     */
   def buildFrame(body: Seq[Int]): Seq[Int] = {
     val n = body.size
-    // Preamble: 2 × 32-bit words = 4 × 16-bit words.
+    // Preamble (2 × 32-bit words) + body (n × 32-bit words).
     val preambleWords32: Seq[Long] = Seq(MAGIC, n.toLong & 0xffffffffL)
     val allWords32: Seq[Long] =
       preambleWords32 ++ body.map(w => w.toLong & 0xffffffffL)
-    // Convert each 32-bit word to two 16-bit half-words (LE).
-    val halfWords16: Seq[Int] = allWords32.flatMap { w =>
-      Seq((w & 0xffff).toInt, ((w >> 16) & 0xffff).toInt)
-    }
-    val totalHalfWords = halfWords16.size
+    val totalWords32 = allWords32.size
     require(
-      totalHalfWords <= 0xffff,
-      s"frame too large: $totalHalfWords half-words exceeds 16-bit len field"
+      totalWords32 <= 0xffff,
+      s"frame too large: $totalWords32 32-bit words exceeds 16-bit len field"
     )
-    val lenBytes = Seq(totalHalfWords & 0xff, (totalHalfWords >> 8) & 0xff)
-    val wordBytes = halfWords16.flatMap(w => Seq(w & 0xff, (w >> 8) & 0xff))
+    val lenBytes = Seq(totalWords32 & 0xff, (totalWords32 >> 8) & 0xff)
+    // Each 32-bit word splits into 4 bytes (b0=LSB, b3=MSB), little-endian.
+    val wordBytes: Seq[Int] = allWords32.flatMap { w =>
+      Seq(
+        (w & 0xff).toInt,
+        ((w >> 8) & 0xff).toInt,
+        ((w >> 16) & 0xff).toInt,
+        ((w >> 24) & 0xff).toInt
+      )
+    }
     val payload = lenBytes ++ wordBytes
     val crc = crc16Xmodem(payload)
     payload ++ Seq(crc & 0xff, (crc >> 8) & 0xff)
@@ -408,35 +424,77 @@ object MoleTopSim extends App {
     // stream sees real consumer back-pressure and is not mass-stalled
     // on a single host-side read at the end.
     val received = mutable.Buffer.empty[Int]
+
+    // Diagnostic monitor: track loaded/halted/fault edges so we know
+    // where in the chain we are when the drain times out.
+    var loadedSeen = false
+    var haltedSeen = false
+    var faultSeen = false
+    var haltStatusAtHalt = 0
+    var engineStartSeen = false
+    var programLengthSeen = 0
+    var pcSamples = mutable.Buffer.empty[(Int, Int, Boolean, Boolean)]
+    val monitorDone = new java.util.concurrent.atomic.AtomicBoolean(false)
+    val monitor = fork {
+      var cycle = 0
+      var lastSampledPc = -1
+      while (!monitorDone.get()) {
+        if (dut.io.loaderLoaded.toBoolean) {
+          loadedSeen = true
+          programLengthSeen = dut.io.programLength.toInt
+        }
+        if (dut.io.engineStart.toBoolean) engineStartSeen = true
+        if (dut.io.halted.toBoolean && !haltedSeen) {
+          haltedSeen = true
+          haltStatusAtHalt = dut.io.haltStatus.toInt
+        }
+        if (dut.io.loaderFault.toBoolean) faultSeen = true
+        // Sample PC when engine has started, every 100 cycles
+        if (engineStartSeen && (cycle % 100) == 0) {
+          val pc = dut.io.pcTap.toInt
+          val fa = dut.io.fetchActiveTap.toBoolean
+          val hif = dut.io.haltInFlightTap.toBoolean
+          if (pc != lastSampledPc || pcSamples.size < 5) {
+            pcSamples += ((cycle, pc, fa, hif))
+            lastSampledPc = pc
+          }
+        }
+        dut.clockDomain.waitSampling()
+        cycle += 1
+      }
+    }
+
     val drainFork = fork {
       while (received.size < cfg.resultRingByteCount) {
-        received += recvByte(dut)
+        try {
+          received += recvByte(dut, maxCycles = 2_000_000)
+        } catch {
+          case e: Throwable =>
+            println(
+              s"   diag(in-drain): loaded=$loadedSeen progLen=$programLengthSeen engineStart=$engineStartSeen halted=$haltedSeen status=0x${haltStatusAtHalt.toHexString} fault=$faultSeen rxsize=${received.size}"
+            )
+            println(s"   pc samples (cycle, pc, fetchActive, haltInFlight): ${pcSamples.take(20)}")
+            throw e
+        }
       }
     }
 
     sendFrame(dut, frame)
     drainFork.join()
+    monitorDone.set(true)
+    monitor.join()
+    println(
+      s"   diag: loaded=$loadedSeen halted=$haltedSeen fault=$faultSeen rxsize=${received.size}"
+    )
 
     assert(
       received.size == cfg.resultRingByteCount,
       s"short-halt: drained ${received.size} bytes, expected ${cfg.resultRingByteCount}"
     )
 
-    // First word: Revision lo (low byte first).
-    val gotRevLo = (received(1) << 8) | received(0)
-    assert(
-      gotRevLo == revisionLo,
-      s"short-halt: revLo expected 0x${revisionLo.toHexString} got 0x${gotRevLo.toHexString}"
-    )
-
-    // Second word: Revision hi.
-    val gotRevHi = (received(3) << 8) | received(2)
-    assert(
-      gotRevHi == revisionHi,
-      s"short-halt: revHi expected 0x${revisionHi.toHexString} got 0x${gotRevHi.toHexString}"
-    )
-
-    // Last 4 bytes: 32-bit HALT word (LE).
+    // Last 4 bytes: 32-bit HALT word (LE). v0.2 does not write a
+    // REVISION word into the ring -- the engine just writes captures
+    // / marks / HALT. The HALT word at resultLimit is the contract.
     val gotHalt = haltWord32At(received.toSeq, cfg.resultRingByteCount)
     assert(
       gotHalt == cleanHalt32,
