@@ -98,6 +98,13 @@ case class MoleTop(
     val sim_loaderLoaded = (!useBlackBox) generate (out Bool ())
     val sim_loaderFault = (!useBlackBox) generate (out Bool ())
     val sim_ctsViolationObserved = (!useBlackBox) generate (out Bool ())
+    // Diagnostic taps for C.11.f debug (TODO: remove once silicon settles).
+    val sim_programLength = (!useBlackBox) generate (out UInt (16 bits))
+    val sim_engineStart = (!useBlackBox) generate (out Bool ())
+    val sim_engineStarted = (!useBlackBox) generate (out Bool ())
+    val sim_pc = (!useBlackBox) generate (out UInt (13 bits))
+    val sim_fetchActive = (!useBlackBox) generate (out Bool ())
+    val sim_haltInFlight = (!useBlackBox) generate (out Bool ())
   }
   noIoPrefix()
 
@@ -232,12 +239,14 @@ case class MoleTop(
 
       val runningState: State = new State {
         whenIsActive {
-          engineStartDrv := !engineStarted
-          when(!engineStarted && !pipeline.io.halted) {
-            // Engine has started (left idle).
-          }
-          // Once engineStart asserted, track that we started.
-          when(engineStartDrv) {
+          // engineStart is a LEVEL signal to the pipeline (consumed in
+          // EnginePipeline.fetchActive), not a pulse. Drive it True for
+          // the entire runningState lifetime so F1 keeps issuing
+          // fetches until the engine halts. The `engineStarted` Reg
+          // tracks whether we've started (used elsewhere); the actual
+          // drive is just "we're in runningState".
+          engineStartDrv := True
+          when(!engineStarted) {
             engineStarted := True
           }
           when(engineStarted && pipeline.io.halted) {
@@ -295,7 +304,7 @@ case class MoleTop(
     pipeline.io.spramResp.payload := spram.io.readResp.payload
     drainer.io.readResp.valid :=
       spram.io.readResp.valid && drainerOwnsRead
-    drainer.io.readResp.payload := spram.io.readResp.payload.resize(16 bits)
+    drainer.io.readResp.payload := spram.io.readResp.payload
 
     // ---- Loader ↔ UART RX --------------------------------------------------
 
@@ -366,6 +375,12 @@ case class MoleTop(
       io.sim_loaderLoaded := loader.io.loaded
       io.sim_loaderFault := loader.io.fault
       io.sim_ctsViolationObserved := ctsViolationObservedReg
+      io.sim_programLength := loader.io.programLength.resize(16 bits)
+      io.sim_engineStart := engineStartDrv
+      io.sim_engineStarted := engineStarted
+      io.sim_pc := pipeline.io.simPc.resize(13 bits)
+      io.sim_fetchActive := pipeline.io.simFetchActive
+      io.sim_haltInFlight := pipeline.io.simHaltInFlight
     }
   }
 }
