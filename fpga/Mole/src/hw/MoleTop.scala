@@ -13,13 +13,14 @@ import spinal.lib.fsm._
   *     24 MHz; v0.2 doubles the engine clock.
   *   - [[EnginePipeline]] replaces the v0 monolithic [[BitCycleEngineCore]]
   *     (which is stashed under `src/attic/`).
-  *   - [[LoaderWidthAdapter]] bridges the v0 [[MoleLoaderFsm]] (16-bit output)
-  *     to the v0.2 32-bit [[SpramController]].
+  *   - [[MoleLoaderFsm]] emits 32-bit writes directly into [[SpramController]]
+  *     (v0.2 ISA is 32-bit; the v0-era [[LoaderWidthAdapter]] is retired).
   *   - Loader and drainer stay in `engineCd` for C.6. The CDC to `uartCd` (via
   *     `StreamFifoCC`) lands in C.10.
   *   - UART is still in `engineCd` for C.6 (same as v0). `uartCd` plumbing
   *     lands in C.10.
-  *   - `programLength` comes from [[LoaderWidthAdapter]].programLength32.
+  *   - `programLength` comes from [[MoleLoaderFsm]].`programLength` (32-bit
+  *     word count latched at `lenHi`).
   *
   * ==Reset bridge==
   *
@@ -69,11 +70,11 @@ case class MoleTop(
   val idleGapCycles: Int = 20 * uartCfg.ticksPerBit
 
   // SPRAM address width derived from cfg directly (not from `pipeline`).
-  // `LoaderWidthAdapter` and `SpramController` are constructed before
-  // `pipeline` inside the engine ClockingArea; routing this through
-  // `pipeline.spramAddrWidth` would dereference a not-yet-assigned field
-  // (SpinalHDL elaborates Component bodies eagerly). The pipeline computes
-  // the same value from the same inputs — see EnginePipeline.scala:233.
+  // `SpramController` is constructed before `pipeline` inside the engine
+  // ClockingArea; routing this through `pipeline.spramAddrWidth` would
+  // dereference a not-yet-assigned field (SpinalHDL elaborates Component
+  // bodies eagerly). The pipeline computes the same value from the same
+  // inputs — see EnginePipeline.scala:233.
   val spramAddrWidth: Int = log2Up(
     cfg.programWordCount + (cfg.resultRingByteCount + 3) / 4
   )
@@ -164,13 +165,10 @@ case class MoleTop(
     val spram = SpramController(cfg, useBlackBox = useBlackBox)
 
     val loader = MoleLoaderFsm(
-      programWordCount =
-        cfg.programWordCount * 2, // 16-bit words = 2× 32-bit words
+      programWordCount = cfg.programWordCount, // 32-bit word count (v0.2 ISA)
       addrWidth = spram.addrWidth,
       idleGapCycles = idleGapCycles
     )
-
-    val loaderAdapter = LoaderWidthAdapter(spramAddrWidth)
 
     val pipeline = EnginePipeline(cfg)
 
@@ -259,18 +257,15 @@ case class MoleTop(
     }
 
     pipeline.io.engineStart := engineStartDrv
-    pipeline.io.programLength := loaderAdapter.io.programLength32
+    pipeline.io.programLength := loader.io.programLength
       .resize(pipeline.programLenWidth bits)
     drainer.io.triggerDrain := drainTriggerComb
     loader.io.acceptRx := acceptRxComb
 
-    // ---- Loader width adapter: 16-bit → 32-bit ----------------------------
-    loaderAdapter.io.loaderIn <> loader.io.programWrite
-
     // ---- SPRAM port wiring -------------------------------------------------
 
-    // Loader writes: via the width adapter.
-    spram.io.loaderWrite <> loaderAdapter.io.spramOut
+    // Loader writes: v0.2 loader emits 32-bit words directly to SPRAM.
+    spram.io.loaderWrite <> loader.io.programWrite
 
     // Engine result ring writes.
     spram.io.resultWrite <> pipeline.io.ringWrite
@@ -329,6 +324,18 @@ case class MoleTop(
     uartTx.io.data << drainer.io.txData.haltWhen(rtsDeasserted)
 
     // ---- LEDs --------------------------------------------------------------
+    //
+    // The iCEbreaker on-board RGB LEDs (D1/D2/D3) are wired anode-to-3.3V
+    // with the FPGA pin as the cathode. They are **active-low**: drive
+    // pin LOW to light the LED, drive pin HIGH to turn it off. Every
+    // `io_led*` assignment below therefore wraps the user-facing
+    // "LED should be on" expression in `!(...)` so the pin polarity is
+    // correct on real silicon. v0 silicon-validated this by accident:
+    // v0's `io_ledG := !engine.done` produced pin HIGH at boot
+    // (engine.done=False) which read as "LED off"; v0.2's new
+    // `engineStarted && !halted` form evaluates False at boot, which
+    // without the inversion lit ALL three LEDs out of reset because
+    // every other driver also defaults to 0 = pin LOW = LED on.
 
     // Red: pulse-stretched loader fault OR CTS violation.
     val faultStretchWidth = 22
@@ -339,18 +346,18 @@ case class MoleTop(
     } elsewhen (faultCounter =/= 0) {
       faultCounter := faultCounter - 1
     }
-    io.io_ledR := (faultCounter =/= 0) || ctsViolationObservedReg
+    io.io_ledR := !((faultCounter =/= 0) || ctsViolationObservedReg)
 
     // Green: engine is running (not halted after a start).
-    io.io_ledG := engineStarted && !pipeline.io.halted
+    io.io_ledG := !(engineStarted && !pipeline.io.halted)
 
-    // Blue: heartbeat while idle.
+    // Blue: heartbeat while idle (engine halted OR not yet started).
     val heartbeatWidth = 26
     val heartbeatCounter = Reg(UInt(heartbeatWidth bits)) init 0
     when(pipeline.io.halted || !engineStarted) {
       heartbeatCounter := heartbeatCounter + 1
     }
-    io.io_ledB := heartbeatCounter.msb && pipeline.io.halted
+    io.io_ledB := !(heartbeatCounter.msb && (pipeline.io.halted || !engineStarted))
 
     // ---- Sim-only debug taps -----------------------------------------------
     if (!useBlackBox) {

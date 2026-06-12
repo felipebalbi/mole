@@ -462,8 +462,28 @@ case class EnginePipeline(cfg: MoleConfig) extends Component {
 
   // --------------------------------------------------------------------------
   // PC register (owned by F1)
+  //
+  // **C.11.f fix:** PC starts at `Instruction.PREAMBLE_WORDS` (= 2) so the
+  // engine skips the v0.2 frame preamble (MAGIC + body_len) which the
+  // MoleLoaderFsm + LoaderWidthAdapter write into SPRAM[0..1] verbatim.
+  // Without this, the first fetch lands on `MAGIC = 0x0002_4D4C` whose
+  // upper-6-bit opcode field decodes as `EMIT_BIT_IMM` (group=WIRE,
+  // sub=0x0); the reserved-bit traps are not strict enough to catch the
+  // out-of-distribution bit pattern, so the engine treats it as a valid
+  // wire-bit emission, advances to PC=1 (body_len = 0x0000_0002 = another
+  // bit emit), then PC=2, PC=3 (actual body), then PC reaches
+  // `programLength` and `fetchActive` goes False without any HALT having
+  // been executed. The engine sits idle but `haltedReg` never asserts and
+  // the drainer never fires. Starting PC at PREAMBLE_WORDS bypasses the
+  // entire path: SPRAM[0..1] hold the preamble (unused), SPRAM[2..N+1]
+  // hold body[0..N-1], engine fetches body[0] first as expected.
+  //
+  // This is option (a) from the C.11.f sub-task in `fpga/Mole/TODO.md`.
+  // Options (b) `programOffset` IO and (c) loader-side preamble strip
+  // are more invasive and were rejected as out of scope while the HDL is
+  // otherwise frozen on branch v0.2.
   // --------------------------------------------------------------------------
-  val pcReg = Reg(UInt(progAddrWidth bits)) init 0
+  val pcReg = Reg(UInt(progAddrWidth bits)) init Instruction.PREAMBLE_WORDS
 
   // fetchActive: engine is running, not halted, in-range, AND no
   // HALT/trap is in flight downstream.
