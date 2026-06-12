@@ -57,12 +57,22 @@ object MoleLoaderFsmSim extends App {
     crc & 0xffff
   }
 
-  // Assemble a complete frame: len_lo, len_hi, word bytes (lo, hi per
-  // word), crc_lo, crc_hi.
+  // Assemble a complete frame for the **v0.2 loader** (32-bit words):
+  //   len_lo, len_hi,                           ← len = 32-bit word count
+  //   word0_b0, word0_b1, word0_b2, word0_b3,   ← each word = 4 bytes LE
+  //   ...
+  //   crc_lo, crc_hi                            ← CRC-16/XMODEM over len+body
   def buildFrame(words: Seq[Int]): Seq[Int] = {
     val n = words.size
     val lenBytes = Seq(n & 0xff, (n >> 8) & 0xff)
-    val wordBytes = words.flatMap(w => Seq(w & 0xff, (w >> 8) & 0xff))
+    val wordBytes = words.flatMap { w =>
+      Seq(
+        w & 0xff,
+        (w >> 8) & 0xff,
+        (w >> 16) & 0xff,
+        (w >> 24) & 0xff
+      )
+    }
     val payload = lenBytes ++ wordBytes
     val crc = crc16Xmodem(payload)
     payload ++ Seq(crc & 0xff, (crc >> 8) & 0xff)
