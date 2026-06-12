@@ -149,11 +149,33 @@ case class MoleIoBufUp5k(useBlackBox: Boolean = true) extends Component {
   * don't-care)
   */
 class SB_IO extends BlackBox {
-  // 6'b101000 = PIN_OUTPUT_TRISTATE | PIN_INPUT (unregistered).
-  // Encoding cross-referenced against the icestorm wiki "SB_IO Primitive"
-  // page: bits[5:2] = output type (1010 = tristate), bits[1:0] = input
-  // type (00 = live / unregistered).
-  addGeneric("PIN_TYPE", B"101000")
+  // 6'b101001 = PIN_OUTPUT_TRISTATE | PIN_INPUT_NONE (live unregistered).
+  //
+  // Encoding cross-referenced against the icestorm `cells_sim.v` SB_IO
+  // module (`techlibs/ice40/cells_sim.v` in yosys): the input mux is
+  //
+  //     if (!PIN_TYPE[1] || !LATCH_INPUT_VALUE)
+  //         din_0 = PIN_TYPE[0] ? PACKAGE_PIN : din_q_0;
+  //
+  // where `din_q_0` is `PACKAGE_PIN` registered on the rising edge of
+  // `INPUT_CLK`. PIN_TYPE[0] is the live-vs-registered selector and
+  // PIN_TYPE[1] is the latch-enable. So:
+  //
+  //     PIN_TYPE[1:0] = 00  -> din_0 = din_q_0  (registered; needs INPUT_CLK)
+  //     PIN_TYPE[1:0] = 01  -> din_0 = PACKAGE_PIN  (live unregistered)  <-- want
+  //     PIN_TYPE[1:0] = 10  -> latch + registered fallback
+  //     PIN_TYPE[1:0] = 11  -> latch + live
+  //
+  // Mole's bus observer needs a live unregistered input because we
+  // synchronise into the fabric clock domain at the engine boundary
+  // (`BusObserver`'s 2-FF chain), not at the pad. We also do not drive
+  // `INPUT_CLK` from anywhere, so the registered (00) configuration
+  // would leave `D_IN_0` stuck at its reset value forever --- the
+  // engine would never read SDA / SCL as anything other than low.
+  //
+  // Output side (PIN_TYPE[5:2] = 1010 = OUTPUT_TRISTATE) is unchanged
+  // and works correctly: OUTPUT_ENABLE-gated drive on D_OUT_0.
+  addGeneric("PIN_TYPE", B"101001")
 
   val io = new Bundle {
     val PACKAGE_PIN = inout(Analog(Bool()))
