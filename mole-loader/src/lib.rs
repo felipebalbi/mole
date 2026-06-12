@@ -40,14 +40,13 @@
 //! let _scanned = verify_program(&body).unwrap();
 //! assert_eq!(body.len(), 1); // one body word (HALT)
 //!
-//! // Post-run: decode a hand-built 4-word "REVISION + HALT" ring.
-//! // The HALT word is 32-bit LE split across two 16-bit ring slots.
-//! // halt_word = 0xC000_0000 (tag=11 at [31:30], status=0, rest 0).
+//! // Post-run: decode a hand-built 2-word "REVISION + HALT" ring.
+//! // REVISION word (1.0.0x1234) = (1<<24)|(0<<16)|0x1234 = 0x0100_1234.
+//! // HALT word (status=0) = 0xC000_0000 (tag=11 at [31:30], rest 0).
+//! // Both serialised as 4 LE bytes per 32-bit ring slot (spec §11).
 //! let ring = &[
-//!     0x34, 0x12, // REVISION lo = 0x1234 (= patch)
-//!     0x00, 0x01, // REVISION hi = 0x0100 (major=1, minor=0)
-//!     0x00, 0x00, // HALT lo half = 0x0000
-//!     0x00, 0xC0, // HALT hi half = 0xC000 (tag=11 at bits [15:14])
+//!     0x34, 0x12, 0x00, 0x01, // REVISION = 0x0100_1234 (major=1,minor=0,patch=0x1234)
+//!     0x00, 0x00, 0x00, 0xC0, // HALT     = 0xC000_0000 (tag=11, status=0)
 //! ];
 //! let decoded = decode_ring(ring).unwrap();
 //! assert_eq!(

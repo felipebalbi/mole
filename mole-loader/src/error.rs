@@ -65,9 +65,9 @@ pub enum LoaderError {
 /// valid word vector lands here.
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
 pub enum FrameError {
-    /// Frame is shorter than the minimum (4B magic + 4B len + 4B body[0]
-    /// + 2B CRC = 14 bytes). Anything longer than 14 but still
-    /// malformed lands in [`FrameError::LengthMismatch`] or
+    /// Frame is shorter than the minimum: 4B magic, 4B length, 4B for the
+    /// first body word, and 2B CRC = 14 bytes total. Anything longer than
+    /// 14 but still malformed lands in [`FrameError::LengthMismatch`] or
     /// [`FrameError::LengthOutOfRange`] instead.
     #[error("frame too short: need at least 14 bytes (preamble + 1 body word + CRC), got {got}")]
     TooShort {
@@ -150,24 +150,29 @@ pub enum FrameError {
 /// [`crate::ring::decode_ring`].
 ///
 /// The result ring's wire format is documented in
-/// `fpga/Mole/src/hw/BitCycleEngineCore.scala` (file header). Tags
-/// are `00=CAPTURE`, `01=reserved`, `10=MARK`, `11=HALT`. Ring words
-/// are 16 bits wide (the engine's result ring is 16-bit-addressed),
-/// independent of the 32-bit program-memory instruction width.
+/// `fpga/Mole/src/hw/EnginePipeline.scala` (ring write paths) and in
+/// the host-facing `docs/MOLE-0.2-SPEC.md` §11. Tags are
+/// `00=CAPTURE`, `01=reserved`, `10=MARK`, `11=HALT`. Ring slots are
+/// 32 bits wide (the result ring is 32-bit-addressed, drained as 4
+/// little-endian bytes per slot).
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
 pub enum RingError {
-    /// Buffer is shorter than the minimum legal ring (REVISION lo +
-    /// REVISION hi + HALT = 3 words = 6 bytes).
-    #[error("ring too short: need at least 6 bytes (revision + halt), got {got}")]
+    /// Buffer is shorter than the minimum legal ring (REVISION +
+    /// HALT = 2 × 32-bit words = 8 bytes).
+    #[error("ring too short: need at least 8 bytes (revision + halt), got {got}")]
     TooShort {
         /// Actual byte count of the truncated ring.
         got: usize,
     },
 
-    /// Ring byte count is odd; rings are sequences of 16-bit words.
-    #[error("ring byte count {got} is odd; rings must be a whole number of 16-bit words")]
+    /// Ring byte count is not a multiple of 4; rings are sequences
+    /// of 32-bit words.
+    #[error(
+        "ring byte count {got} is not a multiple of 4; rings must be a whole \
+         number of 32-bit words"
+    )]
     OddByteCount {
-        /// The offending odd byte count.
+        /// The offending byte count.
         got: usize,
     },
 
@@ -179,26 +184,26 @@ pub enum RingError {
     /// or the engine never reached `Halt` --- the tail slot is
     /// reserved exclusively for the HALT word.
     #[error(
-        "ring tail word {word:#06x} does not have HALT tag \
-         (expected high 2 bits = 0b11)"
+        "ring tail word {word:#010x} does not have HALT tag \
+         (expected [31:30] = 0b11)"
     )]
     NoHaltAtTail {
-        /// The word that was found in the tail slot.
-        word: u16,
+        /// The 32-bit word that was found in the tail slot.
+        word: u32,
     },
 
     /// A MARK record header (tag `0b10`) appeared without the two
     /// timestamp words that must follow it before the HALT word.
     #[error(
         "ring record at word offset {offset_words}: MARK header without two \
-         trailing timestamp words (only {remaining_words} word(s) left \
+         trailing timestamp words (only {remaining_words} 32-bit word(s) left \
          before HALT)"
     )]
     TruncatedMark {
-        /// Word offset (from start of ring) of the MARK header.
+        /// 32-bit-word offset (from start of ring) of the MARK header.
         offset_words: usize,
-        /// How many words were left between the MARK header and the
-        /// HALT terminator.
+        /// How many 32-bit words were left between the MARK header
+        /// and the HALT terminator.
         remaining_words: usize,
     },
 

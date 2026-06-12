@@ -1,80 +1,78 @@
 //! Result-ring decoder.
 //!
-//! After a Mole program halts, the engine drains a fixed-size
+//! After a Mole program halts, the engine drains a fixed-size byte
 //! buffer (`MoleConfig.resultRingByteCount` bytes, Verde default
-//! 8192 = 4096 16-bit words) back to the host. This module turns
+//! 8192 = **2048 32-bit words**) back to the host. This module turns
 //! that raw byte buffer into typed Rust values.
 //!
-//! # Ring layout
-//!
-//! The on-engine layout is documented in the file header of
-//! `fpga/Mole/src/hw/BitCycleEngineCore.scala`:
+//! # Ring layout (spec §11.1)
 //!
 //! ```text
-//! word[0]              REVISION lo  (= patch[15:0])
-//! word[1]              REVISION hi  (= major[15:8] | minor[7:0])
-//! word[2]..word[N-3]   record stream (CAPTURE / MARK) then unused
-//!                      slots holding undefined contents
-//! word[N-2..N-1]       HALT terminator (32-bit LE, tag = 0b11 at
-//!                      bits [31:30]) serialised as two 16-bit LE
-//!                      ring words
+//! word[0]                              REVISION word
+//! word[1] .. word[resultLimit-1]       record stream (CAPTURE / MARK)
+//!                                      followed by uninitialised SPRAM
+//!                                      ("trailing garbage", see below)
+//! word[resultLimit] (= last word)      HALT terminator
 //! ```
 //!
-//! Where `N = ring_bytes / 2`. The HALT slot occupies the last two
-//! 16-bit ring positions (`word[N-2]` lo-half, `word[N-1]` hi-half).
+//! Where `resultLimit = (resultRingByteCount / 4) - 1` (the index of
+//! the last 32-bit ring word). Every record is a whole number of
+//! 32-bit words, drained as 4 little-endian bytes per word (b0 = LSB
+//! first). The result ring is **not** half-word grained; the only
+//! 16-bit-wide quantity in the host-link protocol is the CRC-16/XMODEM
+//! frame checksum.
 //!
-//! ## 32-bit HALT word (§11)
+//! ## 32-bit record words
+//!
+//! | Tag at `[31:30]` | Record   | Width  | Body                                       |
+//! |------------------|----------|--------|--------------------------------------------|
+//! | `0b00`           | CAPTURE  | 1 word | sda at `[0]`, `[29:1]` reserved-zero       |
+//! | `0b01`           | reserved | -      | never emitted by a current engine          |
+//! | `0b10`           | MARK     | 3 word | header (label) + ts_lo + ts_hi             |
+//! | `0b11`           | HALT     | 1 word | overflow/mismatch/status, at `resultLimit` |
+//!
+//! HALT word layout (spec §11.5):
 //!
 //! ```text
-//! [31:30] tag        = 0b11  (HALT record; identifies this word
-//!                             in result ring)
+//! [31:30] tag        = 0b11
 //! [29]    overflow   (sticky overflow latch)
 //! [28]    mismatch   (snapshot of MISMATCH_FLAG at halt entry)
 //! [27:23] status     (5 bits, 0x00..0x1F)
 //! [22: 0] reserved   (must be 0; loader verifies)
 //! ```
 //!
-//! On the wire the 32-bit HALT word is split into two adjacent
-//! 16-bit ring slots: the low half at `word[N-2]`, the high half
-//! at `word[N-1]`, both little-endian. Combine as
-//! `(word_hi as u32) << 16 | (word_lo as u32)`.
-//!
 //! ## The "trailing garbage" hazard
 //!
-//! The engine only writes record-slot words it actually uses. Slots
-//! between the last record and the HALT terminator are left in
-//! whatever state the SPRAM came up in. On Verilator they are zero;
-//! on real silicon they are undefined.
+//! The engine writes only the record-stream slots it actually uses.
+//! Slots between the last real record and `word[resultLimit]` hold
+//! whatever the SPRAM came up in. On Verilator they are zero; on real
+//! silicon they are undefined.
 //!
-//! That means [`decode_ring`] cannot tell *exactly* where the
-//! record stream genuinely ends. The decoder uses the simplest
-//! heuristic available: it walks from word offset 2 forward and
-//! stops at the first word whose tag is not a legal record tag
-//! (`0b01` reserved, or `0b11` HALT seen before the tail slot).
-//! Both signal "engine stopped writing here, garbage begins"
-//! reliably enough for real-silicon use, and the HALT integrity
-//! check at the tail confirms we didn't simply lose framing.
+//! That means [`decode_ring`] cannot tell *exactly* where the record
+//! stream genuinely ends. The decoder walks from word offset 1
+//! (post-REVISION) forward and stops at the first word whose tag is
+//! not a legal record tag (`0b01` reserved, or `0b11` HALT seen before
+//! the tail slot). Both signal "engine stopped writing here, garbage
+//! begins". The HALT integrity check at the tail confirms framing.
 //!
 //! Limitation: a garbage word that happens to carry tag `0b00`
-//! (CAPTURE) is electrically indistinguishable from a real
-//! capture --- the decoder will emit it as `Capture { sda: bit0 }`.
-//! A garbage word that happens to carry tag `0b10` (MARK) plus
-//! two more garbage words after it will look like a real MARK
-//! record with arbitrary label and timestamp. The only reliable
-//! fix is for the engine to either zero the gap at HALT entry or
-//! emit an end-of-stream sentinel record; tracked in the engine
-//! roadmap.
+//! (CAPTURE) is indistinguishable from a real capture --- the decoder
+//! will emit it as `Capture { sda: bit0 }`. A garbage word that
+//! happens to carry tag `0b10` (MARK) plus two more garbage words
+//! after it will look like a real MARK record with arbitrary label
+//! and timestamp. The only reliable fix is for the engine to either
+//! zero the gap at HALT entry or emit an end-of-stream sentinel
+//! record; tracked in the engine roadmap.
 //!
-//! [`DecodedRing::trailing_garbage_words`] reports how many
-//! record slots sat between where the decoder stopped and the
-//! HALT word, so callers can warn the user when the value is
-//! non-zero.
+//! [`DecodedRing::trailing_garbage_words`] reports how many record
+//! slots sat between where the decoder stopped and the HALT word, so
+//! callers can warn the user when the value is non-zero.
 
 use crate::error::RingError;
-use mole_abi::{halt, record_tag, record_width_words, revision};
+use mole_abi::{capture, halt, mark, record_tag, record_width_words, result_ring};
 
-/// REVISION record reported by the engine in the first two ring
-/// words. Format per `fpga/Mole/src/hw/Revision.scala`:
+/// REVISION record reported by the engine in `word[0]` of every ring.
+/// Format per `fpga/Mole/src/hw/Revision.scala` and spec §11.2:
 ///
 /// ```text
 /// [31:24] = major
@@ -92,15 +90,10 @@ pub struct Revision {
 }
 
 impl Revision {
-    /// Decode a [`Revision`] from the two-word `word_lo` / `word_hi`
-    /// pair the engine writes at the head of every ring.
-    ///
-    /// `word_lo` is the lower 16 bits of the 32-bit revision word
-    /// (i.e. the patch field); `word_hi` is the upper 16 bits
-    /// (major and minor packed `[15:8]` / `[7:0]`).
-    pub fn from_words(word_lo: u16, word_hi: u16) -> Self {
-        let word = ((word_hi as u32) << 16) | (word_lo as u32);
-        let (major, minor, patch) = revision::unpack(word);
+    /// Decode a [`Revision`] from the 32-bit REVISION word at
+    /// `word[0]` of every result ring.
+    pub fn from_word(word: u32) -> Self {
+        let (major, minor, patch) = mole_abi::revision::unpack(word);
         Self {
             major,
             minor,
@@ -174,27 +167,30 @@ impl std::str::FromStr for Revision {
 /// surfaced separately as [`DecodedRing::halt`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Record {
-    /// CAPTURE record (1 word, tag `0b00`). Carries the SDA bit the
-    /// engine sampled at the request point.
+    /// CAPTURE record (1 word, tag `0b00`, spec §11.3). Carries the
+    /// SDA bit the engine sampled at the request point.
     Capture {
         /// The captured SDA value.
         sda: bool,
     },
-    /// MARK record (3 words, tag `0b10`). Carries the 8-bit caller
-    /// label and the 32-bit fabric-cycle timestamp latched at decode.
+    /// MARK record (3 words, tag `0b10`, spec §11.4). Carries the
+    /// 14-bit caller label and the 32-bit fabric-cycle timestamp
+    /// latched at decode.
     Mark {
-        /// `[7:0]` of word 0 --- caller-supplied label.
-        label: u8,
-        /// Words 1 and 2 packed `(hi << 16) | lo` --- free-running
-        /// 32-bit counter, reset to 0 on every `io.start`. Wraps at
-        /// ~179 s @ 24 MHz.
+        /// `[13:0]` of word 0 --- caller-supplied 14-bit label.
+        label: u16,
+        /// Words 1 and 2: low 16 bits of each carry the timestamp
+        /// halves; high 16 bits of each are reserved-zero. Combined
+        /// as `(ts_hi << 16) | ts_lo` to give a 32-bit free-running
+        /// counter (resets on every `io.start`, wraps at ~179 s @
+        /// 24 MHz).
         timestamp: u32,
     },
 }
 
-/// Decoded HALT terminator.
+/// Decoded HALT terminator (spec §11.5).
 ///
-/// The HALT word's v0.2 bit layout (§11 lines 1458-1492):
+/// The HALT word's v0.2 bit layout:
 ///
 /// ```text
 /// [31:30] = 0b11     (tag = HALT)
@@ -231,13 +227,13 @@ impl HaltStatus {
 /// Fully decoded ring buffer.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DecodedRing {
-    /// REVISION word reported by the engine.
+    /// REVISION word reported by the engine at `word[0]`.
     pub revision: Revision,
     /// Record stream (CAPTURE / MARK), in the order written.
     pub records: Vec<Record>,
     /// Terminator at the tail slot.
     pub halt: HaltStatus,
-    /// Number of unused 16-bit slots between the last record we
+    /// Number of unused 32-bit slots between the last record we
     /// decoded and the HALT terminator. Always 0 on a perfectly
     /// utilised ring; positive when the engine emitted fewer
     /// records than the ring can hold. See the module-level
@@ -254,8 +250,8 @@ pub struct DecodedRing {
 ///
 /// **This function does *not* enforce that `bytes.len()` equals the
 /// configured ring size.** It happily decodes any buffer whose length
-/// is a non-zero even number ≥ 8 and whose last two words form a
-/// valid HALT word. For production reads --- where you know exactly
+/// is a non-zero multiple of 4 and ≥ 8 bytes and whose last word forms
+/// a valid HALT word. For production reads --- where you know exactly
 /// how many bytes you asked the engine to drain --- use
 /// [`decode_ring_strict`] instead, which rejects any
 /// length-vs-expected mismatch before parsing. The lax form is kept
@@ -263,11 +259,10 @@ pub struct DecodedRing {
 ///
 /// # Ring minimum size
 ///
-/// Minimum: 8 bytes = 4 × 16-bit words:
-/// - word[0]: REVISION lo
-/// - word[1]: REVISION hi
-/// - word[2]: HALT lo (low 16 bits of 32-bit HALT word)
-/// - word[3]: HALT hi (high 16 bits of 32-bit HALT word)
+/// Minimum: 8 bytes = 2 × 32-bit words:
+/// - word[0]: REVISION
+/// - word[1]: HALT (= `word[resultLimit]` when there is no record
+///   stream space, i.e. `resultLimit = 1`)
 ///
 /// # Errors
 ///
@@ -276,35 +271,28 @@ pub struct DecodedRing {
 /// drainer returned the wrong byte count or the serial link dropped
 /// bytes.
 pub fn decode_ring(bytes: &[u8]) -> Result<DecodedRing, RingError> {
-    if bytes.len() % 2 != 0 {
+    if bytes.len() % 4 != 0 {
         return Err(RingError::OddByteCount { got: bytes.len() });
     }
-    // Minimum ring: 2 REVISION words + 2 HALT words = 4 × 16-bit = 8 bytes.
+    // Minimum ring: 1 REVISION word + 1 HALT word = 2 × 32-bit = 8 bytes.
     if bytes.len() < 8 {
         return Err(RingError::TooShort { got: bytes.len() });
     }
 
-    let words: Vec<u16> = bytes
-        .chunks_exact(2)
-        .map(|c| u16::from_le_bytes([c[0], c[1]]))
+    let words: Vec<u32> = bytes
+        .chunks_exact(4)
+        .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
         .collect();
     let total_words = words.len();
 
-    // REVISION lives in words 0..=1.
-    let revision = Revision::from_words(words[0], words[1]);
+    // REVISION lives at word[0].
+    let revision = Revision::from_word(words[result_ring::REVISION_OFFSET_WORDS]);
 
-    // HALT occupies the last two 16-bit ring positions. Combine
-    // little-endian: low half at [N-2], high half at [N-1].
-    let halt_lo = words[total_words - 2] as u32;
-    let halt_hi = words[total_words - 1] as u32;
-    let halt_word: u32 = (halt_hi << 16) | halt_lo;
+    // HALT occupies the last 32-bit ring slot.
+    let halt_word = words[total_words - 1];
 
     if (halt_word >> halt::TAG_SHIFT) & halt::TAG_MASK != halt::TAG_HALT {
-        // Report the 16-bit hi-half as the "word" for compatibility
-        // with the error type (NoHaltAtTail stores the tail word).
-        return Err(RingError::NoHaltAtTail {
-            word: words[total_words - 1],
-        });
+        return Err(RingError::NoHaltAtTail { word: halt_word });
     }
     // Reject structurally invalid HALT words first (reserved low 23
     // bits must be zero per INV-WIRE-HALT-RECORD); then reject
@@ -324,19 +312,20 @@ pub fn decode_ring(bytes: &[u8]) -> Result<DecodedRing, RingError> {
     if status == halt::STATUS_RESERVED_LOW || status == halt::STATUS_RESERVED_HIGH {
         return Err(RingError::HaltStatusReserved { status, halt_word });
     }
-    let halt = HaltStatus {
+    let halt_decoded = HaltStatus {
         overflow: (halt_word & (1 << halt::OVERFLOW_BIT)) != 0,
         mismatch: (halt_word & (1 << halt::MISMATCH_BIT)) != 0,
         status,
     };
 
-    // Records walk from word offset 2 up to (but not including) the
-    // first HALT word (word[N-2]). The engine writes a contiguous
-    // record stream starting at offset 2 and stops at whatever
-    // `resultWp` reached when the program halted. Slots from
-    // `resultWp` up to `resultLimit - 3` hold *uninitialised SPRAM*
-    // on real silicon (zero only under Verilator) --- see the
-    // module-level "trailing-garbage hazard" callout.
+    // Records walk from word offset 1 (post-REVISION) up to (but
+    // not including) the HALT word at `word[total_words - 1]`. The
+    // engine writes a contiguous record stream starting at offset 1
+    // and stops at whatever `resultWp` reached when the program
+    // halted. Slots from `resultWp` up to `resultLimit - 1` hold
+    // *uninitialised SPRAM* on real silicon (zero only under
+    // Verilator) --- see the module-level "trailing-garbage hazard"
+    // callout.
     //
     // We therefore stop walking at the first word whose tag is not
     // a legal record tag (`0b01` reserved, or `0b11` HALT mid-
@@ -345,23 +334,16 @@ pub fn decode_ring(bytes: &[u8]) -> Result<DecodedRing, RingError> {
     // `trailing_garbage_words` so callers can warn the user. The
     // HALT integrity check at the tail (above) guarantees we
     // didn't simply lose framing.
-    //
-    // Record-stream walk ends two words before the tail (the two
-    // 16-bit HALT slots are not record data).
-    let record_end_word = total_words - 2; // index of halt_lo slot
-    let mut offset = 2usize;
+    let record_end_word = total_words - 1; // index of HALT slot
+    let mut offset = result_ring::RECORD_STREAM_OFFSET_WORDS;
     let mut records = Vec::new();
     while offset < record_end_word {
         let word = words[offset];
-        // Tags are the top 2 bits of the 16-bit ring word; the
-        // record_tag constants use bits [31:30] of the ABI's 32-bit
-        // representation, so shift down by 14 to get the top 2 bits
-        // of the 16-bit ring word into the low 2 bits for matching.
-        let tag = ((word >> 14) as u32) & record_tag::MASK;
+        let tag = (word >> record_tag::SHIFT) & record_tag::MASK;
         match tag {
             record_tag::CAPTURE => {
                 records.push(Record::Capture {
-                    sda: (word & 1) != 0,
+                    sda: ((word >> capture::SDA_BIT) & 1) != 0,
                 });
                 offset += record_width_words::CAPTURE;
             }
@@ -373,9 +355,13 @@ pub fn decode_ring(bytes: &[u8]) -> Result<DecodedRing, RingError> {
                         remaining_words: remaining,
                     });
                 }
-                let label = (word & 0xFF) as u8;
-                let ts_lo = words[offset + 1] as u32;
-                let ts_hi = words[offset + 2] as u32;
+                let label = ((word >> mark::LABEL_SHIFT) & mark::LABEL_MASK) as u16;
+                // ts_lo and ts_hi each carry their useful bits in
+                // the low 16 of the 32-bit ring word; the high 16
+                // are reserved-zero per spec §11.4. Combine the low
+                // halves into a 32-bit timestamp.
+                let ts_lo = words[offset + 1] & 0xFFFF;
+                let ts_hi = words[offset + 2] & 0xFFFF;
                 let timestamp = (ts_hi << 16) | ts_lo;
                 records.push(Record::Mark { label, timestamp });
                 offset += record_width_words::MARK;
@@ -403,7 +389,7 @@ pub fn decode_ring(bytes: &[u8]) -> Result<DecodedRing, RingError> {
     Ok(DecodedRing {
         revision,
         records,
-        halt,
+        halt: halt_decoded,
         trailing_garbage_words,
     })
 }
@@ -440,36 +426,28 @@ pub fn decode_ring_strict(bytes: &[u8], expected_bytes: usize) -> Result<Decoded
 mod tests {
     use super::*;
 
-    /// Helper: assemble a ring from typed parts.
+    /// Helper: assemble a ring from typed parts. v0.2 32-bit grain.
     ///
-    /// `halt_word` is the 32-bit HALT value; it is split into two
-    /// 16-bit ring slots (lo at `[N-2]`, hi at `[N-1]`).
-    /// `total_words` is the total number of 16-bit ring slots.
-    fn build_ring(
-        revision: (u16, u16),
-        records: &[u16],
-        halt_word: u32,
-        total_words: usize,
-    ) -> Vec<u8> {
-        // Need room for: 2 REVISION + records + (optional gap) + 2 HALT slots.
-        assert!(total_words >= 4 + records.len());
-        let halt_lo = (halt_word & 0xFFFF) as u16;
-        let halt_hi = (halt_word >> 16) as u16;
-        let mut words = Vec::with_capacity(total_words);
-        words.push(revision.0);
-        words.push(revision.1);
+    /// `revision` is the full 32-bit REVISION word at `word[0]`.
+    /// `records` is a slice of 32-bit ring words for the record
+    /// stream (caller supplies the encoding directly).
+    /// `halt_word` is the 32-bit HALT word at `word[total_words - 1]`.
+    /// `total_words` is the total number of 32-bit ring slots.
+    fn build_ring(revision: u32, records: &[u32], halt_word: u32, total_words: usize) -> Vec<u8> {
+        // Need room for: 1 REVISION + records + (optional gap) + 1 HALT slot.
+        assert!(total_words >= 2 + records.len());
+        let mut words: Vec<u32> = Vec::with_capacity(total_words);
+        words.push(revision);
         words.extend_from_slice(records);
         // Fill the gap with zeros (mimics Verilator).
-        while words.len() < total_words - 2 {
-            words.push(0x0000);
+        while words.len() < total_words - 1 {
+            words.push(0u32);
         }
-        words.push(halt_lo);
-        words.push(halt_hi);
+        words.push(halt_word);
         assert_eq!(words.len(), total_words);
-        let mut bytes = Vec::with_capacity(total_words * 2);
+        let mut bytes = Vec::with_capacity(total_words * 4);
         for w in words {
-            bytes.push((w & 0xFF) as u8);
-            bytes.push((w >> 8) as u8);
+            bytes.extend_from_slice(&w.to_le_bytes());
         }
         bytes
     }
@@ -480,12 +458,31 @@ mod tests {
         (halt::TAG_HALT << halt::TAG_SHIFT) | ((status as u32) << halt::STATUS_SHIFT)
     }
 
+    /// Build a CAPTURE record word: tag=0b00 at [31:30], sda at [0],
+    /// [29:1] reserved-zero. Equivalent to engine code at
+    /// `EnginePipeline.scala` (the WIRE mini-FSM's `xWireWriteData`).
+    const fn capture_word(sda: bool) -> u32 {
+        if sda { 1u32 } else { 0u32 }
+    }
+
+    /// Build a MARK header word: tag=0b10 at [31:30], 14-bit label
+    /// at [13:0], [29:14] reserved-zero.
+    const fn mark_header_word(label: u16) -> u32 {
+        (record_tag::MARK << record_tag::SHIFT) | (label as u32 & mark::LABEL_MASK)
+    }
+
+    /// Build a MARK timestamp half-word: low 16 bits of the timestamp
+    /// at [15:0], [31:16] reserved-zero. The engine's MARK ts_lo /
+    /// ts_hi format (spec §11.4).
+    const fn mark_ts_word(half: u16) -> u32 {
+        half as u32
+    }
+
     #[test]
-    fn revision_from_words_field_layout() {
+    fn revision_from_word_field_layout() {
         // major=0x12, minor=0x34, patch=0xABCD
-        // word_hi = (0x12 << 8) | 0x34 = 0x1234
-        // word_lo = 0xABCD
-        let rev = Revision::from_words(0xABCD, 0x1234);
+        let word: u32 = (0x12u32 << 24) | (0x34u32 << 16) | 0xABCD;
+        let rev = Revision::from_word(word);
         assert_eq!(
             rev,
             Revision {
@@ -573,12 +570,11 @@ mod tests {
 
     #[test]
     fn minimum_ring_revision_then_halt_only() {
-        // Exact 4-word ring: REVISION lo + REVISION hi + HALT lo +
-        // HALT hi; no records.
+        // Exact 2-word ring (8 bytes): REVISION + HALT; no records.
         // halt status=0, no overflow, no mismatch:
         // 0xC000_0000 = tag(11) at [31:30], rest 0.
         let halt = halt_word_status(0);
-        let bytes = build_ring((0x0001, 0x0203), &[], halt, 4);
+        let bytes = build_ring(mole_abi::revision::pack(0x02, 0x03, 0x0001), &[], halt, 2);
         let ring = decode_ring(&bytes).unwrap();
         assert_eq!(
             ring.revision,
@@ -603,14 +599,13 @@ mod tests {
     #[test]
     fn capture_records_decode_low_bit() {
         // Two CAPTUREs: sda=1 then sda=0.
-        // CAPTURE tag = 0b00, so any word with top 2 bits = 00 is a
-        // CAPTURE. sda is bit 0.
+        // CAPTURE tag = 0b00 at [31:30]; sda is bit 0.
         let halt = halt_word_status(0);
         let bytes = build_ring(
-            (0x0000, 0x0000),
-            &[0x0001, 0x0000],
+            0,
+            &[capture_word(true), capture_word(false)],
             halt,
-            6, // rev(2) + 2 records + halt(2)
+            4, // rev(1) + 2 records + halt(1)
         );
         let ring = decode_ring(&bytes).unwrap();
         assert_eq!(
@@ -625,13 +620,21 @@ mod tests {
 
     #[test]
     fn mark_record_decode_three_words() {
-        // MARK with label=0xA5, timestamp=0xDEAD_BEEF
-        // MARK tag = 0b10 in top 2 bits of a 16-bit word:
-        // top2=10 → 0x80xx format. word0: 0x80A5
-        // word1: timestamp_lo = 0xBEEF
-        // word2: timestamp_hi = 0xDEAD
+        // MARK with label=0xA5, timestamp=0xDEAD_BEEF.
+        // Header: tag=0b10 at [31:30], label at [13:0]: 0x8000_00A5.
+        // ts_lo: low 16 of 0xDEAD_BEEF = 0xBEEF; word = 0x0000_BEEF.
+        // ts_hi: high 16 of 0xDEAD_BEEF = 0xDEAD; word = 0x0000_DEAD.
         let halt = halt_word_status(0);
-        let bytes = build_ring((0x0000, 0x0000), &[0x80A5, 0xBEEF, 0xDEAD], halt, 7);
+        let bytes = build_ring(
+            0,
+            &[
+                mark_header_word(0xA5),
+                mark_ts_word(0xBEEF),
+                mark_ts_word(0xDEAD),
+            ],
+            halt,
+            5, // rev(1) + mark(3) + halt(1)
+        );
         let ring = decode_ring(&bytes).unwrap();
         assert_eq!(
             ring.records,
@@ -643,15 +646,39 @@ mod tests {
     }
 
     #[test]
+    fn mark_record_decode_14_bit_label() {
+        // MARK with full 14-bit label (0x3FFF). Verifies the
+        // host doesn't truncate to 8 bits (regression: pre-Phase-A
+        // host had `label: u8` and `& 0xFF`).
+        let halt = halt_word_status(0);
+        let bytes = build_ring(
+            0,
+            &[
+                mark_header_word(0x3FFF),
+                mark_ts_word(0x0000),
+                mark_ts_word(0x0000),
+            ],
+            halt,
+            5,
+        );
+        let ring = decode_ring(&bytes).unwrap();
+        assert_eq!(
+            ring.records,
+            vec![Record::Mark {
+                label: 0x3FFF,
+                timestamp: 0,
+            }]
+        );
+    }
+
+    #[test]
     fn halt_decodes_overflow_mismatch_status() {
         // tag=11, overflow=1, mismatch=1, status=0xA
-        // Using ABI constants: STATUS_SHIFT=23, OVERFLOW_BIT=29,
-        // MISMATCH_BIT=28, TAG_SHIFT=30.
         let halt = (halt::TAG_HALT << halt::TAG_SHIFT)
             | (1 << halt::OVERFLOW_BIT)
             | (1 << halt::MISMATCH_BIT)
             | (0xAu32 << halt::STATUS_SHIFT);
-        let bytes = build_ring((0, 0), &[], halt, 4);
+        let bytes = build_ring(0, &[], halt, 2);
         let ring = decode_ring(&bytes).unwrap();
         assert_eq!(
             ring.halt,
@@ -667,7 +694,7 @@ mod tests {
     fn halt_engine_trap_status_recognised() {
         // status=0x1F (STATUS_TRAP; malformed instruction)
         let halt = halt_word_status(halt::STATUS_TRAP);
-        let bytes = build_ring((0, 0), &[], halt, 4);
+        let bytes = build_ring(0, &[], halt, 2);
         let ring = decode_ring(&bytes).unwrap();
         assert!(ring.halt.is_engine_trap());
     }
@@ -676,7 +703,7 @@ mod tests {
     fn halt_user_max_status_passes() {
         // STATUS_USER_MAX = 0x1C is the highest user-defined status.
         let halt = halt_word_status(halt::STATUS_USER_MAX);
-        let bytes = build_ring((0, 0), &[], halt, 4);
+        let bytes = build_ring(0, &[], halt, 2);
         let ring = decode_ring(&bytes).unwrap();
         assert_eq!(ring.halt.status, halt::STATUS_USER_MAX);
         assert!(!ring.halt.is_engine_trap());
@@ -686,7 +713,7 @@ mod tests {
     fn halt_reserved_status_low_rejected() {
         // STATUS_RESERVED_LOW = 0x1D should be rejected.
         let halt = halt_word_status(halt::STATUS_RESERVED_LOW);
-        let bytes = build_ring((0, 0), &[], halt, 4);
+        let bytes = build_ring(0, &[], halt, 2);
         let err = decode_ring(&bytes).unwrap_err();
         assert!(matches!(
             err,
@@ -701,7 +728,7 @@ mod tests {
     fn halt_reserved_status_high_rejected() {
         // STATUS_RESERVED_HIGH = 0x1E should be rejected.
         let halt = halt_word_status(halt::STATUS_RESERVED_HIGH);
-        let bytes = build_ring((0, 0), &[], halt, 4);
+        let bytes = build_ring(0, &[], halt, 2);
         let err = decode_ring(&bytes).unwrap_err();
         assert!(matches!(
             err,
@@ -716,13 +743,18 @@ mod tests {
     fn halt_reserved_bits_set_rejected() {
         // Set bit 0 in the reserved [22:0] range.
         let halt = halt_word_status(0) | 0x0000_0001u32;
-        let bytes = build_ring((0, 0), &[], halt, 4);
+        let bytes = build_ring(0, &[], halt, 2);
         let err = decode_ring(&bytes).unwrap_err();
         assert!(matches!(err, RingError::HaltReservedBitsSet { .. }));
     }
 
     #[test]
-    fn rejects_odd_byte_count() {
+    fn rejects_non_multiple_of_4_byte_count() {
+        // 6 bytes: legal under v0 16-bit grain (3 words) but v0.2
+        // ring is 32-bit-grained.
+        let bytes = vec![0u8; 6];
+        assert_eq!(decode_ring(&bytes), Err(RingError::OddByteCount { got: 6 }));
+        // 7 bytes: not a multiple of 4 either way.
         let bytes = vec![0u8; 7];
         assert_eq!(decode_ring(&bytes), Err(RingError::OddByteCount { got: 7 }));
     }
@@ -730,34 +762,35 @@ mod tests {
     #[test]
     fn rejects_short_buffer() {
         assert_eq!(decode_ring(&[]), Err(RingError::TooShort { got: 0 }));
-        assert_eq!(decode_ring(&[0u8; 6]), Err(RingError::TooShort { got: 6 }));
+        assert_eq!(decode_ring(&[0u8; 4]), Err(RingError::TooShort { got: 4 }));
     }
 
     #[test]
     fn rejects_missing_halt_tail() {
-        // Tail word has hi-half = 0x0000 (tag 00 at [31:30]), not 11.
+        // Tail word has tag != 11 (set to 0 = CAPTURE tag).
         let halt = halt_word_status(0);
-        let mut bytes = build_ring((0, 0), &[], halt, 4);
-        // Patch the HALT hi-half to 0x0000 (removes tag).
-        let hi_half_byte = bytes.len() - 2;
-        bytes[hi_half_byte] = 0x00;
-        bytes[hi_half_byte + 1] = 0x00;
-        // The tail 16-bit word (hi-half) is 0x0000.
+        let mut bytes = build_ring(0, &[], halt, 2);
+        // Patch the HALT word to 0x0000_0000 (removes tag).
+        let halt_off = bytes.len() - 4;
+        for b in &mut bytes[halt_off..halt_off + 4] {
+            *b = 0;
+        }
         assert_eq!(
             decode_ring(&bytes),
-            Err(RingError::NoHaltAtTail { word: 0x0000 })
+            Err(RingError::NoHaltAtTail { word: 0 })
         );
     }
 
     #[test]
     fn reserved_tag_01_terminates_record_stream_as_trailing_garbage() {
-        // word at offset 2 with tag 01 (= 0x4001 in 16-bit ring word,
-        // top 2 bits = 01): this is the real-silicon failure mode the
-        // tmp108 fixture hit. The decoder must treat that as "garbage
-        // begins here" rather than fail, but still honour the
-        // HALT-at-tail integrity check.
+        // word at offset 1 with tag 01 (= 0x4000_0000 in 32-bit ring
+        // word). This is the real-silicon failure mode where SPRAM
+        // garbage starts after the last real record. The decoder
+        // must treat that as "garbage begins here" rather than fail,
+        // but still honour the HALT-at-tail integrity check.
         let halt = halt_word_status(0);
-        let bytes = build_ring((0, 0), &[0x4001], halt, 5);
+        let reserved_tag_word = 0x4000_0000u32;
+        let bytes = build_ring(0, &[reserved_tag_word], halt, 3);
         let ring = decode_ring(&bytes).unwrap();
         assert!(ring.records.is_empty());
         assert_eq!(ring.trailing_garbage_words, 1);
@@ -766,14 +799,14 @@ mod tests {
 
     #[test]
     fn rejects_truncated_mark_at_tail() {
-        // MARK at offset 2; only 1 word left before the HALT slots.
-        // total_words=5 => record window is [2..3) which is 1 word.
+        // MARK at offset 1; only 1 word left before the HALT slot.
+        // total_words=3 → record window is [1..2) which is 1 word.
         let halt = halt_word_status(0);
-        let bytes = build_ring((0, 0), &[0x8000], halt, 5);
+        let bytes = build_ring(0, &[mark_header_word(0)], halt, 3);
         assert_eq!(
             decode_ring(&bytes),
             Err(RingError::TruncatedMark {
-                offset_words: 2,
+                offset_words: 1,
                 remaining_words: 1,
             })
         );
@@ -781,14 +814,14 @@ mod tests {
 
     #[test]
     fn rejects_truncated_mark_two_words_short() {
-        // MARK at offset 2; only 2 words left before the HALT slots.
-        // total_words=6 => record window is [2..4) which is 2 words.
+        // MARK at offset 1; only 2 words left before the HALT slot.
+        // total_words=4 → record window is [1..3) which is 2 words.
         let halt = halt_word_status(0);
-        let bytes = build_ring((0, 0), &[0x8000, 0x0000], halt, 6);
+        let bytes = build_ring(0, &[mark_header_word(0), mark_ts_word(0)], halt, 4);
         assert_eq!(
             decode_ring(&bytes),
             Err(RingError::TruncatedMark {
-                offset_words: 2,
+                offset_words: 1,
                 remaining_words: 2,
             })
         );
@@ -796,12 +829,12 @@ mod tests {
 
     #[test]
     fn mid_ring_halt_tag_terminates_record_stream_as_trailing_garbage() {
-        // A 16-bit word with top 2 bits = 11 at offset 2 (before the
-        // actual HALT slots). The record walker treats tag 0b11
+        // A word with top 2 bits = 11 at offset 1 (before the actual
+        // HALT slot at offset 2). The record walker treats tag 0b11
         // mid-stream as "garbage begins here" and stops walking.
-        // 0xC000 in 16-bit = tag 11 in top 2 bits.
         let halt = halt_word_status(0);
-        let bytes = build_ring((0, 0), &[0xC000], halt, 5);
+        let mid_halt_tag_word = 0xC000_0000u32;
+        let bytes = build_ring(0, &[mid_halt_tag_word], halt, 3);
         let ring = decode_ring(&bytes).unwrap();
         assert!(ring.records.is_empty());
         assert_eq!(ring.trailing_garbage_words, 1);
@@ -810,42 +843,45 @@ mod tests {
     #[test]
     fn tmp108_shaped_real_silicon_ring_decodes_to_19_captures() {
         // Regression test for the tmp108 hardware bring-up failure.
-        // The program emits 19 `EMIT_BIT ... capture=1` (3 slave
-        // ACKs + 8 MSB + 8 LSB), then HALT. On real silicon slots
-        // 21..(resultLimit - 3) hold uninitialised SPRAM; the
+        // The program emits 19 capture-bearing WIRE opcodes (3 EMIT_BYTE
+        // ACKs + 8 MSB EMIT_BIT + 8 LSB EMIT_BIT), then HALT. The
+        // engine writes 19 CAPTURE records starting at ring word 1
+        // (post-REVISION), then HALT at the tail. Slots between the
+        // last real capture and HALT hold uninitialised SPRAM; the
         // decoder must stop at the first garbage word and not trip
         // on its tag bits.
         let halt = halt_word_status(0);
-        let captures: Vec<u16> = (0..19).map(|i| (i as u16) & 1).collect();
-        // 4096 total ring words (8192 bytes ring).
-        let mut bytes = build_ring((0, 0), &captures, halt, 4096);
-        // Drop the garbage word at offset 21 (the first slot past
-        // the last real capture) to the same value real silicon
-        // produced on the user's run.
-        let garbage_byte_offset = 21 * 2;
-        bytes[garbage_byte_offset] = 0x0e;
-        bytes[garbage_byte_offset + 1] = 0x63;
+        let captures: Vec<u32> = (0..19).map(|i| capture_word(i % 2 == 0)).collect();
+        // 2048 total ring words (8192 bytes ring), matches Verde default.
+        let mut bytes = build_ring(mole_abi::revision::pack(0, 1, 0), &captures, halt, 2048);
+        // Drop a single garbage word into the slot at offset 20
+        // (just past the 19 captures) so the decoder hits a
+        // reserved/halt tag and stops walking. Choose a tag-01
+        // (reserved) pattern.
+        let garbage_word_offset = 20;
+        let garbage_byte_offset = garbage_word_offset * 4;
+        let garbage: u32 = 0x4000_1234; // tag=01, arbitrary low bits
+        bytes[garbage_byte_offset..garbage_byte_offset + 4].copy_from_slice(&garbage.to_le_bytes());
         let ring = decode_ring(&bytes).unwrap();
         assert_eq!(ring.records.len(), 19);
         assert_eq!(ring.halt.status, 0);
-        // 4092 record slots total (4096 - 2 REVISION - 2 HALT), 19
+        // 2046 record slots total (2048 - 1 REVISION - 1 HALT), 19
         // consumed; the rest is trailing garbage.
-        assert_eq!(ring.trailing_garbage_words, 4092 - 19);
+        assert_eq!(ring.trailing_garbage_words, 2046 - 19);
     }
 
     #[test]
     fn trailing_zeros_decode_as_capture_false_run() {
-        // Verilator-style ring: 8 words total, REV(2) + CAPTURE(1)
-        // + 3 zero slots + HALT(2). The 3 zero slots decode as
+        // Verilator-style ring: 5 words total, REV(1) + CAPTURE(1)
+        // + 2 zero slots + HALT(1). The 2 zero slots decode as
         // CAPTURE { sda: false } per the documented hazard.
         let halt = halt_word_status(0);
-        let bytes = build_ring((0, 0), &[0x0001], halt, 8);
+        let bytes = build_ring(0, &[capture_word(true)], halt, 5);
         let ring = decode_ring(&bytes).unwrap();
         assert_eq!(
             ring.records,
             vec![
                 Record::Capture { sda: true },
-                Record::Capture { sda: false },
                 Record::Capture { sda: false },
                 Record::Capture { sda: false },
             ]
@@ -855,11 +891,11 @@ mod tests {
 
     #[test]
     fn decode_ring_strict_rejects_size_mismatch() {
-        // A perfectly-valid 4-word ring (REVISION + HALT) handed to
-        // `decode_ring_strict` with a 4096-word expectation must be
+        // A perfectly-valid 2-word ring (REVISION + HALT) handed to
+        // `decode_ring_strict` with an 8192-byte expectation must be
         // rejected.
         let halt = halt_word_status(0);
-        let bytes = build_ring((0, 0), &[], halt, 4);
+        let bytes = build_ring(0, &[], halt, 2);
         let err = decode_ring_strict(&bytes, 8192).unwrap_err();
         assert_eq!(
             err,
@@ -883,8 +919,9 @@ mod tests {
         // buffer if the tail still tags as HALT. The strict wrapper
         // is exactly the fix for production reads.
         let halt = halt_word_status(0);
-        let inner = build_ring((0x0001, 0x0203), &[], halt, 4);
-        let mut buf = vec![0xAA, 0xBB];
+        let inner = build_ring(mole_abi::revision::pack(0x02, 0x03, 0x0001), &[], halt, 2);
+        // Prepend 4 garbage bytes (one 32-bit word).
+        let mut buf = vec![0xAA, 0xBB, 0xCC, 0xDD];
         buf.extend_from_slice(&inner);
         // Lax accepts (documented hazard).
         assert!(decode_ring(&buf).is_ok());
@@ -895,23 +932,28 @@ mod tests {
 
     #[test]
     fn full_default_ring_size_round_trip() {
-        // Verde default ring = 8192 bytes = 4096 words. Smoke-test
-        // that the decoder is happy at the full size.
+        // Verde default ring = 8192 bytes = 2048 32-bit words. Smoke-
+        // test that the decoder is happy at the full size.
         let halt = halt_word_status(0);
-        let bytes = build_ring((0x1234, 0x5678), &[], halt, 4096);
+        let bytes = build_ring(
+            mole_abi::revision::pack(0x12, 0x34, 0x5678),
+            &[],
+            halt,
+            2048,
+        );
         let ring = decode_ring(&bytes).unwrap();
         assert_eq!(
             ring.revision,
             Revision {
-                major: 0x56,
-                minor: 0x78,
-                patch: 0x1234,
+                major: 0x12,
+                minor: 0x34,
+                patch: 0x5678,
             }
         );
         // All inter-rev / pre-halt slots are zero in our builder,
         // so they decode as CAPTURE { sda: false }.
-        // Record window = 4096 - 2 (REV) - 2 (HALT) = 4092 words.
-        assert_eq!(ring.records.len(), 4096 - 4);
+        // Record window = 2048 - 1 (REV) - 1 (HALT) = 2046 words.
+        assert_eq!(ring.records.len(), 2048 - 2);
         assert!(
             ring.records
                 .iter()

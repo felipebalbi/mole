@@ -305,7 +305,10 @@ mod tests {
         let label = 0x12A5_u32;
         let header = (record_tag::MARK << record_tag::SHIFT) | label;
         // Tag round-trips.
-        assert_eq!((header >> record_tag::SHIFT) & record_tag::MASK, record_tag::MARK);
+        assert_eq!(
+            (header >> record_tag::SHIFT) & record_tag::MASK,
+            record_tag::MARK
+        );
         // Label round-trips (14 bits, 0..0x3FFF).
         assert_eq!((header >> mark::LABEL_SHIFT) & mark::LABEL_MASK, label);
         // Reserved bits [29:14] are zero in this canonical encoding.

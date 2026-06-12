@@ -7,13 +7,13 @@
 //!
 //! # v0.2 ring layout recap
 //!
-//! The result ring is 16-bit-addressed. Words are 16 bits. The HALT
-//! word is 32 bits per §11, serialised as two adjacent 16-bit ring
-//! slots: lo at `[N-2]`, hi at `[N-1]`. REVISION occupies words 0
-//! and 1; records start at word 2. Minimum ring size: 4 × 16-bit
-//! words = 8 bytes.
+//! The result ring is 32-bit-addressed (spec §11.1). Slots are 32
+//! bits, drained as 4 little-endian bytes per slot. REVISION
+//! occupies word 0; records start at word 1; HALT terminator at
+//! `word[resultLimit] = word[total_words - 1]`. Minimum ring size:
+//! 2 × 32-bit words = 8 bytes.
 
-use mole_abi::halt;
+use mole_abi::{halt, mark, record_tag, revision};
 use mole_asm::frame::{build_frame, crc16_xmodem};
 use mole_loader::{
     DEFAULT_RING_BYTES, DecodedRing, FrameError, HaltStatus, LoaderError, Record, Revision,
@@ -24,38 +24,54 @@ use mole_loader::{
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Pack a sequence of u16 words into the result-ring byte layout
-/// (little-endian) with a given total word count.
+/// Pack a sequence of u32 ring words into the result-ring byte
+/// layout (little-endian per 32-bit word).
 ///
-/// `halt_word` is the 32-bit HALT value (§11); it is split into two
-/// 16-bit ring slots (lo at `[N-2]`, hi at `[N-1]`).
-/// `total_words` is the total number of 16-bit ring slots.
-/// The minimum valid ring is 4 words (2 REVISION + 2 HALT slots).
-fn build_ring(
-    revision: (u16, u16),
-    records: &[u16],
-    halt_word: u32,
-    total_words: usize,
-) -> Vec<u8> {
-    assert!(total_words >= 4 + records.len());
-    let halt_lo = (halt_word & 0xFFFF) as u16;
-    let halt_hi = (halt_word >> 16) as u16;
-    let mut words = Vec::with_capacity(total_words);
-    words.push(revision.0);
-    words.push(revision.1);
+/// `revision_word` is the 32-bit REVISION word at `word[0]`.
+/// `records` is a slice of 32-bit ring words for the record stream
+/// (caller supplies the encoded form directly).
+/// `halt_word` is the 32-bit HALT value (§11) at `word[total_words - 1]`.
+/// `total_words` is the total number of 32-bit ring slots.
+/// The minimum valid ring is 2 words (1 REVISION + 1 HALT).
+fn build_ring(revision_word: u32, records: &[u32], halt_word: u32, total_words: usize) -> Vec<u8> {
+    assert!(total_words >= 2 + records.len());
+    let mut words: Vec<u32> = Vec::with_capacity(total_words);
+    words.push(revision_word);
     words.extend_from_slice(records);
-    while words.len() < total_words - 2 {
-        words.push(0x0000);
+    while words.len() < total_words - 1 {
+        words.push(0u32);
     }
-    words.push(halt_lo);
-    words.push(halt_hi);
+    words.push(halt_word);
     assert_eq!(words.len(), total_words);
-    let mut bytes = Vec::with_capacity(total_words * 2);
+    let mut bytes = Vec::with_capacity(total_words * 4);
     for w in words {
-        bytes.push((w & 0xFF) as u8);
-        bytes.push((w >> 8) as u8);
+        bytes.extend_from_slice(&w.to_le_bytes());
     }
     bytes
+}
+
+/// Pack a (major, minor, patch) tuple into the canonical 32-bit
+/// REVISION word per spec §11.2 / `mole_abi::revision::pack`.
+const fn revision_word(major: u8, minor: u8, patch: u16) -> u32 {
+    revision::pack(major, minor, patch)
+}
+
+/// Build a CAPTURE record word: tag=0b00 at [31:30], sda at [0],
+/// [29:1] reserved-zero.
+const fn capture_word(sda: bool) -> u32 {
+    if sda { 1u32 } else { 0u32 }
+}
+
+/// Build a MARK header word: tag=0b10 at [31:30], 14-bit label at
+/// [13:0], [29:14] reserved-zero.
+const fn mark_header_word(label: u16) -> u32 {
+    (record_tag::MARK << record_tag::SHIFT) | (label as u32 & mark::LABEL_MASK)
+}
+
+/// Build a MARK timestamp half-word: low 16 bits of the timestamp
+/// at [15:0]; high 16 bits reserved-zero per spec §11.4.
+const fn mark_ts_word(half: u16) -> u32 {
+    half as u32
 }
 
 /// Build a minimal HALT word (tag=0b11, status only, no overflow/
@@ -188,15 +204,13 @@ fn verify_frame_crc_does_not_cover_itself() {
 
 #[test]
 fn revision_words_are_little_endian_on_the_wire() {
-    // patch=0x1234 in word_lo, major=0x56 / minor=0x78 in word_hi.
-    // Minimum ring: 4 × 16-bit = 8 bytes.
+    // Spec §11.2: 32-bit REVISION word at word[0], drained as 4 LE
+    // bytes. major=0x56 at [31:24], minor=0x78 at [23:16], patch=0x1234
+    // at [15:0]. Minimum ring: 2 × 32-bit = 8 bytes.
     // HALT: 0xC000_0000 = tag=11 at [31:30], rest 0.
-    // halt_lo = 0x0000, halt_hi = 0xC000.
     let bytes: Vec<u8> = vec![
-        0x34, 0x12, // word_lo = 0x1234 -> patch
-        0x78, 0x56, // word_hi = 0x5678 -> major=0x56, minor=0x78
-        0x00, 0x00, // halt_lo = 0x0000
-        0x00, 0xC0, // halt_hi = 0xC000 (tag=11 at [15:14])
+        0x34, 0x12, 0x78, 0x56, // REVISION word LE = 0x5678_1234
+        0x00, 0x00, 0x00, 0xC0, // HALT word LE = 0xC000_0000
     ];
     let ring = decode_ring(&bytes).unwrap();
     assert_eq!(
@@ -213,10 +227,15 @@ fn revision_words_are_little_endian_on_the_wire() {
 fn ring_decode_truncated_at_every_offset_never_panics() {
     // Build a substantive ring and truncate it byte-by-byte.
     let bytes = build_ring(
-        (0x0001, 0x0203),
-        &[0x0001, 0x8000, 0xBEEF, 0xDEAD],
+        revision_word(0x02, 0x03, 0x0001),
+        &[
+            capture_word(true),
+            mark_header_word(0),
+            mark_ts_word(0xBEEF),
+            mark_ts_word(0xDEAD),
+        ],
         HALT_CLEAN,
-        10,
+        7, // rev(1) + 1 cap + 3 mark + 1 spare + halt(1)
     );
     for cut in 0..bytes.len() {
         let slice = &bytes[..cut];
@@ -228,8 +247,9 @@ fn ring_decode_truncated_at_every_offset_never_panics() {
 
 #[test]
 fn ring_with_odd_byte_count_classified_distinctly() {
-    // Odd byte count must be OddByteCount, *not* TooShort or
-    // NoHaltAtTail. The decoder uses the variant for diagnostics.
+    // Non-multiple-of-4 byte count must be OddByteCount, *not*
+    // TooShort or NoHaltAtTail. The decoder uses the variant for
+    // diagnostics.
     let bytes = vec![0u8; 7];
     assert!(matches!(
         decode_ring(&bytes).unwrap_err(),
@@ -239,15 +259,15 @@ fn ring_with_odd_byte_count_classified_distinctly() {
 
 #[test]
 fn ring_too_short_distinct_from_no_halt_at_tail() {
-    // 6-byte buffer is too short (minimum is 8 bytes = 4 words).
-    let err = decode_ring(&[0u8; 6]).unwrap_err();
+    // 4-byte buffer is too short (minimum is 8 bytes = 2 32-bit words).
+    let err = decode_ring(&[0u8; 4]).unwrap_err();
     assert!(
-        matches!(err, RingError::TooShort { got: 6 }),
+        matches!(err, RingError::TooShort { got: 4 }),
         "got: {err:?}"
     );
-    // An 8-byte buffer with tail hi-half tag != 0b11 is NoHaltAtTail,
+    // An 8-byte buffer with tail word tag != 0b11 is NoHaltAtTail,
     // NOT TooShort.
-    let bytes = vec![0u8; 8]; // halt_hi = 0x0000, tag = 00
+    let bytes = vec![0u8; 8]; // halt word = 0x0000_0000, tag = 00
     let err = decode_ring(&bytes).unwrap_err();
     assert!(
         matches!(err, RingError::NoHaltAtTail { .. }),
@@ -272,7 +292,7 @@ fn halt_status_flag_bits_independently_decoded() {
                     | ((status as u32) << halt::STATUS_SHIFT)
                     | if overflow { 1 << halt::OVERFLOW_BIT } else { 0 }
                     | if mismatch { 1 << halt::MISMATCH_BIT } else { 0 };
-                let bytes = build_ring((0, 0), &[], halt_word, 4);
+                let bytes = build_ring(0, &[], halt_word, 2);
                 let ring = decode_ring(&bytes).unwrap();
                 assert_eq!(
                     ring.halt,
@@ -293,9 +313,9 @@ fn capture_run_boundary_sizes() {
     // Pin boundary capture counts (0, 1, 7, 8, 9, 32) so a future
     // aggregator change is loud.
     for &n in &[0usize, 1, 7, 8, 9, 32, 64, 256] {
-        let records: Vec<u16> = (0..n).map(|i| (i as u16) & 1).collect();
-        let total_words = 4 + n; // rev(2) + records + halt(2)
-        let bytes = build_ring((0, 0), &records, HALT_CLEAN, total_words);
+        let records: Vec<u32> = (0..n).map(|i| capture_word(i % 2 == 0)).collect();
+        let total_words = 2 + n; // rev(1) + records + halt(1)
+        let bytes = build_ring(0, &records, HALT_CLEAN, total_words);
         let ring = decode_ring(&bytes).unwrap();
         assert_eq!(
             ring.records.len(),
@@ -309,19 +329,21 @@ fn capture_run_boundary_sizes() {
 
 #[test]
 fn capture_sda_bit_only_uses_bit_0() {
-    // CAPTURE word tag=00; SDA is bit 0. Bits [13:1] must be ignored.
-    for body in [0x0001u16, 0x3FFF, 0x2AAB, 0x1555] {
-        let bytes = build_ring((0, 0), &[body], HALT_CLEAN, 5);
+    // CAPTURE word tag=00 at [31:30]; sda at [0]; [29:1] must be
+    // ignored. (Engine writes [29:1]=0 by construction; this test
+    // pins the decoder's tolerance for garbage in those bits.)
+    for body in [0x0000_0001u32, 0x3FFF_FFFF, 0x2AAA_AAAB, 0x1555_5555] {
+        let bytes = build_ring(0, &[body], HALT_CLEAN, 3);
         let ring = decode_ring(&bytes).unwrap();
         assert_eq!(
             ring.records,
             vec![Record::Capture { sda: true }],
-            "word={body:#06x}: bit 0 = 1 must yield sda=true regardless \
-             of [13:1]"
+            "word={body:#010x}: bit 0 = 1 must yield sda=true regardless \
+             of [29:1]"
         );
     }
-    for body in [0x0000u16, 0x3FFE, 0x2AAA, 0x1554] {
-        let bytes = build_ring((0, 0), &[body], HALT_CLEAN, 5);
+    for body in [0x0000_0000u32, 0x3FFF_FFFE, 0x2AAA_AAAA, 0x1555_5554] {
+        let bytes = build_ring(0, &[body], HALT_CLEAN, 3);
         let ring = decode_ring(&bytes).unwrap();
         assert_eq!(ring.records, vec![Record::Capture { sda: false }]);
     }
@@ -329,8 +351,19 @@ fn capture_sda_bit_only_uses_bit_0() {
 
 #[test]
 fn mark_timestamp_little_endian_lo_then_hi() {
-    // MARK is 3 words: header, ts_lo, ts_hi. Pin word order.
-    let bytes = build_ring((0, 0), &[0x8000, 0xBABE, 0xCAFE], HALT_CLEAN, 7);
+    // MARK is 3 32-bit words: header, ts_lo, ts_hi. Pin word order.
+    // ts_lo holds the low 16 bits in [15:0]; ts_hi holds the high
+    // 16 bits in [15:0]; [31:16] of each is reserved-zero (spec §11.4).
+    let bytes = build_ring(
+        0,
+        &[
+            mark_header_word(0),
+            mark_ts_word(0xBABE),
+            mark_ts_word(0xCAFE),
+        ],
+        HALT_CLEAN,
+        5,
+    );
     let ring = decode_ring(&bytes).unwrap();
     assert_eq!(
         ring.records,
@@ -342,24 +375,34 @@ fn mark_timestamp_little_endian_lo_then_hi() {
 }
 
 #[test]
-fn mark_label_uses_low_byte_only() {
-    // MARK header low 8 bits = label; high 6 bits (above tag) are
-    // reserved. Stuff garbage into [13:8] and check label decode.
-    for header in [0x8042u16, 0xBF42, 0xA042] {
-        let bytes = build_ring((0, 0), &[header, 0, 0], HALT_CLEAN, 7);
+fn mark_label_uses_low_14_bits_only() {
+    // MARK header [13:0] = label; [29:14] reserved-zero; [31:30]
+    // tag=10. Stuff garbage into [29:14] and check label decode.
+    // (Engine writes [29:14]=0; this pins the decoder's mask.)
+    for header in [
+        0x8000_0042u32,            // canonical: only tag + label
+        0x8000_0042 | 0x3FFF_C000, // garbage in [29:14]
+        0x8000_0042 | 0x2AAA_8000,
+    ] {
+        let bytes = build_ring(
+            0,
+            &[header, mark_ts_word(0), mark_ts_word(0)],
+            HALT_CLEAN,
+            5,
+        );
         let ring = decode_ring(&bytes).unwrap();
         let Record::Mark { label, .. } = ring.records[0] else {
             panic!("expected Mark");
         };
-        assert_eq!(label, 0x42, "header={header:#06x}: label should be 0x42");
+        assert_eq!(label, 0x42, "header={header:#010x}: label should be 0x42");
     }
 }
 
 #[test]
 fn ring_with_no_records_reports_full_gap_as_trailing_garbage() {
-    // 8-word ring: rev(2) + 4 gap slots + halt(2). Zero-tagged
+    // 6-word ring: rev(1) + 4 gap slots + halt(1). Zero-tagged
     // slots decode as CAPTURE(sda=false) per the documented hazard.
-    let bytes = build_ring((0, 0), &[], HALT_CLEAN, 8);
+    let bytes = build_ring(0, &[], HALT_CLEAN, 6);
     let ring = decode_ring(&bytes).unwrap();
     assert_eq!(
         ring.records.len(),
@@ -372,13 +415,14 @@ fn ring_with_no_records_reports_full_gap_as_trailing_garbage() {
 
 #[test]
 fn ring_decode_handles_megabyte_ring_in_bounded_time() {
-    // 1 MiB ring = 512 Ki 16-bit words. Confirm it completes.
-    let total_words = 512 * 1024;
-    let bytes = build_ring((0, 0), &[0x0001], HALT_CLEAN, total_words);
+    // 1 MiB ring = 256 Ki 32-bit words. Confirm it completes.
+    let total_words = 256 * 1024;
+    let bytes = build_ring(0, &[capture_word(true)], HALT_CLEAN, total_words);
     let ring = decode_ring(&bytes).unwrap();
-    // 1 real capture + (total_words - 4) zero-tagged "garbage" captures
-    // (tag 0b00 = CAPTURE). 2 REVISION + 2 HALT = 4 overhead words.
-    assert_eq!(ring.records.len(), total_words - 4);
+    // 1 real capture + (total_words - 2) zero-tagged "garbage"
+    // captures (tag 0b00 = CAPTURE). 1 REVISION + 1 HALT = 2
+    // overhead words.
+    assert_eq!(ring.records.len(), total_words - 2);
 }
 
 // ---------------------------------------------------------------------------
@@ -387,16 +431,16 @@ fn ring_decode_handles_megabyte_ring_in_bounded_time() {
 
 #[test]
 fn ring_decoder_does_not_silently_strip_a_prefix() {
-    // A buffer that "looks like" a ring after skipping one word
-    // must be rejected, not silently aligned. Capability-gap pin.
-    let inner = build_ring((0x0001, 0x0203), &[], HALT_CLEAN, 4);
-    let mut buf = vec![0xAA, 0xBB];
+    // A buffer that "looks like" a ring after skipping bytes must be
+    // rejected by the strict decoder, not silently aligned. The lax
+    // decoder accepts it (capability-gap pin).
+    let inner = build_ring(revision_word(0x02, 0x03, 0x0001), &[], HALT_CLEAN, 2);
+    // Prepend 4 garbage bytes (one 32-bit word).
+    let mut buf = vec![0xAA, 0xBB, 0xCC, 0xDD];
     buf.extend_from_slice(&inner);
-    // Now tail bytes are still the HALT word from `inner`, so the
-    // tail tag IS 0b11. The "REVISION" the decoder sees will be
-    // different. The decoder will accept this as a valid ring (no
-    // integrity beyond the tail tag). This is a *capability gap*:
-    // prefix tolerance.
+    // Tail bytes are still the HALT word from `inner`, so the tail
+    // tag IS 0b11. The "REVISION" the decoder sees will be the
+    // garbage prefix. The lax decoder accepts; this pins the gap.
     let ring = decode_ring(&buf).expect("decoder is currently tolerant");
     assert_ne!(
         ring.revision.patch, 0x0001,
@@ -601,7 +645,7 @@ fn halt_mismatch_flag_is_sticky_across_all_status_codes() {
         let halt_word = (halt::TAG_HALT << halt::TAG_SHIFT)
             | (1 << halt::MISMATCH_BIT)
             | ((status as u32) << halt::STATUS_SHIFT);
-        let bytes = build_ring((0, 0), &[], halt_word, 4);
+        let bytes = build_ring(0, &[], halt_word, 2);
         let ring = decode_ring(&bytes).unwrap();
         assert!(
             ring.halt.mismatch,
@@ -655,7 +699,7 @@ fn all_four_sticky_flags_observable_in_decoded_ring() {
     let halt_mismatch = (halt::TAG_HALT << halt::TAG_SHIFT)
         | (1 << halt::MISMATCH_BIT)
         | ((STATUS_NO_FLAGS_OBSERVED as u32) << halt::STATUS_SHIFT);
-    let ring = decode_ring(&build_ring((0, 0), &[], halt_mismatch, 4)).unwrap();
+    let ring = decode_ring(&build_ring(0, &[], halt_mismatch, 2)).unwrap();
     assert!(
         ring.halt.mismatch,
         "MISMATCH must decode through the dedicated HALT bit"
@@ -666,7 +710,7 @@ fn all_four_sticky_flags_observable_in_decoded_ring() {
     // codes 1/4/5 hit TIMEOUT_FLAG; program HALTs with a code that
     // means "we saw TIMEOUT").
     let halt_timeout = halt_word_status(STATUS_TIMEOUT_OBSERVED);
-    let ring = decode_ring(&build_ring((0, 0), &[], halt_timeout, 4)).unwrap();
+    let ring = decode_ring(&build_ring(0, &[], halt_timeout, 2)).unwrap();
     assert_eq!(
         ring.halt.status, STATUS_TIMEOUT_OBSERVED,
         "TIMEOUT must be observable via the 5-bit HALT status field"
@@ -676,13 +720,13 @@ fn all_four_sticky_flags_observable_in_decoded_ring() {
 
     // Case 3: START via status-code convention (cond codes 6/7).
     let halt_start = halt_word_status(STATUS_START_OBSERVED);
-    let ring = decode_ring(&build_ring((0, 0), &[], halt_start, 4)).unwrap();
+    let ring = decode_ring(&build_ring(0, &[], halt_start, 2)).unwrap();
     assert_eq!(ring.halt.status, STATUS_START_OBSERVED);
     assert!(!ring.halt.mismatch);
 
     // Case 4: STOP via status-code convention (cond codes 8/9).
     let halt_stop = halt_word_status(STATUS_STOP_OBSERVED);
-    let ring = decode_ring(&build_ring((0, 0), &[], halt_stop, 4)).unwrap();
+    let ring = decode_ring(&build_ring(0, &[], halt_stop, 2)).unwrap();
     assert_eq!(ring.halt.status, STATUS_STOP_OBSERVED);
     assert!(!ring.halt.mismatch);
 
@@ -697,7 +741,7 @@ fn all_four_sticky_flags_observable_in_decoded_ring() {
     let halt_all = (halt::TAG_HALT << halt::TAG_SHIFT)
         | (1 << halt::MISMATCH_BIT)
         | ((STATUS_ALL_SOFT_OBSERVED as u32) << halt::STATUS_SHIFT);
-    let ring = decode_ring(&build_ring((0, 0), &[], halt_all, 4)).unwrap();
+    let ring = decode_ring(&build_ring(0, &[], halt_all, 2)).unwrap();
     assert!(ring.halt.mismatch);
     assert_eq!(ring.halt.status, STATUS_ALL_SOFT_OBSERVED);
 
@@ -735,10 +779,11 @@ fn all_four_sticky_flags_observable_in_decoded_ring() {
 
 #[test]
 fn decoded_ring_equality_is_field_wise() {
-    let a: DecodedRing = decode_ring(&build_ring((0, 0), &[], HALT_CLEAN, 4)).unwrap();
-    let b = decode_ring(&build_ring((0, 0), &[], HALT_CLEAN, 4)).unwrap();
+    let a: DecodedRing = decode_ring(&build_ring(0, &[], HALT_CLEAN, 2)).unwrap();
+    let b = decode_ring(&build_ring(0, &[], HALT_CLEAN, 2)).unwrap();
     assert_eq!(a, b);
-    let c = decode_ring(&build_ring((1, 0), &[], HALT_CLEAN, 4)).unwrap();
+    // Distinct REVISION word (different patch) → distinct decoded ring.
+    let c = decode_ring(&build_ring(revision_word(0, 0, 1), &[], HALT_CLEAN, 2)).unwrap();
     assert_ne!(a, c);
 }
 
@@ -757,30 +802,26 @@ fn crc_helper_re_export_matches_mole_asm_implementation() {
 //   reserved, 0x1F engine-trap.
 // ---------------------------------------------------------------------------
 
-/// Build a ring of exactly `DEFAULT_RING_BYTES` with a REVISION
-/// header at words 0..2, the supplied 32-bit HALT word at the final
-/// two 16-bit slots, and the middle filled with tag-`01` reserved-tag
-/// words so the record-stream walker terminates immediately.
+/// Build a ring of exactly `DEFAULT_RING_BYTES` with the canonical
+/// REVISION word at word[0], the supplied 32-bit HALT word at
+/// word[resultLimit] (= the last 32-bit slot), and the middle filled
+/// with tag-`01` reserved-tag words so the record-stream walker
+/// terminates immediately.
 fn build_minimal_ring_with_halt(halt_word: u32) -> Vec<u8> {
-    let total_words = DEFAULT_RING_BYTES / 2;
-    let halt_lo = (halt_word & 0xFFFF) as u16;
-    let halt_hi = (halt_word >> 16) as u16;
-    let mut words = Vec::with_capacity(total_words);
-    words.push(0x0001u16); // revision lo (patch = 1)
-    words.push(0x0203u16); // revision hi (major=2, minor=3)
-    // Fill the gap with 0x4001 (tag 01 reserved). The walker
+    let total_words = DEFAULT_RING_BYTES / 4;
+    let mut words: Vec<u32> = Vec::with_capacity(total_words);
+    words.push(revision_word(0x02, 0x03, 0x0001));
+    // Fill the gap with 0x4000_0000 (tag 01 reserved). The walker
     // recognises tag 01 as "trailing garbage starts here" and
     // stops on the first slot, keeping the test cheap.
-    while words.len() < total_words - 2 {
-        words.push(0x4001);
+    while words.len() < total_words - 1 {
+        words.push(0x4000_0000);
     }
-    words.push(halt_lo);
-    words.push(halt_hi);
+    words.push(halt_word);
     assert_eq!(words.len(), total_words);
-    let mut bytes = Vec::with_capacity(total_words * 2);
+    let mut bytes = Vec::with_capacity(total_words * 4);
     for w in words {
-        bytes.push((w & 0xFF) as u8);
-        bytes.push((w >> 8) as u8);
+        bytes.extend_from_slice(&w.to_le_bytes());
     }
     bytes
 }
