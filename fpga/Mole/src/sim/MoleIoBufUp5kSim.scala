@@ -133,31 +133,44 @@ object MoleIoBufUp5kSim extends App {
   println(f"  SB_IO occurrences = $sbIoCount  OK")
 
   // The PIN_TYPE generic must reach the Verilog. SpinalHDL has
-  // serialised Bits literals as 6'b101000, 6'h28, decimal 40, and
+  // serialised Bits literals as 6'b101001, 6'h29, decimal 41, and
   // (historically) packed-into-32-bit forms across versions; accept
-  // every encoding that means "binary 101000". The bit-pattern is
-  // the unambiguous PIN_OUTPUT_TRISTATE | PIN_INPUT encoding from
-  // the icestorm wiki.
+  // every encoding that means "binary 101001". The bit-pattern is
+  // the PIN_OUTPUT_TRISTATE | PIN_INPUT_NONE (live unregistered)
+  // encoding from the icestorm cells_sim.v SB_IO module.
+  //
+  // bit 0 of PIN_TYPE (the LSB here) is the live-vs-registered
+  // selector for D_IN_0: 1 = live PACKAGE_PIN, 0 = din_q_0
+  // (registered, needs INPUT_CLK driven). MoleIoBufUp5k does not
+  // connect INPUT_CLK so the registered configuration would leave
+  // D_IN_0 stuck at its reset value. PIN_TYPE = 6'b101001 = 41 is
+  // therefore load-bearing; flipping this bit silently disables
+  // the engine's ability to read SDA / SCL on hardware. See
+  // commit 76b513821f6d for the root-cause investigation.
   assert(
     verilog.contains("PIN_TYPE"),
     s"PIN_TYPE generic missing from generated Verilog" +
       s" (file: ${verilogFile.getAbsolutePath})"
   )
   val pinTypeEncodings = Seq(
-    "6'b101000", // SpinalHDL canonical Bits-literal form
-    "6'h28", // hex form (0x28 = 0b101000)
-    "'h28", // hex form without explicit width
-    "101000", // bare binary digits, e.g. inside a decimal string
-    "= 40" // decimal 40 with a leading equals (defparam form)
+    "6'b101001", // SpinalHDL canonical Bits-literal form
+    "6'h29", // hex form (0x29 = 0b101001)
+    "'h29", // hex form without explicit width
+    "101001", // bare binary digits, e.g. inside a decimal string
+    "= 41" // decimal 41 with a leading equals (defparam form)
   )
   val pinTypeMatch = pinTypeEncodings.find(verilog.contains(_))
   assert(
     pinTypeMatch.isDefined,
-    s"PIN_TYPE value (binary 101000) missing from generated Verilog;" +
+    s"PIN_TYPE value (binary 101001 = live unregistered input)" +
+      s" missing from generated Verilog;" +
       s" looked for one of ${pinTypeEncodings.mkString(", ")}" +
-      s" (file: ${verilogFile.getAbsolutePath})"
+      s" (file: ${verilogFile.getAbsolutePath})." +
+      s" Note: 101000 selects registered input and silently breaks" +
+      s" the engine's bus observer because INPUT_CLK is unconnected" +
+      s" --- see commit 76b513821f6d."
   )
-  println(f"  PIN_TYPE = 6'b101000 present (as ${pinTypeMatch.get})  OK")
+  println(f"  PIN_TYPE = 6'b101001 present (as ${pinTypeMatch.get})  OK")
 
   // OUTPUT_ENABLE wiring marker: the wrapper assigns
   //   OUTPUT_ENABLE = driveLow || driveHigh.

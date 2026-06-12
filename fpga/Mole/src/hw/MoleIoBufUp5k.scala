@@ -37,14 +37,18 @@ import spinal.lib._
   * `OE=1, D_OUT_0=1` (PP drive high) -- the assert is enforcing the engine-side
   * invariant, not preventing a literal pad shoot-through.
   *
-  * `PIN_TYPE = 6'b101000` decomposes as:
+  * `PIN_TYPE = 6'b101001` decomposes as:
   *   - bits[5:2] = 4'b1010 -> PIN_OUTPUT_TRISTATE: the pad's output stage is
   *     tristateable; OUTPUT_ENABLE controls whether D_OUT_0 reaches the pad or
   *     the pad floats.
-  *   - bits[1:0] = 2'b00 -> PIN_INPUT (live, unregistered): D_IN_0 is the live
-  *     pad value with no flop in the way, so the engine sees the same value the
-  *     bus electrics produced this cycle. Mole synchronises this into the
-  *     fabric domain at the engine boundary, not at the pad.
+  *   - bits[1:0] = 2'b01 -> PIN_INPUT_NONE (live, unregistered): D_IN_0 is
+  *     the live pad value with no flop in the way, so the engine sees the same
+  *     value the bus electrics produced this cycle. Mole synchronises this into
+  *     the fabric domain at the engine boundary, not at the pad. PIN_TYPE[1:0]
+  *     = 00 (the icestorm wiki's "PIN_INPUT") would instead route D_IN_0 from
+  *     the INPUT_CLK-clocked register, which silently breaks the input path
+  *     since we don't connect INPUT_CLK. See the per-bit walkthrough in the
+  *     `SB_IO` class below.
   *
   * Bypass strategy (mirrors `MolePllUp5k.useBlackBox`):
   *   - `useBlackBox = true` (default, synthesis path): instantiate one SB_IO
@@ -125,7 +129,8 @@ case class MoleIoBufUp5k(useBlackBox: Boolean = true) extends Component {
   * model and the Lattice iCE40 LP/HX/UP family handbook section "sysIO
   * Primitive Definitions".
   *
-  * PIN_TYPE = 6'b101000 (PIN_OUTPUT_TRISTATE | PIN_INPUT, unregistered):
+  * PIN_TYPE = 6'b101001 (PIN_OUTPUT_TRISTATE | PIN_INPUT_NONE, live
+  * unregistered):
   *   - The output stage is tristateable: when OUTPUT_ENABLE is low, the pad
   *     floats and the external pull-up (PMOD adapter, 4.7 kohm for I2C / 1 kohm
   *     for I3C-OD windows) wins.
@@ -142,9 +147,10 @@ case class MoleIoBufUp5k(useBlackBox: Boolean = true) extends Component {
   *
   * Omitted production pins (same convention as `SB_PLL40_PAD`: omitted to keep
   * yosys from warning about unconnected nets, since we use neither the DDR path
-  * nor the registered I/O modes): D_OUT_1, D_IN_1 (DDR; PIN_TYPE bit 0 = 0
-  * means no DDR output) OUTPUT_CLK, INPUT_CLK, CLOCK_ENABLE (registered I/O;
-  * PIN_TYPE[1:0] = 00 means no input register, so no clock is meaningful)
+  * nor the registered I/O modes): D_OUT_1, D_IN_1 (DDR; PIN_TYPE bit 0 selects
+  * the live D_IN_0 path so the DDR-side din_q_1 / D_IN_1 stays unused),
+  * OUTPUT_CLK, INPUT_CLK, CLOCK_ENABLE (registered I/O; PIN_TYPE[1:0] = 01
+  * routes around the input register so no INPUT_CLK is meaningful)
   * LATCH_INPUT_VALUE (input-latch enable; PIN_TYPE[1:0] != 01 makes this a
   * don't-care)
   */
