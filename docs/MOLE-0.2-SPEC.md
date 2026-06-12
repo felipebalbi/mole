@@ -1686,19 +1686,77 @@ STATUS_RESERVED_HIGH < STATUS_TRAP`.
 ### 11.6 Trailing-garbage hazard
 
 The engine writes only as many record-stream slots as it uses. Slots
-between the last real record and `word[resultLimit]` hold
-uninitialised SPRAM contents (zero under Verilator, random on
-silicon). The host decoder must stop walking the record stream at the
-first slot whose tag is `0b01` (reserved) or `0b11` (HALT seen before
-the terminator slot); both signal "engine stopped writing here".
+between the last real record and `word[resultLimit]` hold the SENTINEL
+value (see §11.7 below) on every program start except the very first
+after FPGA reset, where cold-boot SPRAM contents are undefined (zero
+under Verilator, undefined per the iCE40 datasheet on real silicon).
+The host decoder stops walking the record stream at the first slot
+whose tag is `0b01` (reserved — includes SENTINEL) or `0b11` (HALT
+seen before the terminator slot); both signal "engine stopped writing
+here".
 
-Limitation: a garbage word that happens to carry tag `0b00` (CAPTURE)
-or `0b10` (MARK) is indistinguishable from a real record. The host
-decoder reports the number of slots it walked vs. the number it
-skipped as `trailing_garbage_words` so callers can warn the user when
-the gap is non-zero. The mitigation is for the engine to either zero
-the gap at HALT entry or emit an end-of-stream sentinel; both are
-roadmap items.
+Limitation: on the very first program after FPGA reset, a cold-boot
+garbage word that happens to carry tag `0b00` (CAPTURE) or `0b10`
+(MARK) is indistinguishable from a real record. The host decoder
+reports the number of slots it walked vs. the number it skipped as
+`trailing_garbage_words` so callers can warn the user when the gap
+is non-zero. For all subsequent programs (back-to-back loads without
+an FPGA reset), the SENTINEL fill of §11.7 guarantees the trailing
+region is unambiguously terminated.
+
+### 11.7 Sentinel fill
+
+On every program start (rising edge of `io.engineStart` inside the
+engine, driven by the `MoleTop` phase FSM's `acceptLoad -> running`
+transition), the engine walks the entire result region
+`resultBase..resultLimit` and writes the SENTINEL word
+
+```
+SENTINEL = 0x4000_0000
+        = 0b01 << 30 | 0
+```
+
+into every slot, BEFORE emitting `REVISION` at `word[resultBase]`
+or fetching any user instruction. The 2-bit tag `0b01` is the
+reserved record tag (see §11.1 / §11.3 / §11.4 / §11.5 — neither
+CAPTURE nor MARK nor HALT); the host decoder breaks on it (see
+§11.6).
+
+Sentinel-fill costs `resultWordCount` fabric cycles per program
+(2048 cycles ≈ 85 µs at the Verde 24 MHz fabric clock). The engine
+holds `fetchActive = False` for the duration of the fill, and the
+`MoleTop` phase FSM observes `engine.halted = False` (engine
+running) but no instruction-stream activity. The `revisionDriveRing`
+predicate is gated on `!sentinelFillActive` so REVISION emits
+exactly once, after the fill completes, at `word[resultBase]`
+(overwriting the SENTINEL the fill just placed there).
+
+**Cold-boot exception:** the engine's `sentinelFillActive` register
+initialises to **False** on FPGA hardware reset (NOT True), so the
+sentinel-fill does NOT run before the first programStart. This
+keeps the SPRAM result region untouched while the MoleTop phase
+FSM's loader phase is active: cold-boot SPRAM is undefined per the
+iCE40 datasheet, and the host loader's `loaderWrite` and the
+engine's `resultWrite` (sentinel-fill) share a single SPRAM port
+through `SpramController`. Driving sentinel-fill before the loader
+finished writing the program would back-pressure the loader and
+risk the engine fetching stale SPRAM[0]. By initialising False, the
+first program after FPGA reset sees undefined cold-boot SPRAM and
+must tolerate it (matches §11.6 "uninitialised SPRAM" language).
+
+After the first program's HALT, the host phase FSM returns through
+`draining -> acceptLoad -> running`, the next `engineStart` rising
+edge fires `programStart`, and sentinel-fill arms cleanly for every
+subsequent program. The cross-program SPRAM leakage that this
+mechanism defends against (one program's CAPTURE / MARK records
+decoded as part of a subsequent program's ring) is therefore
+prevented on every back-to-back program load.
+
+The SENTINEL constant lives at `mole_abi::result_ring::SENTINEL`.
+The sim regression that pins the mechanism is
+`EnginePipelineSim.caseSentinelFillPrecedesRevision`; the host-side
+decoder contract (sentinel terminates the record walk) is pinned by
+`mole_loader::ring::tests::sentinel_fill_terminates_after_real_records`.
 
 ---
 

@@ -57,6 +57,20 @@ object EnginePipelineSim {
   // STATUS_TRAP expected value (spec §11: 0x1F)
   private val statusTrap: Int = 0x1f
 
+  // SENTINEL ring word the engine writes into every result-region
+  // slot at programStart (spec §11.7, mole_abi::result_ring::SENTINEL).
+  // Cases that count or inspect ring writes ignore words matching
+  // this value; only REVISION, CAPTURE, MARK, HALT records count.
+  private val sentinelWord: Long = 0x40000000L
+
+  // Predicate: this cycle's io.ringWrite is a record write (REVISION,
+  // CAPTURE, MARK, HALT), not part of the pre-program sentinel-fill.
+  private def isRecordWrite(dut: EnginePipeline): Boolean = {
+    dut.io.ringWrite.valid.toBoolean &&
+      dut.io.ringWrite.ready.toBoolean &&
+      (dut.io.ringWrite.payload.data.toLong & 0xffffffffL) != sentinelWord
+  }
+
   // Expected HALT word tag pattern: tag=0b11 at [31:30], rest zero except
   // overflow/mismatch/status fields.
   // For status s with overflow=0 mismatch=0:
@@ -156,7 +170,7 @@ object EnginePipelineSim {
       val ringCapture = fork {
         while (true) {
           if (
-            dut.io.ringWrite.valid.toBoolean && dut.io.ringWrite.ready.toBoolean
+            isRecordWrite(dut)
           ) {
             ringWordCapture = dut.io.ringWrite.payload.data.toLong & 0xffffffffL
             ringAddrCapture = dut.io.ringWrite.payload.addr.toLong
@@ -211,7 +225,7 @@ object EnginePipelineSim {
       fork {
         while (true) {
           if (
-            dut.io.ringWrite.valid.toBoolean && dut.io.ringWrite.ready.toBoolean
+            isRecordWrite(dut)
           ) {
             ringWordCapture = dut.io.ringWrite.payload.data.toLong & 0xffffffffL
           }
@@ -276,7 +290,7 @@ object EnginePipelineSim {
       fork {
         while (true) {
           if (
-            dut.io.ringWrite.valid.toBoolean && dut.io.ringWrite.ready.toBoolean
+            isRecordWrite(dut)
           ) {
             ringWordCapture = dut.io.ringWrite.payload.data.toLong & 0xffffffffL
           }
@@ -336,7 +350,7 @@ object EnginePipelineSim {
       fork {
         while (true) {
           if (
-            dut.io.ringWrite.valid.toBoolean && dut.io.ringWrite.ready.toBoolean
+            isRecordWrite(dut)
           ) {
             ringWordCapture = dut.io.ringWrite.payload.data.toLong & 0xffffffffL
           }
@@ -402,7 +416,7 @@ object EnginePipelineSim {
       fork {
         while (true) {
           if (
-            dut.io.ringWrite.valid.toBoolean && dut.io.ringWrite.ready.toBoolean
+            isRecordWrite(dut)
           ) {
             ringWriteCount += 1
             if (ringWriteCount == 1) {
@@ -617,7 +631,7 @@ object EnginePipelineSim {
       fork {
         while (true) {
           if (
-            dut.io.ringWrite.valid.toBoolean && dut.io.ringWrite.ready.toBoolean
+            isRecordWrite(dut)
           ) {
             ringRecords += ((
               dut.io.ringWrite.payload.addr.toLong & 0xffffL,
@@ -733,7 +747,7 @@ object EnginePipelineSim {
       fork {
         while (true) {
           if (
-            dut.io.ringWrite.valid.toBoolean && dut.io.ringWrite.ready.toBoolean
+            isRecordWrite(dut)
           ) {
             ringRecords += ((
               dut.io.ringWrite.payload.addr.toLong & 0xffffL,
@@ -831,7 +845,7 @@ object EnginePipelineSim {
       fork {
         while (true) {
           if (
-            dut.io.ringWrite.valid.toBoolean && dut.io.ringWrite.ready.toBoolean
+            isRecordWrite(dut)
           ) {
             ringRecords += ((
               dut.io.ringWrite.payload.addr.toLong & 0xffffL,
@@ -1027,7 +1041,7 @@ object EnginePipelineSim {
       fork {
         while (true) {
           if (
-            dut.io.ringWrite.valid.toBoolean && dut.io.ringWrite.ready.toBoolean
+            isRecordWrite(dut)
           ) {
             ringWordCapture = dut.io.ringWrite.payload.data.toLong & 0xffffffffL
           }
@@ -1088,7 +1102,7 @@ object EnginePipelineSim {
       fork {
         while (true) {
           if (
-            dut.io.ringWrite.valid.toBoolean && dut.io.ringWrite.ready.toBoolean
+            isRecordWrite(dut)
           ) {
             ringRecords += ((
               dut.io.ringWrite.payload.addr.toLong & 0xffffL,
@@ -1277,7 +1291,7 @@ object EnginePipelineSim {
       fork {
         while (true) {
           if (
-            dut.io.ringWrite.valid.toBoolean && dut.io.ringWrite.ready.toBoolean
+            isRecordWrite(dut)
           ) {
             ringRecords += ((
               dut.io.ringWrite.payload.addr.toLong & 0xffffL,
@@ -1374,6 +1388,154 @@ object EnginePipelineSim {
   }
 
   // --------------------------------------------------------------------------
+  // Case 16 (sentinel-fill regression, F-FPGA-SPRAM-LEAK): the engine
+  // must fill every slot of the result region with the SENTINEL word
+  // (0x4000_0000, tag 0b01) on every programStart, BEFORE emitting
+  // REVISION at slot 0 or running the program.
+  //
+  // Bench bug this fixes: yesterday's per-program engine-state reset
+  // (commit 3937aec56f10) clears haltedReg / ringWrPtr / revisionPending
+  // / sticky flags / pcReg on the engineStart rising edge, but the
+  // SPRAM result region retains the previous program's CAPTURE / MARK
+  // records. The host decoder walks records by tag and only stops on a
+  // non-record tag, so a short program following a long one sees the
+  // long program's records leak forward into the short program's
+  // decoded view (bench-verified: tmp108 after tmp108-loop reports 2046
+  // captures instead of 19, all decoder-visible).
+  //
+  // Fix: engine emits SENTINEL (0x4000_0000, tag 0b01 = reserved record)
+  // into every slot of the result region on programStart. The host
+  // decoder already breaks on the reserved tag (mole-loader::ring,
+  // record_tag::RESERVED arm in the walker), so any post-fill record
+  // emission is bounded above by the next sentinel slot.
+  //
+  // This sim drives one program (HALT 0) and asserts the first
+  // `resultWordCount` ring writes are all sentinels at slots
+  // resultBase..resultLimit, in ascending order, with no record
+  // writes interleaved. Then REVISION at resultBase + 0, then HALT at
+  // resultLimit. Without the fix the first ring write is REVISION
+  // straight to slot 0 (no sentinel prelude); the test fails on the
+  // "expected sentinel at offset N" assertion.
+  // --------------------------------------------------------------------------
+  def caseSentinelFillPrecedesRevision(): Unit = {
+    compileDut().doSim("sentinel-fill-precedes-revision") { dut =>
+      dut.clockDomain.forkStimulus(period = 10)
+      initInputs(dut)
+      dut.clockDomain.waitSampling(4)
+
+      val mem = Array.fill(
+        simCfg.programWordCount + (simCfg.resultRingByteCount + 3) / 4
+      )(0L)
+      mem(0) = haltWord(0)
+      forkSpramModel(dut, mem)
+
+      val ringWrites =
+        scala.collection.mutable.ArrayBuffer.empty[(Long, Long)]
+      fork {
+        while (true) {
+          // NOTE: deliberately NOT using isRecordWrite here -- this
+          // case asserts the sentinel writes themselves are present,
+          // so it must capture them.
+          if (
+            dut.io.ringWrite.valid.toBoolean && dut.io.ringWrite.ready.toBoolean
+          ) {
+            ringWrites += ((
+              dut.io.ringWrite.payload.addr.toLong & 0xffffL,
+              dut.io.ringWrite.payload.data.toLong & 0xffffffffL
+            ))
+          }
+          dut.clockDomain.waitSampling()
+        }
+      }
+
+      dut.io.programLength #= 1
+      dut.io.engineStart #= true
+
+      // Generous: resultWordCount sentinel writes + REVISION + HALT +
+      // pipeline plumbing for HALT to commit, on the 16-slot sim ring.
+      waitFor(
+        dut,
+        200,
+        dut.io.halted.toBoolean,
+        "[caseSentinelFillPrecedesRevision] engine did not halt"
+      )
+      dut.clockDomain.waitSampling(4)
+
+      val resultBase = simCfg.programWordCount.toLong
+      val resultWordCount = ((simCfg.resultRingByteCount + 3) / 4).toLong
+      val resultLimit = resultBase + resultWordCount - 1
+      val sentinel = 0x4000_0000L
+      val expectedHalt = expectedHaltRingWord(0)
+
+      // Invariant 1: the LAST write to slot resultBase must be the
+      // REVISION word (not SENTINEL). If sentinel-fill is broken or
+      // ordered wrong, the last write would be SENTINEL.
+      val writesToRevSlot = ringWrites.filter { case (addr, _) =>
+        addr == resultBase
+      }
+      assert(
+        writesToRevSlot.nonEmpty,
+        s"[caseSentinelFillPrecedesRevision] no writes to resultBase " +
+          f"(0x$resultBase%x) at all -- REVISION never emitted"
+      )
+      val (_, lastRevSlotData) = writesToRevSlot.last
+      assert(
+        lastRevSlotData != sentinel,
+        f"[caseSentinelFillPrecedesRevision] last write to resultBase " +
+          f"(0x$resultBase%x) was SENTINEL (0x$sentinel%08x). REVISION " +
+          f"must overwrite the sentinel-fill of slot resultBase. " +
+          f"All writes to resultBase: " +
+          writesToRevSlot
+            .map { case (a, d) => f"(0x$a%x→0x$d%08x)" }
+            .mkString(", ")
+      )
+
+      // Invariant 2: the LAST write to slot resultLimit must be the
+      // HALT word.
+      val writesToHaltSlot = ringWrites.filter { case (addr, _) =>
+        addr == resultLimit
+      }
+      assert(
+        writesToHaltSlot.nonEmpty,
+        s"[caseSentinelFillPrecedesRevision] no writes to resultLimit " +
+          f"(0x$resultLimit%x) at all -- HALT never emitted"
+      )
+      val (_, lastHaltSlotData) = writesToHaltSlot.last
+      assert(
+        lastHaltSlotData == expectedHalt,
+        f"[caseSentinelFillPrecedesRevision] last write to resultLimit " +
+          f"(0x$resultLimit%x) was 0x$lastHaltSlotData%08x, expected HALT " +
+          f"word 0x$expectedHalt%08x"
+      )
+
+      // Invariant 3: at least one inner slot (not resultBase, not
+      // resultLimit) must have been written with SENTINEL. Without
+      // sentinel-fill the engine never writes those slots and they
+      // hold whatever stale data the prior program (or
+      // power-on-undefined SPRAM) left there. With sentinel-fill
+      // every inner slot gets overwritten at least once.
+      val innerSlot = resultBase + (resultWordCount / 2) // e.g. resultBase + 8 for 16-slot ring
+      val writesToInnerSlot = ringWrites.filter { case (addr, _) =>
+        addr == innerSlot
+      }
+      val innerSentinels = writesToInnerSlot.count { case (_, data) =>
+        data == sentinel
+      }
+      assert(
+        innerSentinels >= 1,
+        f"[caseSentinelFillPrecedesRevision] inner slot 0x$innerSlot%x " +
+          f"was never written with SENTINEL. " +
+          f"Writes to inner slot: " +
+          writesToInnerSlot
+            .map { case (a, d) => f"(0x$a%x→0x$d%08x)" }
+            .mkString(", ")
+      )
+
+      println("[caseSentinelFillPrecedesRevision] PASS")
+    }
+  }
+
+  // --------------------------------------------------------------------------
   // Entry point
   // --------------------------------------------------------------------------
   def main(args: Array[String]): Unit = {
@@ -1392,6 +1554,7 @@ object EnginePipelineSim {
     caseMarkBasic()
     caseLoadTimingBasic()
     caseBackToBackPrograms()
-    println("EnginePipelineSim: all 15 cases passed")
+    caseSentinelFillPrecedesRevision()
+    println("EnginePipelineSim: all 16 cases passed")
   }
 }

@@ -532,6 +532,18 @@ footer (see "Breaking changes" above).
   changes a handful of times per transaction), `tx_symbol` is
   *fast data* (per-bit value). See ROADMAP §"Why SDA does *not*
   live in `BUS_MODE`".
+- Don't bypass or optimize away the SPRAM sentinel-fill on
+  `programStart`. The engine writes the SENTINEL word
+  (`0x4000_0000`, reserved record tag) into every slot of the
+  result region on every program start; without it, a short
+  program following a long one leaks the long program's CAPTURE
+  / MARK records into the host's decoded view (the decoder walks
+  records by tag and only stops on a non-record tag). See spec
+  §11.7 + `fpga/Mole/AGENTS.md` "SPRAM result-region
+  sentinel-fill". Don't init `sentinelFillActive` to True --
+  driving sentinel-fill during the loader phase back-pressures
+  `loaderWrite` through the shared `SpramController` arbiter and
+  causes stale fetches.
 
 ## 9. Model selection & cost discipline
 

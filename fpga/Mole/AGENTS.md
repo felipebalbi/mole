@@ -363,6 +363,69 @@ See spec §11 for the full ABI constants. Overflow and recovery
 semantics: result-ring overflow latches into the HALT word's
 `[29]` bit; records written after overflow are dropped.
 
+## Per-program reset on engineStart rising edge
+
+The engine clears its architectural per-program state on every
+`programStart` pulse (rising edge of `io.engineStart` detected
+inside `EnginePipeline.scala`). The cleared regs are:
+
+- `haltedReg`, `haltStatusReg` — so the engine actually runs the
+  next program after a previous HALT.
+- `revisionPending` — so REVISION re-emits at slot 0 for every
+  program.
+- `ringWrPtr`, `ringOverflow` — so record writes start at slot 1
+  and the overflow latch starts cleared.
+- `mismatchFlagReg`, `timeoutFlagReg`, `startFlagReg`, `stopFlagReg`,
+  `regZeroFlagReg` — so the sticky flag set starts at all-False
+  for every program (otherwise a flag from program N could survive
+  into program N+1's `BRANCH_ON` / `WAIT_ON` decisions).
+- `pcReg := 0` — so fetching resumes from PC=0.
+
+The `MoleTop` phase FSM (`acceptLoad -> running -> draining`)
+holds `engineStart = False` during `acceptLoad` and `draining`,
+and drives it True only inside `runningState`. Every transition
+into `runningState` for a NEW program is therefore a 0→1 edge on
+`io.engineStart` that fires the reset. Back-to-back program loads
+without an FPGA power cycle are supported.
+
+The SPRAM result region is also cleared per program — see the
+sentinel-fill section below.
+
+## SPRAM result-region sentinel-fill (spec §11.7)
+
+Per-program architectural reset (above) clears the engine's REGS
+but not the contents of the SPRAM result region. Without an
+additional mechanism, a short program following a long one would
+leak the long program's CAPTURE / MARK records into the short
+program's decoded view (the host decoder walks records by tag and
+only stops on a non-record tag, so prior records propagate
+forward).
+
+The engine writes the SENTINEL word `0x4000_0000` (reserved
+record tag `0b01` + zero payload) into every slot of the result
+region `resultBase..resultLimit` on every `programStart`, BEFORE
+emitting REVISION or fetching the first instruction. The host
+decoder breaks on the reserved tag (per spec §11.6), so a
+subsequent short program's decoded ring stops at the first
+sentinel slot past its actual records.
+
+The `sentinelFillActive` register initialises **False** on FPGA
+hardware reset (NOT True), so the sentinel-fill does NOT run
+before the first `programStart` after reset. Driving sentinel-fill
+during the loader phase would back-pressure `loaderWrite` for
+`resultWordCount` cycles through the shared `SpramController`
+arbiter (read > resultWrite > loaderWrite) and risk the engine
+fetching stale SPRAM. By initialising False, the first program
+after FPGA reset sees the cold-boot SPRAM (undefined per the
+iCE40 datasheet); every subsequent program is sentinel-filled
+cleanly because `programStart` fires after the loader phase ends.
+
+Don't bypass the sentinel-fill. Don't init `sentinelFillActive`
+to True ("first program after reset deserves a clean SPRAM too")
+without first addressing the loader / sentinel-fill arbitration
+race documented above. The pre-program-reset case is acceptable
+collateral; the cross-program leak case is not.
+
 ## Bus-shaped FSM idiom
 
 Same pattern the I2c example project codified (and named in its

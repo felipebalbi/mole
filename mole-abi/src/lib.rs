@@ -196,6 +196,37 @@ pub mod result_ring {
     /// Words reserved by REVISION (1 word) + the HALT terminator slot
     /// (1 word) that bound the record stream.
     pub const OVERHEAD_WORDS: usize = 2;
+
+    /// Sentinel word the engine writes into every slot of the result
+    /// region on every program start (spec §11.7).
+    ///
+    /// Layout:
+    ///
+    /// ```text
+    /// [31:30] tag      = 0b01   (reserved record tag)
+    /// [29: 0] payload  = 0
+    /// ```
+    ///
+    /// Tag `0b01` is the reserved record tag (see [`crate::record_tag`])
+    /// — not a CAPTURE / MARK / HALT record. The host decoder breaks
+    /// on this tag mid-stream, treating the run that begins at the
+    /// sentinel as trailing garbage.
+    ///
+    /// Pre-program sentinel-fill is the engine's defence against
+    /// cross-program SPRAM leakage: after a previous program writes
+    /// CAPTURE / MARK records into the result region, those slots
+    /// retain their tagged contents until overwritten. Without the
+    /// sentinel-fill, a subsequent program that emits fewer records
+    /// would leak the previous program's records into the host's
+    /// decoded view, because the walker keeps reading legal record
+    /// tags forward until it hits a non-record tag.
+    ///
+    /// The engine emits the sentinel on every cycle from
+    /// `programStart` (rising edge of `io.engineStart`) until every
+    /// slot in `resultBase..resultLimit-1` has been overwritten. Only
+    /// then does fetch unblock and REVISION emit at slot 0. See spec
+    /// §11.7 for the full contract.
+    pub const SENTINEL: u32 = 0x4000_0000;
 }
 
 /// REVISION word packing (spec §11.2):
@@ -321,5 +352,19 @@ mod tests {
         assert_eq!(result_ring::OVERHEAD_WORDS, 2);
         assert_eq!(result_ring::REVISION_OFFSET_WORDS, 0);
         assert_eq!(result_ring::RECORD_STREAM_OFFSET_WORDS, 1);
+    }
+
+    #[test]
+    fn result_ring_sentinel_is_reserved_tag_with_zero_payload() {
+        // SENTINEL must carry the reserved record tag (0b01) in the top
+        // two bits so the host decoder breaks on it (the walker stops
+        // on record_tag::RESERVED, see mole-loader::ring). All other
+        // bits zero so dumps are visually obvious as "the engine
+        // pre-fill, not a record".
+        let tag = (result_ring::SENTINEL >> 30) & 0x3;
+        assert_eq!(tag, record_tag::RESERVED);
+        let payload = result_ring::SENTINEL & 0x3FFF_FFFF;
+        assert_eq!(payload, 0);
+        assert_eq!(result_ring::SENTINEL, 0x4000_0000);
     }
 }

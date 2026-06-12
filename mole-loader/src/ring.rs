@@ -323,14 +323,22 @@ pub fn decode_ring(bytes: &[u8]) -> Result<DecodedRing, RingError> {
     // engine writes a contiguous record stream starting at offset 1
     // and stops at whatever `resultWp` reached when the program
     // halted. Slots from `resultWp` up to `resultLimit - 1` hold
-    // *uninitialised SPRAM* on real silicon (zero only under
-    // Verilator) --- see the module-level "trailing-garbage hazard"
-    // callout.
+    // either:
+    //   - the SENTINEL word (`mole_abi::result_ring::SENTINEL` =
+    //     `0x4000_0000`, reserved record tag `0b01`) — the normal
+    //     case on every program after the first, because the engine
+    //     sentinel-fills the entire result region on every
+    //     `programStart` (spec §11.7); or
+    //   - uninitialised SPRAM (zero under Verilator, undefined on
+    //     real silicon) — only on the very first program after
+    //     FPGA reset, where the engine's `sentinelFillActive`
+    //     register initialised False to avoid back-pressuring the
+    //     loader phase (spec §11.7 cold-boot exception).
     //
-    // We therefore stop walking at the first word whose tag is not
-    // a legal record tag (`0b01` reserved, or `0b11` HALT mid-
-    // stream): both signal "engine stopped writing here, garbage
-    // begins". The remainder is reported via
+    // Either way, we stop walking at the first word whose tag is
+    // not a legal record tag (`0b01` reserved, includes SENTINEL,
+    // or `0b11` HALT mid-stream): both signal "engine stopped
+    // writing here, garbage begins". The remainder is reported via
     // `trailing_garbage_words` so callers can warn the user. The
     // HALT integrity check at the tail (above) guarantees we
     // didn't simply lose framing.
@@ -795,6 +803,42 @@ mod tests {
         assert!(ring.records.is_empty());
         assert_eq!(ring.trailing_garbage_words, 1);
         assert_eq!(ring.halt.status, 0);
+    }
+
+    #[test]
+    fn sentinel_fill_terminates_after_real_records() {
+        // Real-silicon post-fix layout: a small number of CAPTURE
+        // records, then the SENTINEL run that the engine pre-filled
+        // before this program started writing, then the HALT
+        // terminator at the tail.
+        //
+        // This is the engine's defence against cross-program SPRAM
+        // leakage: previously, a short program following a long one
+        // would see the long program's CAPTURE / MARK records leak
+        // into its decoded output, because the walker keeps reading
+        // legal record tags forward until it hits a non-record tag.
+        // The SENTINEL (tag 0b01 = reserved record) is that
+        // non-record tag.
+        let halt = halt_word_status(0);
+        let captures = [
+            capture_word(false),
+            capture_word(true),
+            capture_word(false),
+        ];
+        let sentinel = mole_abi::result_ring::SENTINEL;
+        // Layout: REVISION + 3 CAPTUREs + 100 SENTINELs + HALT = 105 words.
+        let mut records: Vec<u32> = Vec::with_capacity(103);
+        records.extend_from_slice(&captures);
+        records.extend(std::iter::repeat_n(sentinel, 100));
+        let bytes = build_ring(0, &records, halt, 105);
+        let ring = decode_ring(&bytes).unwrap();
+        assert_eq!(ring.records.len(), 3, "expected exactly 3 captures");
+        assert_eq!(ring.records[0], Record::Capture { sda: false });
+        assert_eq!(ring.records[1], Record::Capture { sda: true });
+        assert_eq!(ring.records[2], Record::Capture { sda: false });
+        assert_eq!(ring.trailing_garbage_words, 100);
+        assert_eq!(ring.halt.status, 0);
+        assert!(!ring.halt.overflow);
     }
 
     #[test]

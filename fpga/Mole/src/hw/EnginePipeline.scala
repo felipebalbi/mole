@@ -341,6 +341,40 @@ case class EnginePipeline(cfg: MoleConfig) extends Component {
   val ringWrPtr = Reg(UInt(ringPtrWidth bits)) init 0
   val ringOverflow = Reg(Bool()) init False
 
+  // Sentinel-fill state (spec §11.7).
+  //
+  // On every program start (rising edge of io.engineStart) the engine
+  // walks the result region resultBase..resultLimit and writes the
+  // SENTINEL word (0x4000_0000, reserved record tag 0b01 + zero
+  // payload) into every slot before letting the program fetch any
+  // instructions. The host decoder breaks on the reserved tag, so a
+  // subsequent short program cannot leak the previous program's
+  // CAPTURE / MARK records into the decoded view (defence against
+  // cross-program SPRAM leakage; see fpga/Mole/AGENTS.md
+  // "Per-program reset on engineStart rising edge" + spec §11.6 /
+  // §11.7 for the host-side contract).
+  //
+  // `sentinelFillActive` init **False** so the engine does not stream
+  // resultWrite at cold boot. The MoleTop phase FSM drives engineStart
+  // False during acceptLoad / draining phases, and only goes True
+  // (triggering programStart) once the loader has finished writing
+  // the program into SPRAM. Sentinel-fill that starts at cold boot
+  // would compete with the loader's loaderWrite for the SPRAM port
+  // and back-pressure the loader for resultWordCount cycles --
+  // observed to cause stale-SPRAM fetches in BitCycleEngineJmpBoundarySim
+  // where loadAt + engineStart happen close together. Cold-boot SPRAM
+  // contents are undefined per the iCE40 datasheet (often zero on
+  // Verilator); the first program after FPGA reset sees that
+  // undefined state. Every subsequent program is sentinel-filled
+  // cleanly because programStart fires after the loader phase ends.
+  //
+  // `sentinelFillPtr` is the slot index relative to resultBase
+  // currently being written; it runs 0..resultWordCount-1 and the
+  // FSM clears `sentinelFillActive` when the last slot is acked.
+  val sentinelFillActive = Reg(Bool()) init False
+  val sentinelFillPtr = Reg(UInt(ringPtrWidth bits)) init 0
+  val SENTINEL_WORD: Bits = B(0x40000000L, 32 bits)
+
   // Bus driver registers (AGENTS §"Registered drivers"; no releaseAll()).
   // Written by WIRE opcode execution. The bus-shaped FSM idiom: only the
   // WIRE mini-FSM writes these; they hold their last value between opcodes.
@@ -519,7 +553,7 @@ case class EnginePipeline(cfg: MoleConfig) extends Component {
   // are declared); we declare a Bool now and assign it later.
   val haltInFlight = Bool()
   val fetchActive = io.engineStart && !haltedReg && !haltInFlight &&
-    !revisionPending &&
+    !revisionPending && !sentinelFillActive &&
     (pcReg < io.programLength.resize(progAddrWidth bits))
 
   // --------------------------------------------------------------------------
@@ -2211,6 +2245,48 @@ case class EnginePipeline(cfg: MoleConfig) extends Component {
     stopFlagReg := False
     regZeroFlagReg := False
     pcReg := 0
+    // Re-arm the sentinel-fill FSM (spec §11.7). Every program start
+    // walks the entire result region writing SENTINEL into every slot
+    // before any record write fires.
+    sentinelFillActive := True
+    sentinelFillPtr := 0
+  }
+
+  // ---- Sentinel-fill direct ring drive (spec §11.7) --------------------
+  //
+  // While `sentinelFillActive`, the engine drives one SENTINEL
+  // (0x4000_0000, reserved record tag 0b01) write per cycle into
+  // ascending slots of the result region, starting at resultBase.
+  // The FSM clears `sentinelFillActive` when the last slot
+  // (resultBase + resultWordCount - 1 = resultLimit) is acked.
+  //
+  // The W stage, REVISION emit, and MARK direct-ring driver are all
+  // gated on `!sentinelFillActive` so the sentinel-fill wins the
+  // SPRAM ring port uncontested. `fetchActive` is also gated on
+  // `!sentinelFillActive` (see the fetchActive definition near
+  // line 546) so no instruction can be in flight while sentinel-fill
+  // runs.
+  //
+  // PLACEMENT NOTE: this block lives BEFORE the REVISION direct-ring
+  // drive block immediately below for the same reason that programStart
+  // lives before REVISION: on the cycle the sentinel-fill writes the
+  // final slot AND REVISION simultaneously becomes legal (next cycle),
+  // source-order arbitration keeps them on separate cycles. The
+  // `!sentinelFillActive` gate on REVISION ensures REVISION holds
+  // until the sentinel-fill has fully drained.
+  when(sentinelFillActive) {
+    io.ringWrite.valid := True
+    io.ringWrite.payload.addr :=
+      (U(resultBase, spramAddrWidth bits) +
+        sentinelFillPtr.resize(spramAddrWidth bits)).resized
+    io.ringWrite.payload.data := SENTINEL_WORD
+    when(io.ringWrite.ready) {
+      sentinelFillPtr := sentinelFillPtr + 1
+      when(sentinelFillPtr === U(resultWordCount - 1, ringPtrWidth bits)) {
+        sentinelFillActive := False
+        sentinelFillPtr := 0
+      }
+    }
   }
 
   // ---- REVISION direct ring drive (spec §11.2) --------------------------
@@ -2235,7 +2311,8 @@ case class EnginePipeline(cfg: MoleConfig) extends Component {
   // defense-in-depth.
   val wDrainingRingWrite = w.down.isFiring && w(PipeStageables.RING_WRITE_VALID)
   val revisionDriveRing =
-    revisionPending && io.engineStart && !wDrainingRingWrite
+    revisionPending && io.engineStart && !wDrainingRingWrite &&
+      !sentinelFillActive && !programStart
   when(revisionDriveRing) {
     io.ringWrite.valid := True
     io.ringWrite.payload.addr := U(resultBase, spramAddrWidth bits)
@@ -2275,7 +2352,8 @@ case class EnginePipeline(cfg: MoleConfig) extends Component {
   // contention and survives any future change that loosens the
   // fetchActive gate.
   val xMarkDriveRing = xMarkActive && (xMarkPhase < 3) && !xMarkSkip
-  when(xMarkDriveRing && !wDrainingRingWrite && !revisionDriveRing) {
+  when(xMarkDriveRing && !wDrainingRingWrite && !revisionDriveRing &&
+       !sentinelFillActive) {
     // Override the component-scope idle defaults (and any W-stage
     // assignment, which is gated False by the mutex above).
     io.ringWrite.valid := True
