@@ -21,6 +21,8 @@ This specification defines:
   pipeline.
 - The **v0.2 wire format**: preamble magic, version word, length word,
   instruction stream layout, HALT-word bit positions.
+- The **v0.2 result-ring format**: REVISION header, CAPTURE / MARK
+  records, HALT terminator (§11).
 - The **moleasm v0.2 grammar**: canonical syntax, sugar forms, and
   assembler error conditions.
 - The **ABI constants** that must be frozen in `mole-abi` by Phase B5
@@ -31,8 +33,6 @@ This specification does **not** define:
 - The host-to-Mole UART framing envelope (length prefix + CRC-16/XMODEM).
   That layer is unchanged from v0; see `mole-asm/tests/fixtures/mole-asm.py`
   `build_frame()`.
-- The result ring record format (CAPTURE, MARK, HALT tags in the result
-  stream). That is unchanged from v0; see `mole-abi/src/lib.rs`.
 - SpinalHDL implementation details. Those live in `fpga/Mole/`.
 - The Scheme SDK (Layer 1). The SDK compiles down to the bytecode defined
   here; its own spec is out of scope.
@@ -1008,11 +1008,15 @@ MARK label=0
 ```
 
 **Stage behaviour:** F/D/R/E pass through. W stage atomically commits a
-3-word record to the result ring:
+3-word MARK record to the result ring per §11.4:
 
-1. Header word: `tag=0b10` (MARK) at `[31:30]`, label in low bits.
-2. `ts_lo`: low 16 bits of the free-running quarter-bit timestamp.
-3. `ts_hi`: high 16 bits of the free-running quarter-bit timestamp.
+1. Header word: `tag=0b10` (MARK) at `[31:30]`, label in `[13:0]`,
+   `[29:14]` reserved-zero. The instruction's 14-bit label field
+   (`[16:3]`) is shifted to `[13:0]` for the ring record.
+2. `ts_lo`: low 16 bits of the free-running quarter-bit timestamp in
+   `[15:0]`; `[31:16]` reserved-zero.
+3. `ts_hi`: high 16 bits of the free-running quarter-bit timestamp in
+   `[15:0]`; `[31:16]` reserved-zero.
 
 No other ring writer runs during this 3-word commit window.
 
@@ -1540,18 +1544,119 @@ preamble and recomposing the MAGIC + LEN bytes via `build_frame`.
 
 ---
 
-## 11. HALT word layout
+## 11. Result-ring format
 
-The HALT word is a 32-bit result-ring record written by the engine when
-a HALT instruction executes (or on a trap). The 2-bit tag at `[31:30]`
-identifies it in the result ring.
+The engine streams a fixed-size byte buffer back to the host on every
+program halt. The buffer is `MoleConfig.resultRingByteCount` bytes
+(Verde default 8192 = **2048 32-bit words**) of SPRAM backing.
+
+**Grain.** Every record is a whole number of **32-bit words**. The
+drainer reads each SPRAM word and emits its 4 bytes in little-endian
+order (b0=LSB first). The result ring is **not** half-word grained;
+the CRC-16/XMODEM checksum used on the host-to-engine frame
+(§10) is the only 16-bit-wide quantity in the host-link protocol.
+
+### 11.1 Layout
 
 ```text
-[31:30] tag         = 0b11  (HALT record; identifies this word in result ring)
-[29]    overflow    (sticky overflow latch: 1 if result ring overflowed)
-[28]    mismatch    (snapshot of MISMATCH_FLAG at halt entry)
-[27:23] status      (5 bits, 0x00..0x1F)
-[22: 0] reserved    (must be 0; loader verifies)
+word[0]                              REVISION word
+word[1] .. word[resultLimit-1]       record stream (CAPTURE / MARK)
+                                     followed by uninitialised SPRAM
+                                     ("trailing garbage", see §11.5)
+word[resultLimit] (= last word)      HALT terminator
+```
+
+Where `resultLimit = (resultRingByteCount / 4) - 1` (the index of the
+last 32-bit ring word). The HALT slot is reserved: the engine writes
+HALT at this fixed address regardless of how many records preceded it,
+so an overflowing record stream cannot overwrite the terminator.
+
+### 11.2 REVISION word (`word[0]`)
+
+The engine writes a 32-bit revision identifier into the first ring slot
+on every program start (on the cycle the host-side phase FSM enters
+`runningState`, before any user instruction executes). The layout
+matches `fpga/Mole/src/hw/Revision.scala`:
+
+```text
+[31:24] major   (8 bits)
+[23:16] minor   (8 bits)
+[15: 0] patch   (16 bits)
+```
+
+The host uses REVISION to confirm the engine bitstream matches what
+the host CLI was built against. It is NOT a record-stream entry; the
+record stream starts at `word[1]`.
+
+### 11.3 CAPTURE record (1 word, tag `0b00`)
+
+Written by every WIRE-group opcode whose flag triple has `capture=1`
+(`EMIT_BIT_*`, `EMIT_QUARTER_*`, `EMIT_BYTE_*` ACK slot,
+`SAMPLE_BIT_ON_SCL`, `DRIVE_BIT_ON_SCL`). One CAPTURE record per
+capture-bearing opcode; the order matches program execution order.
+
+```text
+[31:30] tag        = 0b00  (CAPTURE record)
+[29: 1] reserved   = 0
+[ 0]    sda        (the SDA bit sampled at the capture point)
+```
+
+CAPTURE also writes the sampled bit into R7 per §8 so program logic
+(`BRANCH_ON REG_ZERO` etc.) can react to the value inline; the
+ring write is the host-observable transcript and runs in parallel.
+
+**ABI constants:**
+
+```rust
+pub const RECORD_TAG_CAPTURE: u8       = 0b00;
+pub const RECORD_WIDTH_CAPTURE: usize  = 1; // in 32-bit words
+```
+
+### 11.4 MARK record (3 words, tag `0b10`)
+
+Written atomically by `CTRL.MARK` (§5.16). The three words occupy
+three consecutive 32-bit ring slots; no other ring writer is allowed
+to interleave between them.
+
+```text
+word 0 (header):
+  [31:30] tag      = 0b10  (MARK record)
+  [29:14] reserved = 0
+  [13: 0] label    (caller-supplied 14-bit label, 0..16383)
+
+word 1 (ts_lo):
+  [31: 0] free-running quarter-bit timestamp, low 16 bits
+          in [15:0]; [31:16] = 0.
+
+word 2 (ts_hi):
+  [31: 0] free-running quarter-bit timestamp, high 16 bits
+          in [15:0]; [31:16] = 0.
+```
+
+The two timestamp words carry their useful bits in the low half of
+each 32-bit word; the high half is reserved-zero. (This split is a
+relic of the v0 16-bit-grained ring and may be folded into a single
+32-bit timestamp word in a future format bump.)
+
+**ABI constants:**
+
+```rust
+pub const RECORD_TAG_MARK: u8       = 0b10;
+pub const RECORD_WIDTH_MARK: usize  = 3; // in 32-bit words
+```
+
+### 11.5 HALT terminator (1 word, tag `0b11`)
+
+Written at `word[resultLimit]` (the last 32-bit ring slot) when a HALT
+instruction executes or the engine traps. The fixed-address write
+guarantees overflowing CAPTURE/MARK records can never overwrite it.
+
+```text
+[31:30] tag        = 0b11  (HALT record)
+[29]    overflow   (sticky overflow latch: 1 if record stream overflowed)
+[28]    mismatch   (snapshot of MISMATCH_FLAG at halt entry)
+[27:23] status     (5 bits, 0x00..0x1F)
+[22: 0] reserved   (must be 0; loader verifies)
 ```
 
 **Status partitioning (5-bit space, 32 values):**
@@ -1566,6 +1671,9 @@ identifies it in the result ring.
 **ABI constants:**
 
 ```rust
+pub const RECORD_TAG_HALT: u8       = 0b11;
+pub const RECORD_WIDTH_HALT: usize  = 1; // in 32-bit words
+
 pub const STATUS_USER_MAX: u8       = 0x1C;
 pub const STATUS_RESERVED_LOW: u8   = 0x1D;
 pub const STATUS_RESERVED_HIGH: u8  = 0x1E;
@@ -1574,6 +1682,23 @@ pub const STATUS_TRAP: u8           = 0x1F;
 
 **Invariant:** `STATUS_USER_MAX < STATUS_RESERVED_LOW <
 STATUS_RESERVED_HIGH < STATUS_TRAP`.
+
+### 11.6 Trailing-garbage hazard
+
+The engine writes only as many record-stream slots as it uses. Slots
+between the last real record and `word[resultLimit]` hold
+uninitialised SPRAM contents (zero under Verilator, random on
+silicon). The host decoder must stop walking the record stream at the
+first slot whose tag is `0b01` (reserved) or `0b11` (HALT seen before
+the terminator slot); both signal "engine stopped writing here".
+
+Limitation: a garbage word that happens to carry tag `0b00` (CAPTURE)
+or `0b10` (MARK) is indistinguishable from a real record. The host
+decoder reports the number of slots it walked vs. the number it
+skipped as `trailing_garbage_words` so callers can warn the user when
+the gap is non-zero. The mitigation is for the engine to either zero
+the gap at HALT entry or emit an end-of-stream sentinel; both are
+roadmap items.
 
 ---
 

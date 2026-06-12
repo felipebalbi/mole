@@ -6,7 +6,7 @@
 //! - `RESULT_RING_BYTE_COUNT` --- `MoleConfig.scala`
 //! - `MAX_PROGRAM_WORDS` --- engine SPRAM budget; encoder enforces
 //!   via `frame.rs` length cap.
-//! - Record tags + HALT bit layout --- `BitCycleEngineCore.scala`
+//! - Record tags + HALT bit layout --- `EnginePipeline.scala`
 //!   (ring write paths).
 //! - REVISION packing --- `Revision.scala` (see also the Makefile
 //!   vars per AGENTS §"REVISION word convention").
@@ -131,11 +131,11 @@ pub mod halt {
 /// 0b11 = HALT     (1 word, at resultLimit)
 /// ```
 ///
-/// Note: result-ring word widths are 16 bits (the engine's result
-/// ring is 16-bit-addressed), independent of the 32-bit program-
-/// memory instruction width. Constants in [`record_width_words`]
-/// count in 16-bit words accordingly. See `BitCycleEngineCore.scala`
-/// (ring write paths) as the authoritative source.
+/// Result-ring words are **32 bits** wide --- the SPRAM grain matches
+/// the v0.2 program-memory instruction width. The drainer streams
+/// each 32-bit word as 4 LE bytes (b0 first). Per-record widths in
+/// [`record_width_words`] count in 32-bit units. See `MOLE-0.2-SPEC.md`
+/// §11 and `fpga/Mole/src/hw/EnginePipeline.scala` ring-write paths.
 pub mod record_tag {
     /// Shift for the 2-bit record tag at `[31:30]`.
     pub const SHIFT: u32 = 30;
@@ -152,22 +152,53 @@ pub mod record_tag {
     pub const HALT: u32 = 0b11;
 }
 
-/// Width in 16-bit words of each variable-size record.
+/// Width in **32-bit** words of each variable-size record.
 ///
-/// Result-ring words are 16 bits wide (the engine's result ring is
-/// 16-bit-addressed), independent of the 32-bit program-memory
-/// instruction width. These constants count in 16-bit units.
-/// See `BitCycleEngineCore.scala` (ring write paths).
+/// Result-ring slots are 32-bit-grained (one SPRAM word per slot,
+/// drained as 4 LE bytes). See `MOLE-0.2-SPEC.md` §11 and
+/// `fpga/Mole/src/hw/EnginePipeline.scala` (ring-write paths).
 pub mod record_width_words {
-    /// CAPTURE is a single word.
+    /// CAPTURE is a single 32-bit word: `[31:30] tag=0b00`,
+    /// `[29:1] reserved=0`, `[0] sda`. Spec §11.3.
     pub const CAPTURE: usize = 1;
-    /// MARK is header + timestamp-lo + timestamp-hi.
+    /// MARK is three 32-bit words: header + timestamp-lo + timestamp-hi.
+    /// Spec §11.4.
     pub const MARK: usize = 3;
-    /// HALT is a single word.
+    /// HALT is a single 32-bit word at the ring's last slot. Spec §11.5.
     pub const HALT: usize = 1;
 }
 
-/// REVISION word packing:
+/// CAPTURE record bit layout (spec §11.3, 1 word, tag `0b00`).
+pub mod capture {
+    /// Bit position of the captured SDA sample.
+    pub const SDA_BIT: u32 = 0;
+    /// Mask covering the reserved bits `[29:1]` (must be zero).
+    pub const RESERVED_BITS_MASK: u32 = 0x3FFF_FFFE;
+}
+
+/// MARK record bit layout (spec §11.4, 3 words, tag `0b10`).
+pub mod mark {
+    /// Shift for the 14-bit label in the MARK header word at `[13:0]`.
+    pub const LABEL_SHIFT: u32 = 0;
+    /// Mask (after shifting) for the 14-bit label.
+    pub const LABEL_MASK: u32 = 0x3FFF;
+    /// Mask covering the reserved bits `[29:14]` of the header (must
+    /// be zero).
+    pub const HEADER_RESERVED_BITS_MASK: u32 = 0x3FFF_C000;
+}
+
+/// Result-ring layout offsets (spec §11.1) in **32-bit words**.
+pub mod result_ring {
+    /// Offset of the REVISION word at the head of every ring.
+    pub const REVISION_OFFSET_WORDS: usize = 0;
+    /// Offset of the first record-stream slot (just past REVISION).
+    pub const RECORD_STREAM_OFFSET_WORDS: usize = 1;
+    /// Words reserved by REVISION (1 word) + the HALT terminator slot
+    /// (1 word) that bound the record stream.
+    pub const OVERHEAD_WORDS: usize = 2;
+}
+
+/// REVISION word packing (spec §11.2):
 ///
 /// ```text
 /// [31:24] major
@@ -175,10 +206,8 @@ pub mod record_width_words {
 /// [15: 0] patch
 /// ```
 ///
-/// On the wire the REVISION word occupies the first 4 bytes of the
-/// result ring as two 16-bit half-words, little-endian per half.
-/// The lo half carries `patch`; the hi half carries
-/// `major << 8 | minor`.
+/// The REVISION word occupies `word[0]` of the result ring (the first
+/// 4 bytes of the drained byte stream), little-endian per word.
 pub mod revision {
     /// Pack a (major, minor, patch) tuple into the 32-bit REVISION
     /// word.
@@ -246,5 +275,48 @@ mod tests {
         assert_eq!(MAX_PROGRAM_WORDS * 4, 32768);
         // UP5K SPRAM is 4 × 16-KiB = 65536 bytes; program fits.
         // assert!(32768 <= 65536);
+    }
+
+    #[test]
+    fn record_widths_are_in_32_bit_words() {
+        // Spec §11.3: CAPTURE is 1 32-bit word.
+        assert_eq!(record_width_words::CAPTURE, 1);
+        // Spec §11.4: MARK is 3 32-bit words (header + ts_lo + ts_hi).
+        assert_eq!(record_width_words::MARK, 3);
+        // Spec §11.5: HALT is 1 32-bit word at the ring's last slot.
+        assert_eq!(record_width_words::HALT, 1);
+    }
+
+    #[test]
+    fn capture_reserved_mask_covers_bits_29_to_1() {
+        // [29:1] reserved; bit [0] sda; bits [31:30] tag=00.
+        assert_eq!(capture::RESERVED_BITS_MASK, 0x3FFF_FFFE);
+        // A valid CAPTURE word with sda=1 has no reserved bits set.
+        let w: u32 = 1 << capture::SDA_BIT;
+        assert_eq!(w & capture::RESERVED_BITS_MASK, 0);
+        // A garbage CAPTURE-tagged word with junk in [29:1] is detectable.
+        let g: u32 = 0x1234_5678;
+        assert_ne!(g & capture::RESERVED_BITS_MASK, 0);
+    }
+
+    #[test]
+    fn mark_header_label_and_reserved_layout() {
+        // Header: [31:30]=10 tag, [29:14] reserved, [13:0] label.
+        let label = 0x12A5_u32;
+        let header = (record_tag::MARK << record_tag::SHIFT) | label;
+        // Tag round-trips.
+        assert_eq!((header >> record_tag::SHIFT) & record_tag::MASK, record_tag::MARK);
+        // Label round-trips (14 bits, 0..0x3FFF).
+        assert_eq!((header >> mark::LABEL_SHIFT) & mark::LABEL_MASK, label);
+        // Reserved bits [29:14] are zero in this canonical encoding.
+        assert_eq!(header & mark::HEADER_RESERVED_BITS_MASK, 0);
+    }
+
+    #[test]
+    fn result_ring_overhead_words_is_revision_plus_halt() {
+        // REVISION (1) + HALT terminator (1) = 2 words of overhead.
+        assert_eq!(result_ring::OVERHEAD_WORDS, 2);
+        assert_eq!(result_ring::REVISION_OFFSET_WORDS, 0);
+        assert_eq!(result_ring::RECORD_STREAM_OFFSET_WORDS, 1);
     }
 }
