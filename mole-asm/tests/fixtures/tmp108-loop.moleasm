@@ -1,0 +1,149 @@
+; tmp108-loop --- 1000-iteration soak of the TMP108 16-bit temperature
+; read transaction. Companion to mole-asm/tests/fixtures/tmp108.moleasm
+; (the single-shot version that the v0.2 silicon bring-up landed on).
+;
+; PURPOSE
+;   1. Sustained-load regression for the bit engine: 1000 read
+;      cycles x (8 MSB + 1 ACK + 8 LSB + 1 NACK) = 18000
+;      controller-role EMIT_BIT_IMM instructions plus 3000
+;      EMIT_BYTE_IMM bytes, all back-to-back. Surfaces any growing
+;      slowdown, off-by-one in the read-burst inner loop, or state
+;      leak between transactions that a single-shot fixture would
+;      hide. Expected wall-clock: ~12-15 seconds at 100 kHz SCL on
+;      24 MHz fabric (engine time dominates; the loader I/O
+;      front-and-back overhead is one-shot per run).
+;   2. Exercise the result-ring overflow latch on real silicon.
+;      Each iteration emits 19 CAPTURE records (3 EMIT_BYTE_IMM
+;      ACK observations + 8 MSB read bits + 8 LSB read bits). The
+;      Verde ring is 2048 32-bit words = 2046 record slots (slot
+;      0 is REVISION, slot 2047 is HALT). After 107 iterations
+;      (107 x 19 = 2033 captures), iteration 108 fills the
+;      remaining 13 slots and then the engine drops the rest of
+;      that iteration's captures while ringOverflow latches in
+;      the HALT word's [29] bit. The remaining 893 iterations
+;      run normally on the wire but their captures never reach
+;      the ring. HALT word reports status=0, mismatch=false,
+;      overflow=true.
+;
+; STRUCTURE
+;   The body is the byte-for-byte equivalent of tmp108.moleasm:
+;   START -> addr_w=0x90 + ACK -> ptr=0x00 + ACK -> Sr ->
+;   addr_r=0x91 + ACK -> 8 MSB capture bits -> controller ACK ->
+;   8 LSB capture bits -> controller NACK -> STOP. The outer loop
+;   appends STRETCH_SCL_IMM 3 (tBUF >= 7.5us at 100kHz, well
+;   above the I2C fast-mode tBUF >= 1.3us and std-mode tBUF >=
+;   4.7us requirements) and a DEC R5 / BRANCH_ON NOT_REG_ZERO
+;   back-edge, following the i2c-soak.moleasm pattern from §14.
+;
+;   R5 is the outer iteration counter, primed via raw `LOAD_IMM
+;   R5, 1000` since the LOAD_LOOP sugar only targets R6 (spec
+;   §12.3 / §5.18). Loop count = 1000, well within the 14-bit
+;   immediate range (max 16383, spec §5.18).
+;
+; SUCCESS CRITERIA (asserted by test.sh FIXTURE_NAME=tmp108-loop)
+;   - loader exit code 0 (engine HALTed cleanly)
+;   - wall-clock under the budget (default 20000 ms)
+;   - HALT line shows status=0x0 (no trap)
+;   - CAPTURE count == 2046 (ring filled to capacity)
+;   - HALT line shows overflow=true (ring overflowed as designed)
+;
+; NOTES
+;   - Same (use-raw-primitives) waiver as tmp108.moleasm for the
+;     EMIT_BYTE_IMM mask=1 + missing BRANCH_ON MISMATCH pairing
+;     (spec §5.5 E-WIRE-003). This soak fixture is fire-and-
+;     forget-capture: the wedge-detection pattern in i2c-soak is
+;     deliberately omitted because tmp108 is a stable spec part
+;     that does not wedge, and surfacing per-iteration wedge
+;     handlers would inflate program length without adding value
+;     for a sustained-load regression test.
+;   - The wire pattern is identical per iteration; subsequent
+;     iterations only differ in what tmp108 has loaded into its
+;     output shift register (re-read of the same 16-bit
+;     temperature value, modulo any per-iteration ADC update).
+;     Captures may show non-zero data here unlike the single-shot
+;     case (the slave settles after a few transactions in a soak).
+(use-raw-primitives)
+
+.equ slow_div, 59           ; 100 kHz target at 24 MHz fabric
+.equ iter_count, 1000       ; outer-loop iteration count (R5)
+
+        LOAD_TIMING       reg=0, divider=slow_div
+        SET_BUS_MODE      i2c
+        SET_ROLE          controller
+
+        LOAD_IMM          R5, iter_count
+
+loop_top:
+        ; -- START: 4 idle + 2 SDA-falls + 2 SCL-down --
+        EMIT_QUARTER_IMM  sda=recessive scl=recessive
+        EMIT_QUARTER_IMM  sda=recessive scl=recessive
+        EMIT_QUARTER_IMM  sda=recessive scl=recessive
+        EMIT_QUARTER_IMM  sda=recessive scl=recessive
+        EMIT_QUARTER_IMM  sda=dominant  scl=recessive
+        EMIT_QUARTER_IMM  sda=dominant  scl=recessive
+        EMIT_QUARTER_IMM  sda=dominant  scl=dominant
+        EMIT_QUARTER_IMM  sda=dominant  scl=dominant
+
+        ; -- addr_write = 0x90 = 1001_0000 + slave ACK --
+        EMIT_BYTE_IMM     imm=0x90 expect=0 mask=1 capture=1
+
+        ; -- ptr_temp = 0x00 + slave ACK --
+        EMIT_BYTE_IMM     imm=0x00 expect=0 mask=1 capture=1
+
+        ; -- Repeated START --
+        EMIT_QUARTER_IMM  sda=dominant  scl=dominant
+        EMIT_QUARTER_IMM  sda=dominant  scl=dominant
+        EMIT_QUARTER_IMM  sda=recessive scl=dominant
+        EMIT_QUARTER_IMM  sda=recessive scl=dominant
+        EMIT_QUARTER_IMM  sda=recessive scl=recessive
+        EMIT_QUARTER_IMM  sda=recessive scl=recessive
+        EMIT_QUARTER_IMM  sda=dominant  scl=recessive
+        EMIT_QUARTER_IMM  sda=dominant  scl=recessive
+        EMIT_QUARTER_IMM  sda=dominant  scl=dominant
+        EMIT_QUARTER_IMM  sda=dominant  scl=dominant
+
+        ; -- addr_read = 0x91 = 1001_0001 + slave ACK --
+        EMIT_BYTE_IMM     imm=0x91 expect=0 mask=1 capture=1
+
+        ; -- read MSB (8 capture bits) --
+        EMIT_BIT_IMM      tx=recessive capture=1
+        EMIT_BIT_IMM      tx=recessive capture=1
+        EMIT_BIT_IMM      tx=recessive capture=1
+        EMIT_BIT_IMM      tx=recessive capture=1
+        EMIT_BIT_IMM      tx=recessive capture=1
+        EMIT_BIT_IMM      tx=recessive capture=1
+        EMIT_BIT_IMM      tx=recessive capture=1
+        EMIT_BIT_IMM      tx=recessive capture=1
+
+        ; -- controller ACK (drive SDA low) --
+        EMIT_BIT_IMM      tx=dominant
+
+        ; -- read LSB (8 capture bits) --
+        EMIT_BIT_IMM      tx=recessive capture=1
+        EMIT_BIT_IMM      tx=recessive capture=1
+        EMIT_BIT_IMM      tx=recessive capture=1
+        EMIT_BIT_IMM      tx=recessive capture=1
+        EMIT_BIT_IMM      tx=recessive capture=1
+        EMIT_BIT_IMM      tx=recessive capture=1
+        EMIT_BIT_IMM      tx=recessive capture=1
+        EMIT_BIT_IMM      tx=recessive capture=1
+
+        ; -- controller NACK (release SDA) --
+        EMIT_BIT_IMM      tx=recessive
+
+        ; -- STOP: SDA rises while SCL high --
+        EMIT_QUARTER_IMM  sda=dominant  scl=dominant
+        EMIT_QUARTER_IMM  sda=dominant  scl=dominant
+        EMIT_QUARTER_IMM  sda=dominant  scl=recessive
+        EMIT_QUARTER_IMM  sda=dominant  scl=recessive
+        EMIT_QUARTER_IMM  sda=recessive scl=recessive
+        EMIT_QUARTER_IMM  sda=recessive scl=recessive
+
+        ; -- tBUF: hold both lines recessive >= 1.3 us before next START --
+        STRETCH_SCL_IMM   3
+
+        ; -- back-edge: DEC R5 / BRANCH_ON NOT_REG_ZERO, loop_top --
+        DEC               R5
+        BRANCH_ON         NOT_REG_ZERO, loop_top
+
+        HALT              status=0
