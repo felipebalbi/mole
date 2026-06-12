@@ -1225,6 +1225,155 @@ object EnginePipelineSim {
   }
 
   // --------------------------------------------------------------------------
+  // Case 14: back-to-back program runs without an FPGA hardware reset.
+  //
+  // Bench regression: running mole-loader twice in a row against the
+  // same flashed bitstream returns stale ring data on the second run.
+  // Root cause: per-program engine state (haltedReg, ringWrPtr,
+  // ringOverflow, revisionPending, the sticky flag set) only clears
+  // on the engineClk's hardware reset, never between programs. After
+  // the first program halts, haltedReg=True permanently gates
+  // fetchActive=False, so the second program never executes; the
+  // drainer streams the previous program's SPRAM contents back to
+  // the host and the loader's decoder happily reports them as a
+  // fresh run.
+  //
+  // The MoleTop phase FSM transitions acceptLoad -> running ->
+  // draining -> acceptLoad and re-asserts io.engineStart on the
+  // second running. The fix: detect the rising edge of
+  // io.engineStart inside the engine and use it as a one-cycle
+  // programStart pulse that clears the per-program registers.
+  //
+  // This sim drives that exact shape: engineStart True, wait for
+  // halt, engineStart False (mimic drain phase), engineStart True
+  // (mimic second running re-entry). Assertions:
+  //   - Second program emits its own REVISION word at slot 0.
+  //   - Second program emits its own HALT word.
+  //   - Second program's haltStatus matches its HALT instruction.
+  // Without the fix the second program never runs and the ring
+  // captures vanish after the first program.
+  // --------------------------------------------------------------------------
+  def caseBackToBackPrograms(): Unit = {
+    compileDut().doSim("back-to-back-programs") { dut =>
+      dut.clockDomain.forkStimulus(period = 10)
+      initInputs(dut)
+      dut.clockDomain.waitSampling(4)
+
+      // Both runs use the same one-instruction program (HALT
+      // status=0). The fixture is intentionally minimal — the
+      // regression is about cross-run state leak, not program
+      // complexity.
+      val mem = Array.fill(
+        simCfg.programWordCount + (simCfg.resultRingByteCount + 3) / 4
+      )(0L)
+      mem(0) = haltWord(0)
+      forkSpramModel(dut, mem)
+
+      // Collect every ring write the engine issues across both
+      // runs. After the test, walk the buffer to verify each run
+      // emitted a REVISION and a HALT word.
+      val ringRecords =
+        scala.collection.mutable.ArrayBuffer.empty[(Long, Long)]
+      fork {
+        while (true) {
+          if (
+            dut.io.ringWrite.valid.toBoolean && dut.io.ringWrite.ready.toBoolean
+          ) {
+            ringRecords += ((
+              dut.io.ringWrite.payload.addr.toLong & 0xffffL,
+              dut.io.ringWrite.payload.data.toLong & 0xffffffffL
+            ))
+          }
+          dut.clockDomain.waitSampling()
+        }
+      }
+
+      // ---- Run 1 ----
+      dut.io.programLength #= 1
+      dut.io.engineStart #= true
+      dut.clockDomain.waitSampling()
+
+      waitFor(
+        dut,
+        50,
+        dut.io.halted.toBoolean,
+        "[caseBackToBackPrograms] run 1 did not halt"
+      )
+
+      val runOneRingCount = ringRecords.size
+      assert(
+        runOneRingCount >= 2,
+        s"[caseBackToBackPrograms] run 1 emitted only $runOneRingCount " +
+          s"ring writes (expected >= 2: REVISION + HALT)"
+      )
+
+      // ---- Phase transition: drop engineStart (MoleTop's
+      //      acceptLoad / draining states drive it False), wait a
+      //      handful of cycles, then re-assert (mimic the FSM
+      //      re-entering runningState for the next program). ----
+      dut.io.engineStart #= false
+      dut.clockDomain.waitSampling(8)
+      dut.io.engineStart #= true
+      dut.clockDomain.waitSampling()
+
+      // After re-asserting engineStart the engine must:
+      //   1. Notice the rising edge (programStart pulse).
+      //   2. Clear haltedReg + revisionPending + ringWrPtr + the
+      //      sticky flag set.
+      //   3. Re-emit REVISION at slot 0 and execute the program.
+      //   4. Reach HALT again.
+      // Give the same 50-cycle budget as run 1; without the fix
+      // dut.io.halted stays True throughout (latched from run 1)
+      // and the wait times out OR — more insidiously — the
+      // assertion below catches the missing second-run ring
+      // writes.
+      waitFor(
+        dut,
+        50,
+        // Cannot poll io.halted (latched True from run 1 without
+        // the fix; we instead wait for run 2's ring writes to
+        // arrive). The proxy condition is "more ring writes have
+        // landed since we re-asserted engineStart".
+        ringRecords.size > runOneRingCount + 1,
+        "[caseBackToBackPrograms] run 2 emitted no new ring writes " +
+          "after engineStart re-assert — engine likely stuck with " +
+          "stale haltedReg=True from run 1"
+      )
+
+      val runTwoWrites = ringRecords.drop(runOneRingCount)
+      assert(
+        runTwoWrites.size >= 2,
+        s"[caseBackToBackPrograms] run 2 emitted ${runTwoWrites.size} " +
+          s"ring writes (expected >= 2: REVISION + HALT)"
+      )
+
+      // Run 2's first write must be REVISION at slot 0 (resultBase
+      // + REVISION_OFFSET_WORDS = resultBase + 0). The address is
+      // resultBase (which is simCfg.programWordCount).
+      val (runTwoRevAddr, _) = runTwoWrites(0)
+      val resultBase = simCfg.programWordCount.toLong
+      assert(
+        runTwoRevAddr == resultBase,
+        s"[caseBackToBackPrograms] run 2 first ring write was at addr " +
+          f"0x$runTwoRevAddr%x, expected REVISION at resultBase=0x$resultBase%x — " +
+          "ringWrPtr was not reset between programs"
+      )
+
+      // Run 2's HALT word: tag=0b11 at [31:30], status=0 at
+      // [27:23]. The full word is the canonical halt ring word.
+      val expectedHaltWord = expectedHaltRingWord(0)
+      val (_, runTwoLastWord) = runTwoWrites.last
+      assert(
+        (runTwoLastWord & 0xffffffffL) == expectedHaltWord,
+        f"[caseBackToBackPrograms] run 2 last ring word was 0x$runTwoLastWord%08x, " +
+          f"expected canonical HALT(0) word 0x$expectedHaltWord%08x"
+      )
+
+      println("[caseBackToBackPrograms] PASS")
+    }
+  }
+
+  // --------------------------------------------------------------------------
   // Entry point
   // --------------------------------------------------------------------------
   def main(args: Array[String]): Unit = {
@@ -1242,6 +1391,7 @@ object EnginePipelineSim {
     caseBranchOnAlwaysSkip()
     caseMarkBasic()
     caseLoadTimingBasic()
-    println("EnginePipelineSim: all 14 cases passed")
+    caseBackToBackPrograms()
+    println("EnginePipelineSim: all 15 cases passed")
   }
 }

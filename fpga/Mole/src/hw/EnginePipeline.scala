@@ -2140,6 +2140,79 @@ case class EnginePipeline(cfg: MoleConfig) extends Component {
     )
   w.haltWhen(wWillIssueRingWrite && !io.ringWrite.ready)
 
+  // ---- programStart: one-cycle pulse on rising edge of io.engineStart -----
+  //
+  // The MoleTop phase FSM (acceptLoad -> running -> draining ->
+  // acceptLoad) drives io.engineStart True only inside runningState.
+  // Every transition from acceptLoad into running for a NEW program
+  // is a 0->1 edge on io.engineStart.
+  //
+  // Architectural state held outside the pipeline stages — haltedReg,
+  // ringWrPtr, ringOverflow, revisionPending, the sticky flag set, and
+  // pcReg — only initialises on engineClk's hardware reset. Without an
+  // explicit per-program clear, the second-and-later runs against the
+  // same flashed bitstream see stale state from the previous program:
+  //
+  //   - haltedReg = True (latched at HALT commit of program 1) gates
+  //     fetchActive = False permanently; program 2 never executes. The
+  //     drainer still streams the SPRAM result region back, so the
+  //     host loader sees stale ring contents from program 1 and reports
+  //     them as a successful program-2 run. False PASS.
+  //   - revisionPending = False (cleared after program 1 emitted
+  //     REVISION at slot 0) blocks program 2's REVISION re-emit,
+  //     leaving the slot-0 word as program 1's REVISION (looks valid
+  //     to the host).
+  //   - ringWrPtr would point past program 1's last write; program 2's
+  //     writes (if any reached the SPRAM) would land in the middle of
+  //     program 1's record region instead of at slot 1.
+  //   - pcReg would still be sitting at program 1's HALT PC; program
+  //     2's fetch would resume there instead of at PC=0.
+  //   - Sticky flags from program 1 would bleed into program 2's
+  //     BRANCH_ON / WAIT_ON cond evaluation.
+  //
+  // Bench symptom that surfaced this: two back-to-back invocations of
+  // mole-loader against tmp108.moleasm returned byte-identical ring
+  // contents (the second run had no actual bus activity but the host
+  // decoded the stale slots from the first run as if fresh). The only
+  // workaround pre-fix was to power-cycle the iCEbreaker between runs.
+  //
+  // Fix: detect the rising edge of io.engineStart with a 1-bit
+  // RegNext shift, then use the resulting one-cycle pulse to clear all
+  // architectural per-program state synchronously. Pipeline-stage state
+  // is already invalidated by `flush` at HALT commit (the when(flush)
+  // block near the end of this Component), so programStart only needs
+  // to handle the architectural regs here.
+  //
+  // PLACEMENT NOTE: this block lives BEFORE the REVISION direct-ring
+  // drive block immediately below. The ordering matters on the very
+  // first program after hardware reset: at cycle T (engineStart 0->1)
+  // programStart fires AND revisionDriveRing fires the same cycle
+  // (revisionPending=True at init, engineStart now True). Both blocks
+  // write `revisionPending` and `ringWrPtr` that cycle. With this
+  // source order, programStart writes go FIRST and revisionDriveRing's
+  // writes come SECOND, so Scala's last-assignment-wins gives the
+  // correct first-run behaviour: revisionDriveRing's `:= False` and
+  // `ringWrPtr := ringWrPtr + 1` win, REVISION emits once, the engine
+  // proceeds normally. On the second-and-later programs, revisionPending
+  // is False at the rising edge (cleared by program 1's REVISION emit),
+  // revisionDriveRing does not fire that cycle, programStart's writes
+  // fire alone — clearing the stale state cleanly.
+  val engineStartPrev = RegNext(io.engineStart) init False
+  val programStart = io.engineStart && !engineStartPrev
+  when(programStart) {
+    haltedReg := False
+    haltStatusReg := 0
+    revisionPending := True
+    ringWrPtr := 0
+    ringOverflow := False
+    mismatchFlagReg := False
+    timeoutFlagReg := False
+    startFlagReg := False
+    stopFlagReg := False
+    regZeroFlagReg := False
+    pcReg := 0
+  }
+
   // ---- REVISION direct ring drive (spec §11.2) --------------------------
   // The engine writes the 32-bit REVISION word (`Revision.hw`) at
   // ring slot 0 (resultBase + 0) on every program start, before any
@@ -2273,7 +2346,7 @@ case class EnginePipeline(cfg: MoleConfig) extends Component {
     f2RespPending := False
   }
 
-  // Late-bind the haltInFlight Bool declared at the top of this Component.
+  // ---- Late-bind haltInFlight (declared at the top of this Component) ----
   //
   // The check observes ONLY W (not X) to avoid a combinational loop:
   // x.up(HALT_REQUEST) is set conditionally in a when() body that
