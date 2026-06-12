@@ -2352,8 +2352,10 @@ case class EnginePipeline(cfg: MoleConfig) extends Component {
   // contention and survives any future change that loosens the
   // fetchActive gate.
   val xMarkDriveRing = xMarkActive && (xMarkPhase < 3) && !xMarkSkip
-  when(xMarkDriveRing && !wDrainingRingWrite && !revisionDriveRing &&
-       !sentinelFillActive) {
+  when(
+    xMarkDriveRing && !wDrainingRingWrite && !revisionDriveRing &&
+      !sentinelFillActive
+  ) {
     // Override the component-scope idle defaults (and any W-stage
     // assignment, which is gated False by the mutex above).
     io.ringWrite.valid := True

@@ -820,11 +820,7 @@ mod tests {
         // The SENTINEL (tag 0b01 = reserved record) is that
         // non-record tag.
         let halt = halt_word_status(0);
-        let captures = [
-            capture_word(false),
-            capture_word(true),
-            capture_word(false),
-        ];
+        let captures = [capture_word(false), capture_word(true), capture_word(false)];
         let sentinel = mole_abi::result_ring::SENTINEL;
         // Layout: REVISION + 3 CAPTUREs + 100 SENTINELs + HALT = 105 words.
         let mut records: Vec<u32> = Vec::with_capacity(103);

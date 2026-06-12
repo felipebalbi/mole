@@ -67,8 +67,8 @@ object EnginePipelineSim {
   // CAPTURE, MARK, HALT), not part of the pre-program sentinel-fill.
   private def isRecordWrite(dut: EnginePipeline): Boolean = {
     dut.io.ringWrite.valid.toBoolean &&
-      dut.io.ringWrite.ready.toBoolean &&
-      (dut.io.ringWrite.payload.data.toLong & 0xffffffffL) != sentinelWord
+    dut.io.ringWrite.ready.toBoolean &&
+    (dut.io.ringWrite.payload.data.toLong & 0xffffffffL) != sentinelWord
   }
 
   // Expected HALT word tag pattern: tag=0b11 at [31:30], rest zero except
@@ -169,9 +169,7 @@ object EnginePipelineSim {
       var ringAddrCapture = 0L
       val ringCapture = fork {
         while (true) {
-          if (
-            isRecordWrite(dut)
-          ) {
+          if (isRecordWrite(dut)) {
             ringWordCapture = dut.io.ringWrite.payload.data.toLong & 0xffffffffL
             ringAddrCapture = dut.io.ringWrite.payload.addr.toLong
           }
@@ -224,9 +222,7 @@ object EnginePipelineSim {
       var ringWordCapture = 0L
       fork {
         while (true) {
-          if (
-            isRecordWrite(dut)
-          ) {
+          if (isRecordWrite(dut)) {
             ringWordCapture = dut.io.ringWrite.payload.data.toLong & 0xffffffffL
           }
           dut.clockDomain.waitSampling()
@@ -289,9 +285,7 @@ object EnginePipelineSim {
       var ringWordCapture = 0L
       fork {
         while (true) {
-          if (
-            isRecordWrite(dut)
-          ) {
+          if (isRecordWrite(dut)) {
             ringWordCapture = dut.io.ringWrite.payload.data.toLong & 0xffffffffL
           }
           dut.clockDomain.waitSampling()
@@ -349,9 +343,7 @@ object EnginePipelineSim {
       var ringWordCapture = 0L
       fork {
         while (true) {
-          if (
-            isRecordWrite(dut)
-          ) {
+          if (isRecordWrite(dut)) {
             ringWordCapture = dut.io.ringWrite.payload.data.toLong & 0xffffffffL
           }
           dut.clockDomain.waitSampling()
@@ -415,9 +407,7 @@ object EnginePipelineSim {
       var secondRingWord = 0L
       fork {
         while (true) {
-          if (
-            isRecordWrite(dut)
-          ) {
+          if (isRecordWrite(dut)) {
             ringWriteCount += 1
             if (ringWriteCount == 1) {
               firstRingWord = dut.io.ringWrite.payload.data.toLong & 0xffffffffL
@@ -630,9 +620,7 @@ object EnginePipelineSim {
         scala.collection.mutable.ArrayBuffer.empty[(Long, Long)]
       fork {
         while (true) {
-          if (
-            isRecordWrite(dut)
-          ) {
+          if (isRecordWrite(dut)) {
             ringRecords += ((
               dut.io.ringWrite.payload.addr.toLong & 0xffffL,
               dut.io.ringWrite.payload.data.toLong & 0xffffffffL
@@ -746,9 +734,7 @@ object EnginePipelineSim {
         scala.collection.mutable.ArrayBuffer.empty[(Long, Long)]
       fork {
         while (true) {
-          if (
-            isRecordWrite(dut)
-          ) {
+          if (isRecordWrite(dut)) {
             ringRecords += ((
               dut.io.ringWrite.payload.addr.toLong & 0xffffL,
               dut.io.ringWrite.payload.data.toLong & 0xffffffffL
@@ -844,9 +830,7 @@ object EnginePipelineSim {
         scala.collection.mutable.ArrayBuffer.empty[(Long, Long)]
       fork {
         while (true) {
-          if (
-            isRecordWrite(dut)
-          ) {
+          if (isRecordWrite(dut)) {
             ringRecords += ((
               dut.io.ringWrite.payload.addr.toLong & 0xffffL,
               dut.io.ringWrite.payload.data.toLong & 0xffffffffL
@@ -1040,9 +1024,7 @@ object EnginePipelineSim {
       var ringWordCapture = 0L
       fork {
         while (true) {
-          if (
-            isRecordWrite(dut)
-          ) {
+          if (isRecordWrite(dut)) {
             ringWordCapture = dut.io.ringWrite.payload.data.toLong & 0xffffffffL
           }
           dut.clockDomain.waitSampling()
@@ -1101,9 +1083,7 @@ object EnginePipelineSim {
         scala.collection.mutable.ArrayBuffer.empty[(Long, Long)]
       fork {
         while (true) {
-          if (
-            isRecordWrite(dut)
-          ) {
+          if (isRecordWrite(dut)) {
             ringRecords += ((
               dut.io.ringWrite.payload.addr.toLong & 0xffffL,
               dut.io.ringWrite.payload.data.toLong & 0xffffffffL
@@ -1290,9 +1270,7 @@ object EnginePipelineSim {
         scala.collection.mutable.ArrayBuffer.empty[(Long, Long)]
       fork {
         while (true) {
-          if (
-            isRecordWrite(dut)
-          ) {
+          if (isRecordWrite(dut)) {
             ringRecords += ((
               dut.io.ringWrite.payload.addr.toLong & 0xffffL,
               dut.io.ringWrite.payload.data.toLong & 0xffffffffL
@@ -1514,7 +1492,8 @@ object EnginePipelineSim {
       // hold whatever stale data the prior program (or
       // power-on-undefined SPRAM) left there. With sentinel-fill
       // every inner slot gets overwritten at least once.
-      val innerSlot = resultBase + (resultWordCount / 2) // e.g. resultBase + 8 for 16-slot ring
+      val innerSlot =
+        resultBase + (resultWordCount / 2) // e.g. resultBase + 8 for 16-slot ring
       val writesToInnerSlot = ringWrites.filter { case (addr, _) =>
         addr == innerSlot
       }
