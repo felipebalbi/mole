@@ -88,9 +88,9 @@ case class MoleTop(
     val io_uRts = in Bool ()
     val io_scl = inout(Analog(Bool()))
     val io_sda = inout(Analog(Bool()))
-    val io_ledR = out Bool ()
-    val io_ledG = out Bool ()
-    val io_ledB = out Bool ()
+    val io_ledFault = out Bool ()
+    val io_ledRunning = out Bool ()
+    val io_ledHeartbeat = out Bool ()
 
     // Sim-only debug taps (absent when useBlackBox=true → synthesis).
     val sim_halted = (!useBlackBox) generate (out Bool ())
@@ -334,19 +334,30 @@ case class MoleTop(
 
     // ---- LEDs --------------------------------------------------------------
     //
-    // The iCEbreaker on-board RGB LEDs (D1/D2/D3) are wired anode-to-3.3V
-    // with the FPGA pin as the cathode. They are **active-low**: drive
-    // pin LOW to light the LED, drive pin HIGH to turn it off. Every
-    // `io_led*` assignment below therefore wraps the user-facing
-    // "LED should be on" expression in `!(...)` so the pin polarity is
-    // correct on real silicon. v0 silicon-validated this by accident:
-    // v0's `io_ledG := !engine.done` produced pin HIGH at boot
-    // (engine.done=False) which read as "LED off"; v0.2's new
-    // `engineStarted && !halted` form evaluates False at boot, which
-    // without the inversion lit ALL three LEDs out of reset because
-    // every other driver also defaults to 0 = pin LOW = LED on.
+    // The on-board status LEDs are wired anode-to-3.3V with the FPGA pin
+    // as the cathode. They are **active-low**: drive pin LOW to light
+    // the LED, drive pin HIGH to turn it off. Every `io_led*` assignment
+    // below therefore wraps the user-facing "LED should be on" expression
+    // in `!(...)` so the pin polarity is correct on real silicon. v0
+    // silicon-validated this by accident: v0's `io_led* := !engine.done`
+    // produced pin HIGH at boot (engine.done=False) which read as "LED
+    // off"; v0.2's new `engineStarted && !halted` form evaluates False
+    // at boot, which without the inversion lit ALL three LEDs out of
+    // reset because every other driver also defaults to 0 = pin LOW =
+    // LED on.
+    //
+    // Naming convention: the signals are named by FUNCTION (Fault /
+    // Running / Heartbeat), not by physical LED color, because the
+    // iCEbreaker silkscreen color labels disagree with what's actually
+    // populated on this board revision (the "B" channel of the on-board
+    // RGB LED lights GREEN, not blue). See `icebreaker.pcf` for the
+    // function → pin → physical-LED mapping. Functional naming
+    // survives a future board respin.
 
-    // Red: pulse-stretched loader fault OR CTS violation.
+    // io_ledFault: pulse-stretched loader fault OR sticky CTS violation.
+    // Physically a small red 0603 SMD on this board rev (silkscreen LEDR,
+    // pin 11). Pulse-stretch holds the LED on for ~2^22 cycles ≈ 175 ms
+    // at 24 MHz so a one-cycle fault is visible to the human eye.
     val faultStretchWidth = 22
     val faultStretchMax = (1 << faultStretchWidth) - 1
     val faultCounter = Reg(UInt(faultStretchWidth bits)) init 0
@@ -355,18 +366,28 @@ case class MoleTop(
     } elsewhen (faultCounter =/= 0) {
       faultCounter := faultCounter - 1
     }
-    io.io_ledR := !((faultCounter =/= 0) || ctsViolationObservedReg)
+    io.io_ledFault := !((faultCounter =/= 0) || ctsViolationObservedReg)
 
-    // Green: engine is running (not halted after a start).
-    io.io_ledG := !(engineStarted && !pipeline.io.halted)
+    // io_ledRunning: lit while the engine is executing program
+    // instructions (i.e. started AND not halted). Goes off the moment
+    // HALT commits. Physically a small green 0603 SMD on this board
+    // rev (silkscreen LEDG, pin 37).
+    io.io_ledRunning := !(engineStarted && !pipeline.io.halted)
 
-    // Blue: heartbeat while idle (engine halted OR not yet started).
+    // io_ledHeartbeat: ~1.4 s on / 1.4 s off blink WHILE THE ENGINE IS
+    // IDLE (acceptLoad waiting for a frame, OR just halted post-run).
+    // Stops blinking the moment the engine starts executing.
+    // Physically the green channel of the big on-board RGB LED on
+    // this board rev (silkscreen LED_RGB1, pin 40 --- the iCEbreaker
+    // calls this the "B" channel of the RGB, which is misleading
+    // because the physically populated LED is green).
     val heartbeatWidth = 26
     val heartbeatCounter = Reg(UInt(heartbeatWidth bits)) init 0
     when(pipeline.io.halted || !engineStarted) {
       heartbeatCounter := heartbeatCounter + 1
     }
-    io.io_ledB := !(heartbeatCounter.msb && (pipeline.io.halted || !engineStarted))
+    io.io_ledHeartbeat :=
+      !(heartbeatCounter.msb && (pipeline.io.halted || !engineStarted))
 
     // ---- Sim-only debug taps -----------------------------------------------
     if (!useBlackBox) {

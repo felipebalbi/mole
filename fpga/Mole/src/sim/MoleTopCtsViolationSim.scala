@@ -21,7 +21,8 @@ import spinal.lib._
   * Single case: load a tiny program, wait for the engine to leave `acceptLoad`,
   * then push a stray UART byte from the sim TX. The sticky must assert within a
   * bounded number of cycles and must stay asserted for the rest of the run. The
-  * red LED must also be high (the sticky is OR'd into `io_ledR`).
+  * fault LED must also light (the sticky is OR'd into `io_ledFault`; see
+  * `icebreaker.pcf` for the function → pin → physical-LED mapping).
   */
 object MoleTopCtsViolationSim extends App {
   import MoleTopSimSupport._
@@ -107,15 +108,17 @@ object MoleTopCtsViolationSim extends App {
         "ctsViolationObserved never asserted after stray UART byte during running phase"
       )
 
-      // Red LED must reflect the sticky (OR'd into io_ledR).
-      // LED polarity: io_ledR is active-low (drive LOW = pin LOW =
+      // Fault LED must reflect the sticky (OR'd into io_ledFault).
+      // LED polarity: io_ledFault is active-low (drive LOW = pin LOW =
       // LED ON; drive HIGH = pin HIGH = LED OFF). When the sticky
-      // ctsViolation latches, MoleTop's `io_ledR := !((counter !=
-      // 0) || ctsViolationObservedReg)` should drive False, so
-      // "LED is lit" reads as `!dut.io.ledR.toBoolean`.
+      // ctsViolation latches, MoleTop's
+      // `io_ledFault := !((counter != 0) || ctsViolationObservedReg)`
+      // drives False, so "LED is lit" reads as
+      // `!dut.io.ledFault.toBoolean`.
       assert(
-        !dut.io.ledR.toBoolean,
-        "io_ledR did not assert (LED off) when ctsViolationObserved latched"
+        !dut.io.ledFault.toBoolean,
+        "io_ledFault did not assert (pin not driven low) when " +
+          "ctsViolationObserved latched"
       )
 
       // Stickiness: sample for another 2000 cycles --- must stay True

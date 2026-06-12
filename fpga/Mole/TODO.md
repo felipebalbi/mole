@@ -1485,9 +1485,12 @@ the `gui` target's doc comment in `fpga/Mole/Makefile`).
    another seed via `make all SEED=<N>`; do **not** raise the
    target.
 2. `make flash` (this is `iceprog gen/MoleTop.bin`). Expected:
-   "VERIFY OK" from iceprog; the blue heartbeat LED on the
-   iCEbreaker pulses at ~1 Hz; the green LED is off (engine
-   idle).
+   "VERIFY OK" from iceprog; the **heartbeat LED**
+   (`io_ledHeartbeat`, big green on Mole Verde rev 1.x) pulses
+   at ~1 Hz; the **running LED** (`io_ledRunning`, small green)
+   is off (engine idle, in `acceptLoad`). LEDs are named by
+   function, not color — see `icebreaker.pcf` for the
+   function → pin → physical-LED mapping.
 3. From the repo root: build the smoke fixture as a v0.2 frame.
    Suggested moleasm program: `SET_BUS_MODE i2c; HALT 0`. Save
    as `/tmp/halt.moleasm`. Run:
@@ -1503,10 +1506,14 @@ the `gui` target's doc comment in `fpga/Mole/Makefile`).
    it is typically `/dev/tty.usbserial-ibXXXXXX`.)
 4. Expected output: drainer returns 8192 bytes; loader-cli
    decodes a `HaltStatus { status: 0, mismatch: false, overflow:
-   false }`. Green LED briefly flashes; blue heartbeat resumes.
+   false }`. The **running LED** (`io_ledRunning`) briefly
+   flashes during execution; the **heartbeat LED**
+   (`io_ledHeartbeat`) pauses while running and resumes blinking
+   post-halt.
 
 **Failure-mode catalogue:**
-- *Nothing drains, red LED pulses.* Bad CRC or `len`
+- *Nothing drains, fault LED (`io_ledFault`, small red on
+  Mole Verde rev 1.x) pulses.* Bad CRC or `len`
   mismatch. Stop sending for ≥20 µs (idle line) so the loader
   returns to `idleState`; retry. See `WIRE_FORMAT.md`
   §"Resync rule".

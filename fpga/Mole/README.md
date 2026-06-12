@@ -139,7 +139,10 @@ specified in [`WIRE_FORMAT.md`](WIRE_FORMAT.md).
   channel B is used by `iceprog` to program the bitstream.
   Hardware flow control (`crtscts`) is mandatory --- see
   [`WIRE_FORMAT.md`](WIRE_FORMAT.md).
-- Status LEDs (R / G / B) reused for engine state / heartbeat /
-  HALT-status indication.
+- Status LEDs named by FUNCTION (`io_ledFault` /
+  `io_ledRunning` / `io_ledHeartbeat`) so a future board respin
+  that swaps physical LED colors does not invalidate the
+  software. See `icebreaker.pcf` for the function → pin →
+  physical-LED mapping.
 
 See `icebreaker.pcf` for the canonical pin assignment.

@@ -72,8 +72,15 @@ Device Manager for a "USB Serial Port (COMx)" that shares the
 FT2232H's USB device with the JTAG side.
 
 Expected post-flash behaviour: `iceprog` reports "VERIFY OK";
-the blue heartbeat LED on the iCEbreaker pulses at ~1 Hz; the
-green LED is off (engine idle).
+the **heartbeat LED** (big green LED on Mole Verde rev 1.x;
+silkscreen LED_RGB1, FPGA pin 40 = `io_ledHeartbeat`) pulses at
+~1 Hz on/off; the **running LED** (small green 0603; silkscreen
+LEDG, FPGA pin 37 = `io_ledRunning`) is off (engine idle, in
+`acceptLoad`); the **fault LED** (small red 0603; silkscreen
+LEDR, FPGA pin 11 = `io_ledFault`) is off. The LED signals are
+named in `icebreaker.pcf` by FUNCTION, not by physical color,
+because the iCEbreaker silkscreen color labels disagree with the
+actually populated LEDs on this board revision.
 
 ## 3. Talk to the engine
 
@@ -130,7 +137,7 @@ Validates: loader → engine → drainer → UART TX path with no bus
 activity to scope. Sufficient to declare C.11.c (iCEbreaker
 smoke) done.
 
-### 4.2 Visible-LED run (long / infinite, green LED proof)
+### 4.2 Visible-LED run (long / infinite, running-LED proof)
 
 Save as `/tmp/blinky.moleasm`:
 
@@ -142,15 +149,19 @@ loop:
     JMP loop
 ```
 
-Assemble and send. Expected: the **green LED stays solid**
-(`!engine.done` is the green-LED drive); the **blue heartbeat
-stops** (blue is gated on `engine.done`); the red LED stays off.
+Assemble and send. Expected: the **running LED stays solid**
+(`io_ledRunning := !(engineStarted && !halted)`, so it lights
+the moment the engine starts executing and stays lit through
+the infinite loop); the **heartbeat LED stops** (`io_ledHeartbeat`
+is gated on `halted || !engineStarted`, so its counter pauses
+the moment the engine starts); the **fault LED stays off**.
 SDA toggles low/high at the configured bit rate forever.
 
 Press the user button (`io_reset`, active-low) to recover: the
 reset bridge re-runs the 2-FF chain, the phase FSM resets to
-`acceptLoad`, and the green LED goes back off. Validates the
-`!engine.done` LED routing and that loops actually loop.
+`acceptLoad`, the running LED goes off, and the heartbeat LED
+resumes blinking. Validates the `io_ledRunning` routing and
+that loops actually loop.
 
 ### 4.3 Bus toggle (oscilloscope proof)
 
@@ -192,11 +203,21 @@ external pull-ups against the I2C edge rates.
 
 ## 5. Troubleshooting
 
+The status LEDs are named in `icebreaker.pcf` by FUNCTION
+(`io_ledFault` / `io_ledRunning` / `io_ledHeartbeat`), not by
+physical color, because the iCEbreaker silkscreen color labels
+do not match the actually populated LEDs on Mole Verde rev 1.x.
+On the bench you will see: a **small red 0603** for `io_ledFault`
+(pin 11), a **small green 0603** for `io_ledRunning` (pin 37),
+and a **big GREEN** LED for `io_ledHeartbeat` (pin 40, which the
+iCEbreaker silkscreen labels `LED_RGB1` / "blue channel" but
+physically lights green on this board rev).
+
 | Symptom                                | Likely cause                                                                                                                                                                                                                                                                                                                                            |
 |----------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| Red LED pulses, nothing drains         | Bad CRC, bad magic, wrong `body_len`, or a UART RX error mid-frame. The loader is in resync. Stop sending for **≥ 20 µs** (~20 UART bit times at 1 Mbaud) of idle-high on the line so the loader returns to `idleState`, then retry. See [`WIRE_FORMAT.md`](WIRE_FORMAT.md) §4 --- this is the host's contract.                                          |
-| Green LED solid, nothing drains        | The program is in an infinite loop. Press the user button to reset; verify the program eventually hits a `HALT`.                                                                                                                                                                                                                                          |
-| No LEDs change, no drain               | PLL never locked, or the bitstream did not flash. Power-cycle, re-flash via `make flash`, and check `dmesg` for FT2232H enumeration. The PLL-locked deassertion is what releases the fabric reset --- without it the engine sits in reset forever and `io_ledG` stays low.                                                                                |
+| Fault LED pulses, nothing drains         | Bad CRC, bad magic, wrong `body_len`, or a UART RX error mid-frame. The loader is in resync. Stop sending for **≥ 20 µs** (~20 UART bit times at 1 Mbaud) of idle-high on the line so the loader returns to `idleState`, then retry. See [`WIRE_FORMAT.md`](WIRE_FORMAT.md) §4 --- this is the host's contract.                                          |
+| Running LED solid, nothing drains        | The program is in an infinite loop. Press the user button to reset; verify the program eventually hits a `HALT`.                                                                                                                                                                                                                                          |
+| No LEDs change, no drain               | PLL never locked, or the bitstream did not flash. Power-cycle, re-flash via `make flash`, and check `dmesg` for FT2232H enumeration. The PLL-locked deassertion is what releases the fabric reset --- without it the engine sits in reset forever and `io_ledHeartbeat` never starts blinking.                                                            |
 | Drain comes back but the HALT word looks wrong | Decode the HALT word via `mole-loader` (`HaltStatus`). Bit `[29]` set = **overflow** (record stream exceeded the ring; later records dropped). Bit `[28]` set = **mismatch** (sampled bit failed an `expect` compare somewhere). Bits `[27:23]` = 5-bit status code; `0x1F` is the engine's STATUS_TRAP (malformed instruction, reserved opcode, out-of-range BRANCH, etc.). See [`../../docs/MOLE-0.2-SPEC.md`](../../docs/MOLE-0.2-SPEC.md) §11.   |
 | Bus edges look glitchy or droop slowly | Pull-up too weak (or missing). For I2C use 4.7 kΩ to 3.3 V; for I3C-OD windows use 1 kΩ to 1.8 V. PMOD1A doesn't have on-board pull-ups; you have to wire them externally. The engine drives PP-high only under `i3c-PP` / `hdr-ddr` modes; in I2C / I3C-OD modes the rising edge is RC-limited.                                                            |
 | Frame sent but nothing drains back     | RTS#/CTS# is mis-wired or the host driver has `crtscts` disabled. The drainer halts whenever `io_uRts` reads HIGH (= RTS#-deasserted). With pin 19 internally pulled up, an unwired board reads HIGH and the drainer never sends. Verify the wiring (PMOD1A pins 18+19 → FT2232H channel A CTS#+RTS#) and re-run the `stty` line from [`WIRE_FORMAT.md`](WIRE_FORMAT.md) §3 (`crtscts -ixon -ixoff -ixany`).                                              |

@@ -98,10 +98,18 @@ case class MoleTopSimDut(cfg: MoleConfig) extends Component {
       */
     val rxData = master Stream (Bits(8 bits))
 
-    /** MoleTop's three status LEDs, mirrored for assertions. */
-    val ledR = out Bool ()
-    val ledG = out Bool ()
-    val ledB = out Bool ()
+    /** MoleTop's three status LEDs, mirrored for assertions. Named by FUNCTION
+      * (see icebreaker.pcf): `ledFault` is the loader-fault / CTS-violation
+      * indicator (small red 0603 on Mole Verde rev 1.x, silkscreen LEDR, pin
+      * 11); `ledRunning` is the engine-executing indicator (small green 0603,
+      * silkscreen LEDG, pin 37); `ledHeartbeat` is the idle-heartbeat indicator
+      * (green channel of the big on-board RGB LED, silkscreen LED_RGB1, pin 40
+      * --- the silkscreen calls this the "B" channel but the physical LED is
+      * GREEN on this board rev).
+      */
+    val ledFault = out Bool ()
+    val ledRunning = out Bool ()
+    val ledHeartbeat = out Bool ()
 
     /** MoleTop's CTS# output (active-low). Asserted (`0`) only while the loader
       * is open for a new frame.
@@ -149,9 +157,9 @@ case class MoleTopSimDut(cfg: MoleConfig) extends Component {
   mole.io.io_sda <> io.io_sda
   mole.io.io_scl <> io.io_scl
 
-  io.ledR := mole.io.io_ledR
-  io.ledG := mole.io.io_ledG
-  io.ledB := mole.io.io_ledB
+  io.ledFault := mole.io.io_ledFault
+  io.ledRunning := mole.io.io_ledRunning
+  io.ledHeartbeat := mole.io.io_ledHeartbeat
 
   // Hardware flow control.
   io.ctsOut := mole.io.io_uCts
@@ -531,11 +539,11 @@ object MoleTopSim extends App {
     // window. The pulse-stretcher holds the LED high for a long time;
     // loaded/halted are momentary so we sample them every cycle.
     //
-    // LED polarity: MoleTop's io_ledR is active-low (drive LOW =
+    // LED polarity: MoleTop's io_ledFault is active-low (drive LOW =
     // pin LOW = LED ON; drive HIGH = pin HIGH = LED OFF) because the
-    // on-board iCEbreaker RGB LED is wired anode-to-3.3V with the
-    // FPGA pin as the cathode. So "fault LED is lit" reads as
-    // `!dut.io.ledR.toBoolean`.
+    // on-board LED is wired anode-to-3.3V with the FPGA pin as the
+    // cathode. So "fault LED is lit" reads as
+    // `!dut.io.ledFault.toBoolean`.
     var faultSeen = false
     var loadedSeen = false
     var haltedSeen = false
@@ -543,7 +551,7 @@ object MoleTopSim extends App {
       val watchCycles = 20 * dut.uartCfg.ticksPerBit * 10
       var n = 0
       while (n < watchCycles) {
-        if (!dut.io.ledR.toBoolean) faultSeen = true
+        if (!dut.io.ledFault.toBoolean) faultSeen = true
         if (dut.io.loaderLoaded.toBoolean) loadedSeen = true
         if (dut.io.halted.toBoolean) haltedSeen = true
         dut.clockDomain.waitSampling()

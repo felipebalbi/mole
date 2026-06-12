@@ -83,8 +83,42 @@ set_io -pullup yes io_uRts 19
 set_io io_scl         4
 set_io io_sda         2
 
-# Status LEDs (iCEbreaker on-board). Used for engine state /
-# heartbeat / HALT-status indication.
-set_io io_ledR       11
-set_io io_ledG       37
-set_io io_ledB       40
+# Status LEDs (iCEbreaker rev 1.x on-board). Named by FUNCTION,
+# not color, because the iCEbreaker's silkscreen / package labels
+# disagree with the physically populated LED colors on this board
+# revision:
+#
+#   io_ledFault     -> pin 11 (silkscreen LEDR; physically a small
+#                      red 0603 SMD LED). Active-low. Drive LOW =
+#                      pin LOW = LED ON. Lit on loader fault
+#                      (bad CRC / bad MAGIC / bad LEN / UART RX
+#                      error mid-frame) OR sticky CTS#-violation
+#                      observation. Pulse-stretched ~175 ms so a
+#                      one-cycle fault is visible to the eye.
+#   io_ledRunning   -> pin 37 (silkscreen LEDG; physically a small
+#                      green 0603 SMD LED). Active-low. Lit while
+#                      `engineStarted && !pipeline.halted` --- i.e.
+#                      the engine is currently executing program
+#                      instructions. Goes off the moment HALT
+#                      commits.
+#   io_ledHeartbeat -> pin 40 (silkscreen LED_RGB1; iCEbreaker
+#                      docs call this the "green channel" of the
+#                      big on-board RGB LED, but the physically
+#                      populated big LED on this rev lights GREEN
+#                      from this pin --- the silkscreen naming is
+#                      misleading). Active-low. Drives a 26-bit
+#                      counter's MSB AND'd with `halted ||
+#                      !engineStarted`, so it blinks at ~1.4 s on
+#                      / 1.4 s off WHILE THE ENGINE IS IDLE
+#                      (acceptLoad waiting for a frame, or just
+#                      halted) and STOPS the moment the engine
+#                      starts running.
+#
+# Functional naming survives a future board respin that swaps
+# physical LED colors. The previous naming (io_ledR / io_ledG /
+# io_ledB) was based on the iCEbreaker silkscreen and led to
+# real bench-debug confusion when a "blue heartbeat" turned out
+# to be a green LED.
+set_io io_ledFault     11
+set_io io_ledRunning   37
+set_io io_ledHeartbeat 40
