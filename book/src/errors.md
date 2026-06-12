@@ -118,16 +118,17 @@ file.moleasm:1: equate name 'HALT' collides with a reserved
                 mnemonic / symbol / alias
 ```
 
-Fix: rename the `.equ`. Reserved names cover the 14 v0 mnemonics,
-the 2 reserved-v0.5 mnemonics, the tx-symbol names (`dominant`,
-`recessive`, `hiz`, `dom`, `rec`), the bus-mode names (`i2c`,
-`i3c-od`, `i3c-pp`, `hdr-ddr`), the cond codes, the timing-reg
-aliases, and the loop-counter aliases (`lcr0`, `lcr1`).
+Fix: rename the `.equ`. Reserved names cover the 26 v0.2
+mnemonics, the v0.5 reserved mnemonics (`CAPTURE_RUN`, `CALL`,
+`RET`), the sugar names (`JMP`, `LOAD_LOOP`), the tx-symbol
+names (`dominant`, `recessive`, `hiz`, `dom`, `rec`), the
+bus-mode names (`i2c`, `i3c-od`, `i3c-pp`, `hdr-ddr`), the cond
+codes, and the eight GP register names (`R0`..`R7`).
 
 ### Undefined symbol
 
 ```text
-LOAD_TIMING i2c_freq, slow_div
+LOAD_TIMING reg=0, divider=slow_div
 ```
 
 (with no prior `.equ slow_div, ...`). Result:
@@ -145,7 +146,7 @@ deliberately rejected.
 ```text
 loop:
     HALT
-LOAD_TIMING i2c_freq, loop      ; oops: loop is a label, not an .equ
+LOAD_TIMING reg=0, divider=loop      ; oops: loop is a label, not an .equ
 ```
 
 Result:
@@ -205,13 +206,15 @@ faraway:
 Result:
 
 ```text
-file.moleasm:1: BRANCH_ON offset 199 out of signed 7-bit range
+file.moleasm:1: BRANCH_ON offset 514 out of signed 10-bit range
                 (branch_pc=0)
 ```
 
-Fix: replace the `BRANCH_ON` with a `JMP faraway` (11-bit absolute
-target, no range issue), or rearrange the program so the target is
-within `-64..+63`.
+Fix: replace the `BRANCH_ON` with a `JMP faraway` (sugar for
+`BRANCH_ON ALWAYS, faraway`, but still subject to the same
+signed-10 range — so insert intermediate `JMP` hops if the
+target is further than 512 instructions away), or rearrange the
+program so the target is within `-512..+511`.
 
 ### Operand value too large
 
@@ -222,39 +225,40 @@ HALT status=42
 Result:
 
 ```text
-file.moleasm:1: HALT status must be 0..15, got 42
+file.moleasm:1: HALT status must be 0..30, got 42
+                (31 / 0x1F is reserved as STATUS_TRAP)
 ```
 
 Fix: every opcode field has a bit width; consult
 [Reference](./reference.md) for the limits.
 
-### `.dw` value out of 16-bit range
+### `.dw` value out of 32-bit range
 
 ```text
-.dw 0x10000
+.dw 0x1_0000_0000
 ```
 
 Result:
 
 ```text
-file.moleasm:1: .dw value 0x10000 out of 16-bit range
+file.moleasm:1: .dw value 0x1_0000_0000 out of 32-bit range
 ```
 
 Fix: split into two `.dw` values or shrink the constant.
 
-### Program exceeds the 2048-word budget
+### Program exceeds the 8192-word budget
 
-The engine has 2048 program-memory slots; anything past slot 2047 is
+The engine has 8192 program-memory slots; anything past slot 8191 is
 rejected:
 
 ```text
-; ... 2049 HALTs ...
+; ... 8193 HALTs ...
 ```
 
 Result:
 
 ```text
-file.moleasm:2049: program exceeds 2048 instruction slots (PC overflow)
+file.moleasm:8193: program exceeds 8192 instruction slots (PC overflow)
 ```
 
 Fix: shrink the program, or split it across multiple frames if your
@@ -266,7 +270,7 @@ frame = one program).
 ### Missing required key
 
 ```text
-EMIT_BIT
+EMIT_BIT_IMM
 ```
 
 Result:
@@ -275,13 +279,15 @@ Result:
 file.moleasm:1: missing required operand: tx=<symbol>
 ```
 
-Fix: add the missing `key=`. `EMIT_BIT` requires `tx=`;
-`EMIT_QUARTER` requires `sda=` and `scl=`; `MARK` requires `label=`.
+Fix: add the missing `key=`. `EMIT_BIT_IMM` requires `tx=`;
+`EMIT_QUARTER_IMM` requires `sda=` and `scl=`; `EMIT_BYTE_IMM`
+requires `imm=`; `MARK` requires `label=`; `LOAD_TIMING` requires
+`reg=` and `divider=`.
 
 ### Unknown operand key
 
 ```text
-EMIT_BIT tx=dominant fudge=1
+EMIT_BIT_IMM tx=dominant fudge=1
 ```
 
 Result:
@@ -296,7 +302,7 @@ Fix: typo or stray copy/paste. The allowed set is opcode-specific.
 ### Duplicate key
 
 ```text
-EMIT_BIT tx=dominant tx=recessive
+EMIT_BIT_IMM tx=dominant tx=recessive
 ```
 
 Result:
@@ -310,7 +316,7 @@ Fix: pick one.
 ### Positional operand where a key/value is expected
 
 ```text
-EMIT_BIT dominant
+EMIT_BIT_IMM dominant
 ```
 
 Result:
@@ -320,12 +326,12 @@ file.moleasm:1: expected key=value operand, got positional token 'dominant'
 ```
 
 Fix: opcodes with named flags want `key=value` operands; rewrite as
-`EMIT_BIT tx=dominant`.
+`EMIT_BIT_IMM tx=dominant`.
 
 ### Contradictory flag combination (`expect=X` + `mask=1`)
 
 ```text
-EMIT_BIT tx=hiz expect=X mask=1
+EMIT_BIT_IMM tx=hiz expect=X mask=1
 ```
 
 Result:
@@ -342,13 +348,13 @@ means "the comparison doesn't matter", so combining it with
 ### Wrong arity on positional opcodes
 
 ```text
-STRETCH_SCL 1 2 3
+STRETCH_SCL_IMM 1 2 3
 ```
 
 Result:
 
 ```text
-file.moleasm:1: STRETCH_SCL takes one positional operand: n_quarters
+file.moleasm:1: STRETCH_SCL_IMM takes one positional operand: n_quarters
 ```
 
 Fix: drop the extras.
@@ -362,16 +368,16 @@ don't have a source location.
 Result:
 
 ```text
-frame must contain 1..=2048 words, got 0
+frame must contain 1..=8192 words, got 0
 ```
 
 or
 
 ```text
-frame must contain 1..=2048 words, got 5000
+frame must contain 1..=8192 words, got 9000
 ```
 
-Fix: build a frame from 1..=2048 words. An empty program is
+Fix: build a frame from 1..=8192 words. An empty program is
 deliberately rejected (the engine has no useful behaviour when fed
 zero words).
 

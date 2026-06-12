@@ -38,58 +38,59 @@ back.
 ## Assemble it
 
 ```sh
-mole-asm hello.moleasm
+mole-asm assemble hello.moleasm
 ```
 
 You should see:
 
 ```text
-wrote 1 words (2 bytes) -> hello.molecode
+wrote 1 body words (12 bytes) -> hello.molecode
 ```
 
-`hello.molecode` is two bytes: the little-endian encoding of the
-single 16-bit `HALT` instruction (`00 00`).
+`hello.molecode` is 12 bytes: the 8-byte preamble (MAGIC + LEN)
+followed by the single 32-bit `HALT status=0` instruction
+(`0x40000000`, on the wire little-endian as `00 00 00 40`). The
+CRC trailer is only present in the framed `.mole.bin`.
 
 To also produce a UART-ready frame, add `--frame`:
 
 ```sh
-mole-asm hello.moleasm --frame
+mole-asm assemble hello.moleasm --frame
 ```
 
-This writes `hello.mole.bin` (6 bytes: 2 length + 2 instruction +
-2 CRC). That file is what the on-target loader expects to see byte
-for byte.
+This writes `hello.mole.bin` (14 bytes: 4 MAGIC + 4 LEN + 4
+instruction + 2 CRC). That file is what the on-target loader
+expects to see byte for byte.
 
 ## Ship it to a Mole
 
-The host runtime that actually wraps the serial port is a future
-chapter (and a future crate); for now the [`stty`/`cat`] approach
-from the BRINGUP guide works:
+The host loader that wraps the serial port lives in
+`mole-loader-cli`:
 
 ```sh
-stty -F /dev/ttyUSB1 1000000 cs8 -cstopb -parenb \
-    crtscts -ixon -ixoff -ixany raw -echo
-cat hello.mole.bin > /dev/ttyUSB1
+cargo install --path mole-loader-cli
+mole-loader -p /dev/ttyUSB1 -b 1000000 hello.mole.bin
 ```
 
-`crtscts` enables the FT2232H RTS#/CTS# hardware flow control
-Mole speaks (the engine deasserts CTS# while running so the host
-stops sending), and `-ixon -ixoff -ixany` disables any software
-flow control (Mole speaks none, and accidentally enabling it
-turns arbitrary frame bytes into XON/XOFF and breaks the
-link). See `fpga/Mole/BRINGUP.md` §3 for the full wiring
-contract.
+The loader configures the port (8N1, hardware RTS/CTS),
+streams the frame, waits for the engine to HALT, drains the
+result ring, and prints decoded records. For a single-`HALT`
+program the ring contains exactly two records: a REVISION word
+at slot 0 and a HALT word at the tail, so the loader prints:
 
-Mole accepts the frame, validates the CRC, copies the program into
-SPRAM, and starts executing. With a single-`HALT` program, the
-engine immediately halts with status 0 and the result ring is
-empty. The bus does nothing visible --- but the round trip from
-*source* to *frame* to *engine* is now in place.
+```text
+revision: 0.1.1
+records:  0 total (0 CAPTURE, 0 MARK)
+halt:     status=0x0 mismatch=false overflow=false
+```
 
-Anything you build later (an actual I2C transfer, a fault-injection
-recipe, a long-running conformance loop) follows this exact same
-path. The rest of this book is about filling in the program in the
-middle.
+The bus does nothing visible — but the round trip from *source*
+to *frame* to *engine* to *result ring* is now in place.
+
+Anything you build later (an actual I2C transfer, a
+fault-injection recipe, a long-running conformance loop)
+follows this exact same path. The rest of this book is about
+filling in the program in the middle.
 
 ## Look at one of the bundled fixtures
 
@@ -97,7 +98,7 @@ For a more interesting first run, assemble one of the committed
 fixtures:
 
 ```sh
-mole-asm mole-asm/tests/fixtures/first-light.moleasm --frame
+mole-asm assemble mole-asm/tests/fixtures/first-light.moleasm --frame
 ```
 
 `first-light` is the canonical "are the pads alive?" program: it

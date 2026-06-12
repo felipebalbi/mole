@@ -53,14 +53,22 @@ not contain dashes; `.equ` names may.
 Two name spaces are *reserved* and your own identifiers may not
 collide with them:
 
-- The 14 v0 mnemonics (`HALT`, `EMIT_BIT`, ...) and the two v0.5
-  reserved mnemonics (`FLAG_CLEAR`, `CAPTURE_RUN`).
+- The 26 v0.2 mnemonics (`HALT`, `EMIT_BIT_IMM`, `EMIT_BIT_REG`,
+  `EMIT_QUARTER_IMM`, `EMIT_QUARTER_REG`, `EMIT_BYTE_IMM`,
+  `EMIT_BYTE_REG`, `STRETCH_SCL_IMM`, `STRETCH_SCL_REG`,
+  `SAMPLE_BIT_ON_SCL`, `DRIVE_BIT_ON_SCL`, `BRANCH_ON`,
+  `WAIT_ON`, `SET_BUS_MODE`, `SET_ROLE`, `FLAG_CLEAR`, `MARK`,
+  `LOAD_TIMING`, `LOAD_IMM`, `MOV`, `ADD_IMM`, `DEC`, `AND_IMM`,
+  `OR_IMM`, `XOR_IMM`, `SHIFT`), the sugar mnemonics (`JMP`,
+  `LOAD_LOOP`), and the v0.5 reserved mnemonics (`CAPTURE_RUN`,
+  `CALL`, `RET`).
 - The named-symbol tables: `dominant`, `recessive`, `hiz`, `dom`,
   `rec` (tx symbols); `i2c`, `i3c-od`, `i3c-pp`, `hdr-ddr` (bus
-  modes); the condition codes (`ALWAYS`, `MISMATCH`, ...); the
-  timing-register aliases (`i2c_freq`, `i3c_od_freq`,
-  `i3c_pp_freq`, `hdr_ddr_freq`); and the loop-counter aliases
-  (`lcr0`, `lcr1`).
+  modes); the condition codes (`ALWAYS`, `MISMATCH`,
+  `NOT_MISMATCH`, `START_SEEN`, `STOP_SEEN`, `SDA_LOW`,
+  `SDA_HIGH`, `SCL_HIGH`, `TIMEOUT`, `NOT_TIMEOUT`, `REG_ZERO`,
+  `NOT_REG_ZERO`); and the eight general-purpose register names
+  (`R0`..`R7`).
 
 The assembler rejects a colliding name with a clear error pointing
 at the conflict. See the [Errors](./errors.md) chapter for the full
@@ -72,11 +80,11 @@ A label is a name followed by a colon. It binds the name to the
 current PC value. Two forms work:
 
 ```text
-loop:                       ; label on its own line
-    EMIT_BIT tx=recessive
-    BRANCH_ON ALWAYS, loop  ; reference by name
+loop:                            ; label on its own line
+    EMIT_BIT_IMM tx=recessive
+    BRANCH_ON ALWAYS, loop       ; reference by name (JMP loop is sugar)
 
-stretch: STRETCH_SCL 8      ; label on the same line as an instruction
+stretch: STRETCH_SCL_IMM 8       ; label on the same line as an instruction
 ```
 
 Labels are global: there is no scope. Re-defining a label is an
@@ -101,19 +109,19 @@ naming a label.
 There are two operand styles depending on the opcode:
 
 - **Positional** --- a comma-separated list of tokens, used by opcodes
-  whose operands have an unambiguous order (`STRETCH_SCL n`,
-  `BRANCH_ON cond, target`, etc.).
+  whose operands have an unambiguous order (`STRETCH_SCL_IMM n`,
+  `BRANCH_ON cond, target`, `LOAD_IMM Rd, imm`, etc.).
 - **Key/value** --- `key=value` pairs separated by whitespace or
   commas, used by opcodes with several modal flags
-  (`EMIT_BIT tx=... expect=... mask=... capture=...`).
+  (`EMIT_BIT_IMM tx=... expect=... mask=... capture=...`).
 
 Within a single key/value list:
 
 - Order of keys does not matter.
 - Each key may appear at most once.
 - Unrecognised keys are rejected with the list of allowed keys.
-- Missing required keys (`tx=` on `EMIT_BIT`, `sda=` / `scl=` on
-  `EMIT_QUARTER`) are rejected.
+- Missing required keys (`tx=` on `EMIT_BIT_IMM`, `sda=` / `scl=`
+  on `EMIT_QUARTER_IMM`, `imm=` on `EMIT_BYTE_IMM`) are rejected.
 - Optional flag keys default to: `expect=X`, `mask=0`, `capture=0`.
 
 ## Directives
@@ -129,9 +137,9 @@ cannot use an `.equ` name where a label is expected (e.g. as a
 `BRANCH_ON` target), and vice versa.
 
 ```text
-.equ slow_div, 60           ; ~100 kHz at the Verde 24 MHz clock
+.equ slow_div, 59           ; 100 kHz at the Verde 24 MHz clock
 .equ fast_div, 5            ; ~1 MHz at the Verde 24 MHz clock (= reset default)
-LOAD_TIMING i2c_freq, slow_div
+LOAD_TIMING reg=0, divider=slow_div
 ```
 
 `.equ` cannot forward-reference: the value must already be defined
@@ -140,18 +148,18 @@ and surfaces typos early.
 
 ### `.dw VALUE [, VALUE...]`
 
-Emits a literal 16-bit word at the current PC. The values must be
+Emits a literal 32-bit word at the current PC. The values must be
 integer literals or previously-defined `.equ` names; labels are
 rejected.
 
 ```text
-.dw 0xC000                  ; raw 0xC000 word --- e.g. a reserved-v0.5 opcode
+.dw 0xC000_0000             ; raw HALT-tagged word --- e.g. a reserved encoding
 .dw slow_div, fast_div      ; two words, in source order
 ```
 
 `.dw` is the escape hatch for emitting opcodes or symbols the
 assembler refuses to encode directly --- for example, the
-reserved-v0.5 mnemonics (`FLAG_CLEAR`, `CAPTURE_RUN`) or the
+reserved-v0.5 mnemonics (`CAPTURE_RUN`, `CALL`, `RET`) or the
 reserved `tx_symbol` code `0b11`. The compiler's refusal is a
 guard rail; `.dw` lets you cross it when you really need to.
 
@@ -165,25 +173,25 @@ A complete, mostly-trivial source file:
 
 ```text
 ; one-shot I2C scan-or-fail
-.equ slow_div, 60
+.equ slow_div, 59
 
 start:
-    LOAD_TIMING   i2c_freq, slow_div
-    SET_BUS_MODE  i2c
+    LOAD_TIMING       reg=0, divider=slow_div
+    SET_BUS_MODE      i2c
 
     ; START
-    EMIT_QUARTER  sda=recessive scl=recessive
-    EMIT_QUARTER  sda=dominant  scl=recessive
-    EMIT_QUARTER  sda=dominant  scl=dominant
+    EMIT_QUARTER_IMM  sda=recessive scl=recessive
+    EMIT_QUARTER_IMM  sda=dominant  scl=recessive
+    EMIT_QUARTER_IMM  sda=dominant  scl=dominant
 
     ; one bit, capture for the host
-    EMIT_BIT      tx=hiz expect=0 mask=1 capture=1
-    BRANCH_ON     MISMATCH, nak
+    EMIT_BIT_IMM      tx=hiz expect=0 mask=1 capture=1
+    BRANCH_ON         MISMATCH, nak
 
-    HALT          status=0
+    HALT              status=0
 
 nak:
-    HALT          status=1
+    HALT              status=1
 ```
 
 You now have everything you need to read any moleasm source you

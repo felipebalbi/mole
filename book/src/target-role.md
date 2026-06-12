@@ -49,20 +49,21 @@ Use this for byte-send and ACK/NACK in target role.
 In target role the engine releases SCL by default. Two opcodes
 behave differently:
 
-- `EMIT_BIT` releases SCL across the entire bit (the SCL drive
-  regs stay `False`). The bit still pulses through its four
-  quarters on the engine's own timer, but only SDA is driven.
-  This is intentional: `EMIT_BIT` remains legal in target role
-  as an asynchronous SDA glitch / fake-byte injection path
-  between transactions.
-- `STRETCH_SCL` is the one path by which a target may actively
-  drive SCL low (canonical clock-stretching). The controller
-  sees SCL stretched and waits.
+- `EMIT_BIT_IMM` / `EMIT_BIT_REG` release SCL across the entire
+  bit (the SCL drive regs stay `False`). The bit still pulses
+  through its four quarters on the engine's own timer, but only
+  SDA is driven. This is intentional: the EMIT_BIT pair remains
+  legal in target role as an asynchronous SDA glitch / fake-byte
+  injection path between transactions.
+- `STRETCH_SCL_IMM` / `STRETCH_SCL_REG` are the one path by which
+  a target may actively drive SCL low (canonical
+  clock-stretching). The controller sees SCL stretched and waits.
 
-Everything else --- `WAIT_ON`, `BRANCH_ON`, `JMP`, `MARK`,
-`HALT`, `LOAD_TIMING`, `SET_BUS_MODE`, the bounded-loop pair,
-sticky flags, the result-ring layout --- works identically in
-both roles.
+Everything else --- `WAIT_ON`, `BRANCH_ON` (and its `JMP` sugar),
+`MARK`, `HALT`, `LOAD_TIMING`, `SET_BUS_MODE`, `FLAG_CLEAR`, the
+DATA-group ALU opcodes, the bounded-loop idiom (`DEC` +
+`BRANCH_ON {REG_ZERO|NOT_REG_ZERO}`), sticky flags, and the
+result-ring layout --- works identically in both roles.
 
 ## DAA arbitration
 
@@ -97,10 +98,11 @@ on a wired-AND sim bus.
         WAIT_ON        START_SEEN, 0          ; wait forever
 
         ; Capture 8 address bits.
-        LOAD_LOOP      lcr0, 8
+        LOAD_LOOP         8
 addr_loop:
         SAMPLE_BIT_ON_SCL capture=1
-        DEC_BRANCH     lcr0, addr_loop
+        DEC               R6
+        BRANCH_ON         NOT_REG_ZERO, addr_loop
 
         ; Sample R/W bit.
         SAMPLE_BIT_ON_SCL capture=1
