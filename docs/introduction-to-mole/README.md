@@ -67,7 +67,7 @@ chapters/             ; one .typ file per part.
   00-promise.typ      ; cover, what-you-get, opening hook.
   01-the-problem.typ  ; compliance vs conformance, today's gaps.
   02-architecture.typ ; three boxes, two layers, contract.
-  03-isa.typ          ; quarter-bit, 15 opcodes, BUS_MODE,
+  03-isa.typ          ; quarter-bit, 26 opcodes, BUS_MODE,
                       ;   sticky flags.
   04-assembler.typ    ; moleasm syntax + the mole-asm CLI.
   05-loader.typ       ; mole-loader: wire contract + ring decode.

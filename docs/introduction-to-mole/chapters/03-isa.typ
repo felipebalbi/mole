@@ -4,10 +4,10 @@
 #import "../figures/sticky-flag-lifecycle.typ": sticky-flag-lifecycle-figure
 
 // Part 3: The instruction set. Starts from the clock the engine
-// thinks in (quarter-bit), then climbs into the 15 opcodes, the
-// bus-agnostic symbol vocabulary, the BUS_MODE indirection, and the
-// sticky-flag control-flow primitive. By the end the audience can
-// read a moleasm listing line by line.
+// thinks in (quarter-bit), then climbs into the 26 v0.2 opcodes,
+// the bus-agnostic symbol vocabulary, the BUS_MODE indirection,
+// and the sticky-flag control-flow primitive. By the end the
+// audience can read a moleasm listing line by line.
 
 #section-slide("03", "The engine and its language")
 
@@ -55,7 +55,7 @@
 ]
 
 #content-slide(
-  "What `EMIT_BIT` emits",
+  "What `EMIT_BIT_IMM` emits",
   kicker-text: "Canonical waveform",
 )[
   #stack(
@@ -68,15 +68,18 @@
       font: font-serif, size: 15pt, style: "italic", fill: muted,
     )[
       SDA stable across the SCL edge. Need finer control?
-      `EMIT_QUARTER` overrides any quarter.
+      `EMIT_QUARTER_IMM` overrides any quarter.
     ]),
   )
 ]
 
 #stat-slide(
-  "15",
+  "26",
   "opcodes",
-  caption: [16 bits each. Opcode always in `[15:11]`. 17 slots reserved for v0.5.],
+  caption: [
+    32 bits each. Opcode is `{group[31:30], sub[29:26]}`.
+    Three live groups + LOOP reserved for v0.5.
+  ],
 )
 
 #let isa-row(op, desc) = (
@@ -86,34 +89,38 @@
 
 #content-slide(
   "Four families",
-  kicker-text: "All of it on one slide",
+  kicker-text: "Most of it on one slide",
 )[
   #grid(
     columns: (auto, 1fr, auto, 1fr),
     column-gutter: (1em, 2em, 1em),
     row-gutter: 0.7em,
     align: (left, left, left, left),
-    ..isa-row("EMIT_BIT",          "canonical bit on SDA"),
+    ..isa-row("EMIT_BIT_IMM",      "canonical bit on SDA"),
     ..isa-row("BRANCH_ON",         "branch on cond code"),
-    ..isa-row("EMIT_QUARTER",      "drive one quarter"),
+    ..isa-row("EMIT_QUARTER_IMM",  "drive one quarter"),
     ..isa-row("WAIT_ON",           "block on cond"),
+    ..isa-row("EMIT_BYTE_IMM",     "8 bits + ACK in one op"),
+    ..isa-row("JMP",               "sugar: unconditional"),
     ..isa-row("SAMPLE_BIT_ON_SCL", "target: sample SDA"),
-    ..isa-row("LOAD_LOOP",         "set loop counter"),
-    ..isa-row("DRIVE_BIT_ON_SCL",  "target: drive SDA"),
-    ..isa-row("DEC_BRANCH",        "decrement + branch"),
-    ..isa-row("SET_BUS_MODE",      "switch electrical class"),
-    ..isa-row("JMP",               "unconditional branch"),
-    ..isa-row("SET_ROLE",          "switch engine role"),
     ..isa-row("MARK",              "push host breadcrumb"),
-    ..isa-row("LOAD_TIMING",       "set quarter divider"),
+    ..isa-row("DRIVE_BIT_ON_SCL",  "target: drive SDA"),
     ..isa-row("HALT",              "stop the engine"),
-    ..isa-row("STRETCH_SCL",       "target: hold SCL low"),
-    [], [],
+    ..isa-row("STRETCH_SCL_IMM",   "hold SCL n quarters"),
+    ..isa-row("LOAD_IMM",          "Rd := imm14"),
+    ..isa-row("SET_BUS_MODE",      "switch electrical class"),
+    ..isa-row("DEC",               "Rd--; sets REG_ZERO"),
+    ..isa-row("SET_ROLE",          "switch engine role"),
+    ..isa-row("FLAG_CLEAR",        "clear sticky flags"),
+    ..isa-row("LOAD_TIMING",       "set quarter divider"),
+    ..isa-row("ADD_IMM",           "Rd := Rs + imm8"),
   )
   #note[
-    Four loose families: drive, observe, control flow, and setup.
-    Don't memorise; just notice the shape. We will use only the
-    drive + control-flow ones in the worked examples.
+    Four loose families: drive / observe / control / setup. Plus a
+    new DATA-group ALU (LOAD_IMM, DEC, ADD_IMM, MOV, AND_IMM,
+    OR_IMM, XOR_IMM, SHIFT) for on-engine arithmetic. Don't
+    memorise the list; just notice the shape. The worked example
+    uses only drive + control + a single LOAD_TIMING.
   ]
 ]
 
@@ -157,7 +164,7 @@
 
 #definition-slide(
   "Sticky flags",
-  sub: [`MISMATCH`, `TIMEOUT`, `START`, `STOP`. Write-once, until rewritten.],
+  sub: [`MISMATCH`, `TIMEOUT`, `START`, `STOP`, `REG_ZERO`. Write-once, until rewritten.],
 )[
   #stack(
     spacing: 0.8em,
@@ -175,7 +182,7 @@
   "What Part 3 leaves you with",
   (
     [Quarter-bit time is the engine's clock. Four quarters per bit, one job each.],
-    [15 opcodes in four loose families. `EMIT_BIT` does the heavy lifting.],
+    [26 opcodes in four groups (WIRE / CTRL / DATA / LOOP). `EMIT_BIT_IMM` does most of the work.],
     [`tx_symbol` is the vocabulary; `BUS_MODE` is the dictionary; sticky flags drive control.],
   ),
   next: [moleasm and `mole-asm` -- turning the ISA into something you can type.],

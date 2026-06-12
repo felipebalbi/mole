@@ -9,14 +9,14 @@
 
 #content-slide(
   "moleasm: the human face",
-  kicker-text: "One line, one 16-bit instruction",
+  kicker-text: "One line, one 32-bit instruction",
 )[
   #stack(
     spacing: 1em,
     code-panel(size: 18pt)[
 ```
 ; Release SDA, expect the target to pull it low. Capture what we see.
-EMIT_BIT  tx=hiz expect=0 mask=1 capture=1
+EMIT_BIT_IMM  tx=hiz expect=0 mask=1 capture=1
 ```
     ],
     bullets(
@@ -35,13 +35,13 @@ EMIT_BIT  tx=hiz expect=0 mask=1 capture=1
     spacing: 1em,
     code-panel(size: 16pt)[
 ```
-.equ slow_div, 60          ; ~100 kHz at 24 MHz fabric
-.dw  0xC000                ; raw word -- escape hatch
+.equ slow_div, 59          ; 100 kHz at 24 MHz fabric
+.dw  0xC000_0000           ; raw word -- escape hatch
 
-        LOAD_TIMING   i2c_freq, slow_div
+        LOAD_TIMING   reg=0, divider=slow_div
         SET_BUS_MODE  i2c
 
-retry:  EMIT_BIT      tx=hiz expect=0 mask=1 capture=1
+retry:  EMIT_BIT_IMM  tx=hiz expect=0 mask=1 capture=1
         BRANCH_ON     MISMATCH, retry
 ```
     ],
@@ -59,12 +59,12 @@ retry:  EMIT_BIT      tx=hiz expect=0 mask=1 capture=1
   kicker-text: "mole-asm CLI",
 )[
 ```
-$ mole-asm program.moleasm
-  -> program.molecode               ; packed little-endian 16-bit words
+$ mole-asm assemble program.moleasm
+  -> program.molecode               ; MAGIC + LEN + 32-bit instructions (LE)
 
-$ mole-asm --frame program.moleasm
+$ mole-asm assemble --frame program.moleasm
   -> program.molecode
-  -> program.mole.bin               ; length + words + CRC-16/XMODEM
+  -> program.mole.bin               ; MAGIC + LEN + words + CRC-16/XMODEM
 ```
 ]
 
@@ -89,7 +89,7 @@ $ mole-asm --frame program.moleasm
         spacing: 0.5em,
         tag(".mole.bin", color: accent),
         text(size: 16pt, fill: ink-soft)[
-          UART-ready frame: length + words + CRC.
+          UART-ready frame: MAGIC + LEN + words + CRC.
         ],
         text(size: 14pt, fill: muted, style: "italic")[
           For the loader and the engine on the wire.

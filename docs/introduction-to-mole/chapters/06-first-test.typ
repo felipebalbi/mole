@@ -32,10 +32,10 @@
 ]
 
 #try-it-slide(
-  [Before you see the code: roughly how many `EMIT_BIT` calls do you
-  expect for the address byte alone?],
-  hint: [Don't forget the ACK probe. And remember: START is a
-  quarter-bit dance, not a bit.],
+  [Before you see the code: how many instructions do you expect
+  for the address byte + ACK, given v0.2 has `EMIT_BYTE_IMM`?],
+  hint: [Don't forget the ACK probe rides on the byte opcode.
+  START is still a quarter-bit dance, not a bit.],
 )
 
 #code-slide(
@@ -43,7 +43,7 @@
   kicker-text: "Mode + timing as opcodes",
 )[
 ```
-        LOAD_TIMING   i2c_freq, 60          ; ~100 kHz @ 24 MHz
+        LOAD_TIMING   reg=0, divider=59     ; 100 kHz @ 24 MHz
         SET_BUS_MODE  i2c                   ; SDA + SCL open-drain
 ```
 ]
@@ -53,56 +53,52 @@
   kicker-text: "0x50 << 1 | W = 0xA0",
 )[
 ```
-        EMIT_QUARTER  sda=recessive scl=recessive   ; idle
-        EMIT_QUARTER  sda=dominant  scl=recessive   ; START: SDA low
-        EMIT_QUARTER  sda=dominant  scl=dominant    ; SCL low
+        EMIT_QUARTER_IMM  sda=recessive scl=recessive   ; idle
+        EMIT_QUARTER_IMM  sda=dominant  scl=recessive   ; START: SDA low
+        EMIT_QUARTER_IMM  sda=dominant  scl=dominant    ; SCL low
 
-        EMIT_BIT      tx=recessive          ; 1
-        EMIT_BIT      tx=dominant           ; 0
-        EMIT_BIT      tx=recessive          ; 1
-        EMIT_BIT      tx=dominant           ; 0
-        EMIT_BIT      tx=dominant           ; 0
-        EMIT_BIT      tx=dominant           ; 0
-        EMIT_BIT      tx=dominant           ; 0
-        EMIT_BIT      tx=dominant           ; W = 0
+        ; one byte + ACK observation -- one instruction
+        EMIT_BYTE_IMM     imm=0xA0 expect=0 mask=1 capture=1
+        BRANCH_ON         MISMATCH, nak
 ```
 ]
 
 #code-slide(
-  "Did the target ACK?",
-  kicker-text: "ACK probe",
+  "What `EMIT_BYTE_IMM` does",
+  kicker-text: "Eight data bits + one ACK slot",
 )[
 ```
-        EMIT_BIT      tx=hiz expect=0 mask=1 capture=1
-        BRANCH_ON     MISMATCH, nak
+; Behind the one line:
+;   bit 7 (MSB) -> 1   bit 6 -> 0   bit 5 -> 1   bit 4 -> 0
+;   bit 3        -> 0   bit 2 -> 0   bit 1 -> 0   bit 0 -> 0   (W=0)
+;   ACK slot: SDA hiz; target must drive low; we sample at Q2
 ```
 
   #align(center, text(
     font: font-serif, size: 16pt, style: "italic", fill: muted,
   )[
-    Release SDA; the target must pull it low.
-    `capture=1` logs the sample; `mask=1` with `expect=0`
-    sets `MISMATCH` if it didn't ACK.
+    The flag triple `expect=0 mask=1 capture=1` applies to the
+    ACK slot. `MISMATCH_FLAG` set if the target NACKs.
   ])
 ]
 
 #code-slide(
   "Data byte, STOP, halt",
-  kicker-text: "Same shape -- second ACK then STOP",
+  kicker-text: "Same shape -- second byte + ACK then STOP",
 )[
 ```
-        ; data byte 0xAB             (EMIT_BIT x8 elided)
-        EMIT_BIT      tx=hiz expect=0 mask=1 capture=1
-        BRANCH_ON     MISMATCH, nak
+        ; data byte 0xAB + ACK
+        EMIT_BYTE_IMM     imm=0xAB expect=0 mask=1 capture=1
+        BRANCH_ON         MISMATCH, nak
 
-        EMIT_QUARTER  sda=dominant  scl=dominant
-        EMIT_QUARTER  sda=dominant  scl=recessive   ; SCL rises
-        EMIT_QUARTER  sda=recessive scl=recessive   ; SDA rises -> STOP
+        EMIT_QUARTER_IMM  sda=dominant  scl=dominant
+        EMIT_QUARTER_IMM  sda=dominant  scl=recessive   ; SCL rises
+        EMIT_QUARTER_IMM  sda=recessive scl=recessive   ; SDA rises -> STOP
 
-        MARK          label=1
-        HALT          status=0
-nak:    MARK          label=2
-        HALT          status=1
+        MARK              label=1
+        HALT              status=0
+nak:    MARK              label=2
+        HALT              status=1
 ```
 ]
 
@@ -114,7 +110,7 @@ nak:    MARK          label=2
     spacing: 1em,
     code-panel(size: 14pt)[
 ```
-revision: 1.0.0
+revision: 0.1.1
 records:  3 total (2 CAPTURE, 1 MARK)
   [   0] CAPTURE sda=0           ; first ACK: target pulled SDA low
   [   1] CAPTURE sda=0           ; second ACK: same

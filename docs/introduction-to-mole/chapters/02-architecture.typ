@@ -42,11 +42,11 @@
     spacing: 0.4em,
     text(font: font-serif, size: 18pt, fill: ink)[Knows the wire.],
     text(size: 15pt, fill: muted)[
-      15 opcodes. Drives every quarter-bit.
+      26 opcodes. Drives every quarter-bit.
       No protocol awareness whatsoever.
     ],
   ),
-  verdict: [A 16-bit bytecode is the contract between them.],
+  verdict: [A 32-bit bytecode is the contract between them.],
 )
 
 #content-slide(
@@ -75,9 +75,9 @@
   "What Part 2 leaves you with",
   (
     [Three physical boxes; two logical layers.],
-    [A 16-bit bytecode pins the contract between them.],
+    [A 32-bit bytecode pins the contract between them.],
     [Compile-time determinism: every bug has a seed.],
   ),
-  next: [the 15-opcode ISA -- and the quarter-bit clock that drives it.],
+  next: [the 26-opcode ISA -- and the quarter-bit clock that drives it.],
   deeper: [`book/src/mental-model.md` -- the layered view in long form.],
 )

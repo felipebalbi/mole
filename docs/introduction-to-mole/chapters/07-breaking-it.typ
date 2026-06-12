@@ -47,10 +47,10 @@
 )[
 ```
         ; Drive quarter-by-quarter to violate setup / hold.
-        EMIT_QUARTER  sda=recessive scl=dominant    ; Q0: load,    SCL low
-        EMIT_QUARTER  sda=recessive scl=dominant    ; Q1: hold,    SCL low
-        EMIT_QUARTER  sda=dominant  scl=recessive   ; Q2: GLITCH,  SCL rises
-        EMIT_QUARTER  sda=recessive scl=recessive   ; Q3: recover, SCL high
+        EMIT_QUARTER_IMM  sda=recessive scl=dominant    ; Q0: load,    SCL low
+        EMIT_QUARTER_IMM  sda=recessive scl=dominant    ; Q1: hold,    SCL low
+        EMIT_QUARTER_IMM  sda=dominant  scl=recessive   ; Q2: GLITCH,  SCL rises
+        EMIT_QUARTER_IMM  sda=recessive scl=recessive   ; Q3: recover, SCL high
 ```
 ]
 
@@ -80,7 +80,7 @@
 #recap-slide(
   "What Part 7 leaves you with",
   (
-    [`EMIT_QUARTER` is the per-quarter escape hatch you reach for to fuzz.],
+    [`EMIT_QUARTER_IMM` is the per-quarter escape hatch you reach for to fuzz.],
     [A single bit can be perfectly compliant or deliberately bent.],
     [Compile-time determinism means \"flake\" is a thing of the past.],
   ),
