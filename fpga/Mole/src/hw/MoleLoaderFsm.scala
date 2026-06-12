@@ -4,75 +4,83 @@ import spinal.core._
 import spinal.lib._
 import spinal.lib.fsm._
 
-/** Host-link loader: parses the wire-format frame on the UART RX stream and
-  * writes the decoded program into the SPRAM through `loaderWrite`.
+/** Host-link loader: parses the v0.2 wire-format frame on the UART RX
+  * stream and writes the decoded program body into the SPRAM through
+  * `loaderWrite`.
   *
-  * Wire format (full reference: `WIRE_FORMAT.md`):
+  * ==v0.2 wire format== (full reference: `WIRE_FORMAT.md`):
   *
   * {{{
-  *   [len_lo][len_hi]
-  *   [word0_b0][word0_b1][word0_b2][word0_b3]
+  *   [magic_b0, magic_b1, magic_b2, magic_b3]   ← 0x0002_4D4C, 4B LE
+  *   [len_b0,   len_b1,   len_b2,   len_b3  ]   ← N = body word count, 4B LE
+  *   [word0_b0, word0_b1, word0_b2, word0_b3]   ← body[0], 4B LE
   *   ...
-  *   [wordN-1_b0][wordN-1_b1][wordN-1_b2][wordN-1_b3]
-  *   [crc_lo][crc_hi]
+  *   [wordN-1_b0, ..., wordN-1_b3]              ← body[N-1]
+  *   [crc_lo, crc_hi]                           ← CRC-16/XMODEM, 2B LE
   * }}}
   *
-  *   - All multi-byte fields are little-endian.
-  *   - `len` is the number of **32-bit** instruction words (v0.2 ISA); it
-  *     does not include itself or the CRC trailer. Each word occupies four
-  *     consecutive bytes (b0 = bits [7:0], b3 = bits [31:24]).
-  *   - CRC is CRC-16/XMODEM over the payload only (`len` + words). The CRC
-  *     trailer bytes are NOT fed into the running CRC.
+  *   - MAGIC and LEN together are the **8-byte preamble** consumed by
+  *     this loader to validate the frame and learn the body size. They
+  *     are NOT written to SPRAM.
+  *   - The body is N 32-bit instruction words that land at SPRAM[0..N-1].
+  *     The engine fetches from PC=0; the first body word IS the first
+  *     instruction the engine runs.
+  *   - CRC-16/XMODEM is computed over MAGIC + LEN + body bytes. The CRC
+  *     trailer bytes themselves are NOT fed into the running CRC.
   *
-  * State sketch:
+  * ==State sketch==
   *
   *   - `idle` --- waiting for any byte; CRC register held at 0. Asserts
-  *     `rx.ready = False` and watches `rx.valid` so the first byte of the frame
-  *     is consumed by `lenLo`, not lost to a stale CRC init. A UART error on
-  *     the very first byte triggers an immediate fault + resync here, before
-  *     the byte is consumed.
-  *   - `lenLo` / `lenHi` --- latch the two length bytes; feed each into CRC.
-  *     `lenHi` rejects `len == 0` or `len > programWordCount`.
-  *   - `wordB0` / `wordB1` / `wordB2` / `wordB3` --- latch the four bytes of
-  *     one 32-bit instruction word (little-endian); feed each into CRC.
-  *   - `writeWord` --- present the assembled 32-bit word on `programWrite`.
-  *     Holds until SPRAM accepts.
-  *   - `crcLo` / `crcHi` --- latch the two trailer bytes. **Not fed into CRC.**
-  *     `crcHi` compares `(crcHi ## crcLo)` against `crc.io.value`. On match:
-  *     `loaded` pulses, return to `idle`. On mismatch: `fault` pulses, go to
-  *     `resync`.
+  *     `rx.ready = False` and watches `rx.valid` so the first byte of the
+  *     frame is consumed by `magicB0`, not lost to a stale CRC init.
+  *   - `magicB0` / `magicB1` / `magicB2` / `magicB3` --- latch the 4 magic
+  *     bytes (LE); feed each into CRC. On the last byte, verify
+  *     `(magicB3 ## magicB2 ## magicB1 ## magicB0) === MAGIC`. Mismatch
+  *     → fault + resync.
+  *   - `lenB0` / `lenB1` / `lenB2` / `lenB3` --- latch the 4 length
+  *     bytes; feed each into CRC. On the last byte, validate
+  *     `len ∈ [1, programWordCount]` and stash `programLengthReg`.
+  *   - `wordB0` / `wordB1` / `wordB2` / `wordB3` --- latch the four bytes
+  *     of one body word; feed each into CRC. Pre-compute `isLastWord` in
+  *     `wordB3` to avoid a wide compare in writeWord.
+  *   - `writeWord` --- present the assembled 32-bit body word on
+  *     `programWrite` at address `wordIndex`. Holds until SPRAM accepts.
+  *   - `crcLo` / `crcHi` --- latch the two trailer bytes (NOT fed into
+  *     CRC). On match: `loaded` pulses, return to `idle`. On mismatch:
+  *     `fault` pulses, go to `resync`.
   *   - `resync` --- drop every incoming byte until `uRxRaw` has been
-  *     continuously high for `idleGapCycles` fabric cycles. CRC register held
-  *     at 0 throughout. Then return to `idle`.
+  *     continuously high for `idleGapCycles` fabric cycles. CRC held at 0
+  *     throughout. Then return to `idle`.
   *
-  * Error handling: `rxFramingError` / `rxParityError` / `rxOverrun` pulse for
-  * one cycle alongside `rx.valid` (per UartRx). Every consuming state checks
-  * `abortNow = errorLatch || (rxErr && rx.valid)` BEFORE doing any byte work,
-  * so an erroring byte is never latched, never CRC-fed, never acted on; we
-  * always fault and head to resync directly. The latch covers the writeWord
-  * stall window where the error pulse may already have disappeared by the time
-  * we leave the stall.
+  * Error handling: `rxFramingError` / `rxParityError` / `rxOverrun` pulse
+  * for one cycle alongside `rx.valid` (per UartRx). Every consuming state
+  * checks `abortNow = errorLatch || (rxErr && rx.valid)` BEFORE doing any
+  * byte work, so an erroring byte is never latched, never CRC-fed, never
+  * acted on; we always fault and head to resync directly. The latch
+  * covers the writeWord stall window where the error pulse may already
+  * have disappeared by the time we leave the stall.
   *
-  * `uRxRaw` is an asynchronous chip pin. The loader synchronises it internally
-  * with a 2-FF chain so resync's idle-gap counter sees a clean domain-local
-  * signal.
+  * `uRxRaw` is an asynchronous chip pin. The loader synchronises it
+  * internally with a 2-FF chain so resync's idle-gap counter sees a clean
+  * domain-local signal.
   *
-  * Back-pressure / gating: `acceptRx` is the gate from the top-level phase FSM.
-  * While `acceptRx = False` the loader holds `rx.ready` low and, if `acceptRx`
-  * drops mid-frame, faults + heads to resync to keep parser state from drifting
-  * across externally-driven phase changes.
+  * Back-pressure / gating: `acceptRx` is the gate from the top-level phase
+  * FSM. While `acceptRx = False` the loader holds `rx.ready` low and, if
+  * `acceptRx` drops mid-frame, faults + heads to resync to keep parser
+  * state from drifting across externally-driven phase changes.
   *
   * @param programWordCount
-  *   maximum frame length, in **32-bit** words. Frames with `len` strictly
+  *   maximum body length in **32-bit** words. Frames with `len` strictly
   *   greater than this are rejected. Mirror of `cfg.programWordCount` and
   *   the host-side `mole_abi::MAX_PROGRAM_WORDS`.
   * @param addrWidth
   *   width of `programWrite.payload.addr`. Matches `SpramController.addrWidth`.
   *   Must be wide enough for `programWordCount - 1`.
   * @param idleGapCycles
-  *   number of consecutive fabric cycles `uRxRaw` (synchronised) must remain
-  *   high before `resync` returns to `idle`. The plan's recommendation is
-  *   `20 * fabricCyclesPerUartBit` (= 2 UART byte times of clean idle).
+  *   number of consecutive fabric cycles `uRxRaw` (synchronised) must
+  *   remain high before `resync` returns to `idle`. The plan's
+  *   recommendation is `20 * fabricCyclesPerUartBit` (= 2 UART byte times
+  *   of clean idle).
   */
 case class MoleLoaderFsm(
     programWordCount: Int,
@@ -90,17 +98,15 @@ case class MoleLoaderFsm(
   )
   require(idleGapCycles >= 1, s"idleGapCycles=$idleGapCycles must be >= 1")
 
-  val lenWidth: Int = 16
-  // Word index counts 0 .. programWordCount-1; compared against frameLen which
-  // can equal programWordCount. log2Up(N+1) covers the worst case.
+  val lenWidth: Int = 32
+  // Word index counts 0 .. programWordCount-1; compared against frameLen
+  // which can equal programWordCount. log2Up(N+1) covers the worst case.
   val wordIndexWidth: Int = log2Up(programWordCount + 1)
   val idleCounterWidth: Int = log2Up(idleGapCycles + 1)
 
   val io = new Bundle {
 
-    /** Byte stream from `UartRx.io.payload`. The loader holds `ready` low in
-      * `idle` and `writeWord`, and any time `acceptRx` is low.
-      */
+    /** Byte stream from `UartRx.io.payload`. */
     val rx = slave Stream Bits(8 bits)
 
     /** Single-cycle pulses from `UartRx`. They pulse alongside
@@ -118,24 +124,19 @@ case class MoleLoaderFsm(
     val uRxRaw = in Bool ()
 
     /** Gate from the top-level phase FSM. False = the loader is closed (e.g.
-      * the engine is running or draining); `rx.ready` stays low. A drop to
-      * False mid-frame triggers a fault + resync.
+      * the engine is running or draining); `rx.ready` stays low.
       */
     val acceptRx = in Bool ()
 
-    /** Outgoing program-write commands to `SpramController.loaderWrite`.
-      *
-      * Data is **32-bit** (v0.2 ISA): the loader assembles one instruction
-      * word from four UART bytes (`b3 ## b2 ## b1 ## b0`).
+    /** Outgoing program-write commands to `SpramController.loaderWrite`. Data
+      * is **32-bit** (v0.2 ISA). Address is the **body** word index `0..N-1`
+      * (the loader does not write the MAGIC/LEN preamble to SPRAM).
       */
     val programWrite = master Stream SpramWriteCmd(addrWidth, dataWidth = 32)
 
-    /** Length of the most recently loaded frame, in 32-bit words. Holds
-      * across the `loaded` pulse and `running`/`draining` phases so the
-      * pipeline's `programLength` input has a stable value. Updated when
-      * `lenHi` accepts the second length byte; cleared on `idle` re-entry
-      * is intentionally **not** done so the running engine keeps seeing
-      * the frame it was loaded with.
+    /** Body length of the most recently loaded frame, in 32-bit words. Stable
+      * across the `loaded` pulse so EnginePipeline.programLength has a settled
+      * value when engineStart asserts.
       */
     val programLength = out UInt (wordIndexWidth bits)
 
@@ -152,6 +153,10 @@ case class MoleLoaderFsm(
     val inResync = out Bool ()
   }
 
+  // Mirror of `mole_abi::MAGIC`. Must stay in sync with the host frame
+  // builder (`mole-asm/src/frame.rs`).
+  val MAGIC: BigInt = BigInt(0x0002_4d4cL)
+
   // 2-FF synchroniser on the raw RX pin so the resync counter sees a
   // domain-local signal. init=True because UART idles high.
   val uRxRawSync: Bool = BufferCC(io.uRxRaw, init = True)
@@ -159,18 +164,20 @@ case class MoleLoaderFsm(
   // Combinational error signal: any of the three pulses.
   val rxErr: Bool = io.rxFramingError || io.rxParityError || io.rxOverrun
 
-  // Latched error: covers the writeWord stall window (or any future stall
-  // longer than one cycle) where the rxErr pulse may have disappeared by
-  // the time we revisit a consuming state.
+  // Latched error: covers the writeWord stall window where the rxErr
+  // pulse may have disappeared by the time we revisit a consuming state.
   val errorLatch = RegInit(False)
 
-  // Abort right now: either a fresh error pulse on a valid byte, or a
-  // previously-latched error.
+  // Abort right now.
   val abortNow: Bool = errorLatch || (rxErr && io.rx.valid)
 
   // Frame-state registers.
-  val lenLoReg = Reg(Bits(8 bits)) init B(0, 8 bits)
-  val lenHiReg = Reg(Bits(8 bits)) init B(0, 8 bits)
+  val magicB0Reg = Reg(Bits(8 bits)) init B(0, 8 bits)
+  val magicB1Reg = Reg(Bits(8 bits)) init B(0, 8 bits)
+  val magicB2Reg = Reg(Bits(8 bits)) init B(0, 8 bits)
+  val lenB0Reg = Reg(Bits(8 bits)) init B(0, 8 bits)
+  val lenB1Reg = Reg(Bits(8 bits)) init B(0, 8 bits)
+  val lenB2Reg = Reg(Bits(8 bits)) init B(0, 8 bits)
   val wordB0Reg = Reg(Bits(8 bits)) init B(0, 8 bits)
   val wordB1Reg = Reg(Bits(8 bits)) init B(0, 8 bits)
   val wordB2Reg = Reg(Bits(8 bits)) init B(0, 8 bits)
@@ -180,20 +187,7 @@ case class MoleLoaderFsm(
   val programLengthReg =
     Reg(UInt(wordIndexWidth bits)) init U(0, wordIndexWidth bits)
   val wordIndex = Reg(UInt(wordIndexWidth bits)) init U(0, wordIndexWidth bits)
-  // Pre-registered "the word about to be written is the last word of the
-  // frame" predicate. Spelt out as a Reg, not a combinational
-  // `wordIndex + 1 === frameLen`, because the latter is a wide add +
-  // equality chain that costs Fmax on the UP5K. Pre-registering moves the
-  // comparator out of the FSM's same-cycle decision and into a 1-bit Reg
-  // read.
-  //
-  // Updated in `wordB3State` on the last-byte UART fire (one byte per
-  // ~10 baud-cycles --- comparator has plenty of time to settle on its
-  // own D-input net), so the SPRAM-paced `programWrite.fire` in
-  // `writeWordState` only reads the registered bit.
-  //
-  // `resyncState.onEntry` does NOT clear this Reg; it's always overwritten
-  // on the next `wordB3` fire before being read by writeWordState.
+  // Pre-registered "this word is the last body word" predicate.
   val isLastWord = Reg(Bool()) init (False)
   val idleCounter =
     Reg(UInt(idleCounterWidth bits)) init U(0, idleCounterWidth bits)
@@ -210,15 +204,8 @@ case class MoleLoaderFsm(
 
   // programWrite defaults; writeWord overrides.
   io.programWrite.valid := False
-  // Body words land at SPRAM[0..N-1]. The preamble words (indices
-  // 0..PREAMBLE_WORDS-1) are consumed from the UART, fed into CRC, but
-  // NOT written to SPRAM --- the engine fetches from PC=0 and would
-  // otherwise execute the magic word as an instruction.
-  val bodyAddr =
-    (wordIndex - U(Instruction.PREAMBLE_WORDS, wordIndexWidth bits))
-      .resize(addrWidth bits)
-  io.programWrite.payload.addr := bodyAddr
-  // Assemble 32-bit word from the four byte registers, little-endian.
+  io.programWrite.payload.addr := wordIndex.resize(addrWidth bits)
+  // Assemble 32-bit word from the four body byte registers, little-endian.
   io.programWrite.payload.data := wordB3Reg ## wordB2Reg ## wordB1Reg ## wordB0Reg
 
   io.programLength := programLengthReg
@@ -228,7 +215,7 @@ case class MoleLoaderFsm(
     // ---------------- idle ---------------------------------------------------
     // Frame boundary. CRC held at 0 by io.init. We do NOT consume bytes
     // here (rx.ready = False); the first byte of the frame is handed off
-    // to lenLoState which consumes it. This avoids the "init wins over
+    // to magicB0State which consumes it. This avoids the "init wins over
     // update" same-cycle collision on Crc16Xmodem. We DO peek at rxErr
     // here so a corrupt first byte never enters the frame.
     val idleState: State = new State with EntryPoint {
@@ -239,48 +226,125 @@ case class MoleLoaderFsm(
             io.fault := True
             goto(resyncState)
           } otherwise {
-            goto(lenLoState)
+            goto(magicB0State)
           }
         }
       }
     }
 
-    // ---------------- lenLo --------------------------------------------------
-    val lenLoState: State = new State {
+    // ---------------- magicB0..B3 -------------------------------------------
+    // Consume the 4-byte MAGIC preamble. Verify on the last byte:
+    // (b3 ## b2 ## b1 ## b0) must equal MAGIC = 0x0002_4D4C.
+    val magicB0State: State = new State {
       whenIsActive {
         when(abortNow) {
           io.fault := True
           goto(resyncState)
         } elsewhen (io.rx.fire) {
-          lenLoReg := io.rx.payload
+          magicB0Reg := io.rx.payload
           crc.io.update.valid := True
-          goto(lenHiState)
+          goto(magicB1State)
+        }
+      }
+    }
+    val magicB1State: State = new State {
+      whenIsActive {
+        when(abortNow) {
+          io.fault := True
+          goto(resyncState)
+        } elsewhen (io.rx.fire) {
+          magicB1Reg := io.rx.payload
+          crc.io.update.valid := True
+          goto(magicB2State)
+        }
+      }
+    }
+    val magicB2State: State = new State {
+      whenIsActive {
+        when(abortNow) {
+          io.fault := True
+          goto(resyncState)
+        } elsewhen (io.rx.fire) {
+          magicB2Reg := io.rx.payload
+          crc.io.update.valid := True
+          goto(magicB3State)
+        }
+      }
+    }
+    val magicB3State: State = new State {
+      whenIsActive {
+        when(abortNow) {
+          io.fault := True
+          goto(resyncState)
+        } elsewhen (io.rx.fire) {
+          crc.io.update.valid := True
+          val got =
+            (io.rx.payload ## magicB2Reg ## magicB1Reg ## magicB0Reg).asUInt
+          when(got =/= U(MAGIC, 32 bits)) {
+            io.fault := True
+            goto(resyncState)
+          } otherwise {
+            goto(lenB0State)
+          }
         }
       }
     }
 
-    // ---------------- lenHi --------------------------------------------------
-    // Latch lenHi; compute and validate the full 16-bit length.
-    val lenHiState: State = new State {
+    // ---------------- lenB0..B3 ---------------------------------------------
+    // Consume the 4-byte LEN preamble (body word count). Validate on the
+    // last byte: 1 <= len <= programWordCount.
+    val lenB0State: State = new State {
       whenIsActive {
         when(abortNow) {
           io.fault := True
           goto(resyncState)
         } elsewhen (io.rx.fire) {
-          lenHiReg := io.rx.payload
+          lenB0Reg := io.rx.payload
           crc.io.update.valid := True
-
-          val newLen = (io.rx.payload ## lenLoReg).asUInt
+          goto(lenB1State)
+        }
+      }
+    }
+    val lenB1State: State = new State {
+      whenIsActive {
+        when(abortNow) {
+          io.fault := True
+          goto(resyncState)
+        } elsewhen (io.rx.fire) {
+          lenB1Reg := io.rx.payload
+          crc.io.update.valid := True
+          goto(lenB2State)
+        }
+      }
+    }
+    val lenB2State: State = new State {
+      whenIsActive {
+        when(abortNow) {
+          io.fault := True
+          goto(resyncState)
+        } elsewhen (io.rx.fire) {
+          lenB2Reg := io.rx.payload
+          crc.io.update.valid := True
+          goto(lenB3State)
+        }
+      }
+    }
+    val lenB3State: State = new State {
+      whenIsActive {
+        when(abortNow) {
+          io.fault := True
+          goto(resyncState)
+        } elsewhen (io.rx.fire) {
+          crc.io.update.valid := True
+          val newLen =
+            (io.rx.payload ## lenB2Reg ## lenB1Reg ## lenB0Reg).asUInt
           frameLen := newLen
-          // programLength is the BODY word count (= total - preamble),
-          // since the loader strips preamble before writing to SPRAM.
-          // The engine fetches PC=0..bodyLen-1.
-          programLengthReg :=
-            (newLen - U(Instruction.PREAMBLE_WORDS, lenWidth bits))
-              .resize(wordIndexWidth bits)
+          programLengthReg := newLen.resize(wordIndexWidth bits)
 
-          when(newLen < U(Instruction.PREAMBLE_WORDS + 1, lenWidth bits) ||
-            newLen > U(programWordCount + Instruction.PREAMBLE_WORDS, lenWidth bits)) {
+          when(
+            newLen === U(0, lenWidth bits) ||
+              newLen > U(programWordCount, lenWidth bits)
+          ) {
             io.fault := True
             goto(resyncState)
           } otherwise {
@@ -291,7 +355,7 @@ case class MoleLoaderFsm(
       }
     }
 
-    // ---------------- wordB0 (LSB) -------------------------------------------
+    // ---------------- body words wordB0..B3 ---------------------------------
     val wordB0State: State = new State {
       whenIsActive {
         when(abortNow) {
@@ -304,8 +368,6 @@ case class MoleLoaderFsm(
         }
       }
     }
-
-    // ---------------- wordB1 -------------------------------------------------
     val wordB1State: State = new State {
       whenIsActive {
         when(abortNow) {
@@ -318,8 +380,6 @@ case class MoleLoaderFsm(
         }
       }
     }
-
-    // ---------------- wordB2 -------------------------------------------------
     val wordB2State: State = new State {
       whenIsActive {
         when(abortNow) {
@@ -332,18 +392,6 @@ case class MoleLoaderFsm(
         }
       }
     }
-
-    // ---------------- wordB3 (MSB) -------------------------------------------
-    //
-    // Latch the MSB byte into wordB3Reg so writeWordState's data path is
-    // stable across any SPRAM back-pressure (the loader is the lowest-
-    // priority writer in SpramController.arbitration; back-pressure is
-    // possible if the engine or drainer happens to be reading at the
-    // same cycle).
-    //
-    // The pre-registered isLastWord predicate is computed here, paced by
-    // the slow UART byte arrival, so writeWordState's same-cycle SPRAM-
-    // fire decision is a 1-bit Reg read instead of a wide add+equality.
     val wordB3State: State = new State {
       whenIsActive {
         when(abortNow) {
@@ -352,52 +400,33 @@ case class MoleLoaderFsm(
         } elsewhen (io.rx.fire) {
           wordB3Reg := io.rx.payload
           crc.io.update.valid := True
-          isLastWord := (wordIndex + 1) === frameLen.resize(
-            wordIndexWidth bits
-          )
+          // Pre-register the "this body word is the last" predicate, paced
+          // by the slow UART byte arrival, so writeWordState's same-cycle
+          // SPRAM-fire decision is a 1-bit Reg read.
+          isLastWord := (wordIndex + 1) === frameLen.resize(wordIndexWidth bits)
           goto(writeWordState)
         }
       }
     }
 
     // ---------------- writeWord ----------------------------------------------
-    // Offer the assembled word to SPRAM. For the first PREAMBLE_WORDS
-    // words (MAGIC, body_len) we **skip the SPRAM write entirely** ---
-    // they were just consumed for CRC + length parsing and are not
-    // executable instructions. Body words (wordIndex >= PREAMBLE_WORDS)
-    // are written to SPRAM at `bodyAddr = wordIndex - PREAMBLE_WORDS`
-    // so body[0] lands at SPRAM[0].
-    //
-    // For preamble words, we just advance state without firing
-    // programWrite (no SPRAM cycle). For body words, the standard
-    // valid/ready handshake holds the word until SPRAM accepts.
+    // Offer the assembled 32-bit body word to SPRAM at wordIndex. On the
+    // last body word, advance to crcLoState.
     val writeWordState: State = new State {
       whenIsActive {
-        val isPreamble =
-          wordIndex < U(Instruction.PREAMBLE_WORDS, wordIndexWidth bits)
-        when(isPreamble) {
-          // Skip SPRAM write; advance immediately.
+        io.programWrite.valid := True
+        when(io.programWrite.fire) {
           when(isLastWord) {
             goto(crcLoState)
           } otherwise {
             wordIndex := wordIndex + 1
             goto(wordB0State)
           }
-        } otherwise {
-          io.programWrite.valid := True
-          when(io.programWrite.fire) {
-            when(isLastWord) {
-              goto(crcLoState)
-            } otherwise {
-              wordIndex := wordIndex + 1
-              goto(wordB0State)
-            }
-          }
         }
       }
     }
 
-    // ---------------- crcLo --------------------------------------------------
+    // ---------------- crcLo / crcHi ------------------------------------------
     // Trailer bytes are NOT fed into the running CRC, but they are still
     // checked for UART integrity.
     val crcLoState: State = new State {
@@ -411,8 +440,6 @@ case class MoleLoaderFsm(
         }
       }
     }
-
-    // ---------------- crcHi --------------------------------------------------
     val crcHiState: State = new State {
       whenIsActive {
         when(abortNow) {
@@ -451,13 +478,18 @@ case class MoleLoaderFsm(
     }
 
     // ---------------- rx.ready -----------------------------------------------
-    // Ready in any state that consumes bytes: lenLo/Hi, wordB0..B3, crcLo/Hi,
-    // and resync (drop). Idle holds ready low so the first byte of a frame
-    // is consumed by lenLo after the init cycle. writeWord holds ready low
-    // while SPRAM may stall. acceptRx gates the whole thing.
+    // Ready in any byte-consuming state. Idle holds ready low so the first
+    // byte of a frame is consumed by magicB0 after the init cycle.
+    // writeWord holds ready low while SPRAM may stall.
     io.rx.ready := io.acceptRx && (
-      isActive(lenLoState) ||
-        isActive(lenHiState) ||
+      isActive(magicB0State) ||
+        isActive(magicB1State) ||
+        isActive(magicB2State) ||
+        isActive(magicB3State) ||
+        isActive(lenB0State) ||
+        isActive(lenB1State) ||
+        isActive(lenB2State) ||
+        isActive(lenB3State) ||
         isActive(wordB0State) ||
         isActive(wordB1State) ||
         isActive(wordB2State) ||
@@ -468,9 +500,6 @@ case class MoleLoaderFsm(
     )
 
     // ---------------- errorLatch driver --------------------------------------
-    // Cleared in idle / resync; set on any rxErr pulse during a payload
-    // state. Single conditional chain so SpinalHDL has one unambiguous
-    // driver.
     when(isActive(idleState) || isActive(resyncState)) {
       errorLatch := False
     } elsewhen (rxErr) {
@@ -478,9 +507,6 @@ case class MoleLoaderFsm(
     }
 
     // ---------------- acceptRx-drop catch-all --------------------------------
-    // External abort: if the phase FSM closes the loader mid-frame, fault
-    // and head to resync so the parser cannot resume a stale half-frame
-    // when the gate re-opens.
     always {
       when(!io.acceptRx && !isActive(idleState) && !isActive(resyncState)) {
         io.fault := True

@@ -25,8 +25,8 @@
 //! | 0    | Success (program loaded and ran, or validation passed).    |
 //! | 1    | I/O or argument error; engine reported a non-clean halt.   |
 //! | 2    | Frame structure error (bad length, CRC, or empty program). |
-//! | 3    | Frame version mismatch (§16.2 dedicated exit code).        |
-//! | 4    | Frame magic mismatch (§16.1).                              |
+//! | 4    | Frame magic mismatch (§16.1; includes version mismatch     |
+//! |      | since version is encoded in the high 16 bits of MAGIC).    |
 //! | 5    | Reserved HALT status in program body (§16.4).              |
 //!
 //! Pass `-` as `<FRAME>` to read from stdin.
@@ -61,8 +61,7 @@ use mole_loader::{
                   0  success (or --validate-only: program is valid)\n  \
                   1  I/O / argument error; engine non-clean halt\n  \
                   2  frame structure error (length, CRC, empty program)\n  \
-                  3  frame version mismatch (§16.2)\n  \
-                  4  frame magic mismatch (§16.1)\n  \
+                  4  frame magic mismatch (§16.1; version is in MAGIC)\n  \
                   5  reserved HALT status in program body (§16.4)"
 )]
 struct Cli {
@@ -150,12 +149,10 @@ fn main() -> ExitCode {
 /// |------|------------------------------------------|
 /// | 2    | structural (TooShort, LengthMismatch,    |
 /// |      | LengthOutOfRange, CrcMismatch)           |
-/// | 3    | VersionMismatch (§16.2)                  |
-/// | 4    | MagicMismatch   (§16.1)                  |
-/// | 5    | ReservedHaltStatusInBody (§16.4)         |
+/// | 4    | MagicMismatch   (§16.1 / wrong version-in-magic) |
+/// | 5    | ReservedHaltStatusInBody (§16.4)                  |
 fn frame_error_exit_code(err: &FrameError) -> u8 {
     match err {
-        FrameError::VersionMismatch { .. } => 3,
         FrameError::MagicMismatch { .. } => 4,
         FrameError::ReservedHaltStatusInBody { .. } => 5,
         _ => 2,
@@ -175,12 +172,9 @@ fn run(cli: Cli) -> Result<ExitCode> {
     // ----------------------------------------------------- 2. Verify frame
     let words_opt = if !cli.no_verify_frame {
         match verify_frame(&frame_bytes) {
-            Ok(words) => {
-                eprintln!(
-                    "verified frame: {} total words (preamble + body), CRC matches",
-                    words.len()
-                );
-                Some(words)
+            Ok(body) => {
+                eprintln!("verified frame: {} body word(s), CRC matches", body.len());
+                Some(body)
             }
             Err(e) => {
                 eprintln!("mole-loader: frame pre-flight failed: {e}");
@@ -193,16 +187,13 @@ fn run(cli: Cli) -> Result<ExitCode> {
     };
 
     // ----------------------------------------------------- 3. §16 program check
-    // Run verify_program when we have words AND either --validate-only
-    // / --dry-run is set, or the frame was verified normally.
-    if let Some(ref words) = words_opt {
-        match mole_loader::verify_program(words) {
-            Ok((ver, body)) => {
-                eprintln!(
-                    "program validated: format version 0x{ver:04x}, \
-                     {} body word(s)",
-                    body.len()
-                );
+    // Run verify_program when we have a body AND either --validate-only
+    // / --dry-run is set, or the frame was verified normally. `words_opt`
+    // is the body slice (preamble already stripped by verify_frame).
+    if let Some(ref body) = words_opt {
+        match mole_loader::verify_program(body) {
+            Ok(_) => {
+                eprintln!("program validated: {} body word(s)", body.len());
             }
             Err(e) => {
                 eprintln!("mole-loader: program validation failed: {e}");
@@ -453,15 +444,8 @@ mod tests {
     #[test]
     fn frame_error_exit_codes_are_correct() {
         assert_eq!(
-            frame_error_exit_code(&FrameError::VersionMismatch {
-                found: 1,
-                expected: 2
-            }),
-            3
-        );
-        assert_eq!(
             frame_error_exit_code(&FrameError::MagicMismatch {
-                found: 0,
+                got: 0,
                 expected: mole_abi::MAGIC
             }),
             4

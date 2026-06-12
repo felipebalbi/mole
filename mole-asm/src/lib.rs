@@ -2,8 +2,11 @@
 //!
 //! `mole-asm` turns moleasm source (grammar documented in
 //! `docs/MOLE-0.2-SPEC.md` §12) into 32-bit-word bytecode the FPGA
-//! engine executes.  The returned program vector includes a 2-word
-//! preamble (magic + length field).
+//! engine executes.  The returned program vector still includes a
+//! 2-word in-memory preamble (magic + body length) for backward
+//! compatibility with consumers that handle the preamble themselves;
+//! [`assemble_to_frame`] strips that preamble and builds the v0.2
+//! UART frame (4-byte MAGIC + 4-byte LEN + body + 2-byte CRC).
 //!
 //! # Quick start
 //!
@@ -11,7 +14,7 @@
 //! use mole_asm::{assemble, assemble_to_frame};
 //!
 //! // Assemble a minimal program.  The returned vector includes the
-//! // 2-word preamble plus the single HALT instruction.
+//! // 2-word in-memory preamble plus the single HALT instruction.
 //! let words = assemble("HALT status=0\n", "<inline>").unwrap();
 //! assert_eq!(words.len(), 3); // preamble(2) + body(1)
 //! assert_eq!(words[0], 0x0002_4D4C); // magic + version
@@ -19,9 +22,9 @@
 //! assert_eq!(words[2], 0x4000_0000); // HALT status=0
 //!
 //! // Or wrap the bytecode in the host->mole UART frame in one call.
-//! // Frame = len(2) + preamble(8) + body(4) + crc(2) = 16 bytes.
+//! // v0.2 frame = MAGIC(4) + LEN(4) + body(4) + crc(2) = 14 bytes.
 //! let frame = assemble_to_frame("HALT status=0\n", "<inline>").unwrap();
-//! assert_eq!(frame.len(), 16);
+//! assert_eq!(frame.len(), 14);
 //! ```
 //!
 //! # API stability
@@ -41,6 +44,11 @@ pub mod frame;
 mod symbols;
 
 pub use error::{AsmError, Kind, Result, SourceLocation};
+
+/// Re-export of `mole_abi::PREAMBLE_WORDS` so downstream callers
+/// (mole-asm-cli) can slice `assemble()`'s output without depending
+/// on `mole-abi` directly.
+pub use mole_abi::PREAMBLE_WORDS;
 
 /// Assemble moleasm source text into a vector of 32-bit bytecode words.
 ///
@@ -75,11 +83,16 @@ pub fn assemble(source: &str, filename: &str) -> Result<Vec<u32>> {
 /// # Errors
 ///
 /// Returns the same [`AsmError`] variants as [`assemble`], plus
-/// [`AsmError::FrameTooLarge`] if the total program size (preamble +
-/// body) exceeds 8194 words.
+/// [`AsmError::FrameTooLarge`] if the body length is 0 or exceeds
+/// `MAX_PROGRAM_WORDS` (= 8192).
 pub fn assemble_to_frame(source: &str, filename: &str) -> Result<Vec<u8>> {
     let words = assemble(source, filename)?;
-    frame::build_frame(&words)
+    // `assemble` returns `[MAGIC, body_len, body[0], ..., body[N-1]]`.
+    // The wire frame's MAGIC + LEN preamble is built fresh by
+    // `build_frame` from the body alone, so slice off the first 2
+    // words before handing the body across.
+    let body = &words[mole_abi::PREAMBLE_WORDS..];
+    frame::build_frame(body)
 }
 
 /// CRC-16/XMODEM helpers. Re-exported so downstream tooling can

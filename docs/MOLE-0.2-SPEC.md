@@ -1481,54 +1481,62 @@ The v0.2 wire format is **NOT** a stable contract until Phase 0 ships
 its first tagged encoder release. Until then any field may change
 without a version bump. See §1.
 
-### Preamble (2 words = 8 bytes)
+### Frame layout (host → Mole)
 
-Instructions are transmitted inside the existing host-to-Mole UART
-frame (length prefix + CRC-16/XMODEM). The bytecode body within that
-frame begins with a 2-word preamble:
-
-| Word (32-bit LE) | Bytes  | Value        | Description                    |
-|------------------|--------|--------------|--------------------------------|
-| Word 0           | [3:0]  | `0x0002_4D4C`| Magic `"ML"` + version 0x0002  |
-| Word 1           | [7:4]  | N (≤ 8192)   | Program length in 32-bit words |
-
-**Magic:** The magic field is the u16 value `0x4D4C`; on the wire
-little-endian it appears as bytes `4C 4D` (which reads as ASCII "LM"
-when treated as a byte string). The loader matches on the u16 value
-`0x4D4C`, not on the byte sequence. High 16 bits of word 0 = format
-version `0x0002`. Full 32-bit word little-endian on wire: bytes
-`4C 4D 02 00`.
-
-**Version:** `0x0002` identifies this v0.2 specification. The v0
-format had no preamble; v0.2 is not backwards-compatible.
-
-**Length word:** Count of 32-bit instruction words in the program body.
-Excludes the two preamble words. Maximum value:
-`MAX_PROGRAM_WORDS = 8192`. Loader rejects frames where the length
-field exceeds this limit, before writing any data to SPRAM.
-
-### Program body
-
-Words 2 through N+1 (N = length field): N 32-bit instructions,
-each little-endian. The body MUST contain at least one instruction
-word; see §13 E-FRM-003.
-
-### Total wire frame size
+The host-to-Mole UART frame is a self-contained byte stream:
 
 ```text
-UART frame = UART framing envelope (length prefix + CRC)
-           = 8 + 4*N bytes bytecode body
-           = 2 preamble words + N instruction words
-             (where N ≤ 8192)
+[MAGIC: 4 bytes LE = 0x0002_4D4C]
+[LEN:   4 bytes LE = N (body word count)]
+[body:  4 * N bytes (N × 32-bit instructions, each LE)]
+[CRC:   2 bytes LE = CRC-16/XMODEM over MAGIC + LEN + body bytes]
+
+Total wire frame = 10 + 4*N bytes
 ```
 
-### Constants (to be frozen in `mole-abi` at Phase B5)
+MAGIC and LEN together are the **8-byte preamble**: they identify the
+format and tell the loader how big the body is. They are consumed and
+validated by the FPGA-side [`MoleLoaderFsm`] but are NOT written into
+SPRAM — the body lands at SPRAM[0..N-1] and the engine fetches from
+PC=0.
+
+**MAGIC:** The 32-bit value `0x0002_4D4C`, on the wire little-endian as
+bytes `4C 4D 02 00`. The low 16 bits (`0x4D4C` = ASCII "LM") identify
+the format family; the high 16 bits (`0x0002`) identify the revision.
+The loader compares the **full 32-bit value** against `mole_abi::MAGIC`
+on a single byte-by-byte read, so a magic with the right low half but
+wrong high half (a "wrong version") is rejected with the same code
+path as garbage. There is no separate version field on the wire in
+v0.2.
+
+**LEN:** Count of 32-bit instruction words in the body. Minimum 1,
+maximum `MAX_PROGRAM_WORDS = 8192`. Loader rejects out-of-range LEN
+before writing any data to SPRAM.
+
+**Body:** N × 32-bit instructions, each little-endian. The body MUST
+contain at least one instruction word; see §13 E-FRM-003.
+
+**CRC:** CRC-16/XMODEM (poly `0x1021`, init `0x0000`, no reflection,
+no XOR-out) computed over **all preceding bytes** (MAGIC + LEN + body).
+The 2 CRC bytes themselves are NOT fed into the running CRC. Loader
+emits / verifier expects the trailer little-endian (`crc_lo` then
+`crc_hi`).
+
+### Constants
+
+Frozen in `mole-abi` (see `mole-abi/src/lib.rs`):
 
 ```rust
 pub const MAGIC: u32 = 0x0002_4D4C;
 pub const FORMAT_VERSION: u16 = 0x0002;
 pub const MAX_PROGRAM_WORDS: usize = 8192;
+pub const PREAMBLE_WORDS: usize = 2;
 ```
+
+`PREAMBLE_WORDS` is the in-memory preamble length that `mole_asm::assemble`
+prepends to its returned word vector (so a single `Vec<u32>` carries both
+the magic and the body). The wire frame is built by stripping that
+preamble and recomposing the MAGIC + LEN bytes via `build_frame`.
 
 ---
 

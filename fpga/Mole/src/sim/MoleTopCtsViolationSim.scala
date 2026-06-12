@@ -10,21 +10,18 @@ import spinal.lib._
 // the full diagnosis and the proposed fix shape. Not in aggregate
 // `make sim`; run via `make sim-top-cts-violation` to reproduce.
 
-/** F-FPGA-007 regression coverage: CTS#-violation sticky observable
-  * (v0.2).
+/** F-FPGA-007 regression coverage: CTS#-violation sticky observable (v0.2).
   *
-  * Reuses [[MoleTopSimDut]] (same fabric clock, same UART config, same
-  * sim-side TX/RX). The sim port `ctsViolationObserved` taps
-  * `MoleTop.ctsViolationObservedReg`, which latches True on the first
-  * UART RX byte that arrives while the phase FSM is NOT in
-  * `acceptLoadState` (i.e. CTS# is deasserted and the host is supposed
-  * to be silent per the CTS contract).
+  * Reuses [[MoleTopSimDut]] (same fabric clock, same UART config, same sim-side
+  * TX/RX). The sim port `ctsViolationObserved` taps
+  * `MoleTop.ctsViolationObservedReg`, which latches True on the first UART RX
+  * byte that arrives while the phase FSM is NOT in `acceptLoadState` (i.e. CTS#
+  * is deasserted and the host is supposed to be silent per the CTS contract).
   *
-  * Single case: load a tiny program, wait for the engine to leave
-  * `acceptLoad`, then push a stray UART byte from the sim TX. The
-  * sticky must assert within a bounded number of cycles and must stay
-  * asserted for the rest of the run. The red LED must also be high
-  * (the sticky is OR'd into `io_ledR`).
+  * Single case: load a tiny program, wait for the engine to leave `acceptLoad`,
+  * then push a stray UART byte from the sim TX. The sticky must assert within a
+  * bounded number of cycles and must stay asserted for the rest of the run. The
+  * red LED must also be high (the sticky is OR'd into `io_ledR`).
   */
 object MoleTopCtsViolationSim extends App {
   import MoleTopSimSupport._

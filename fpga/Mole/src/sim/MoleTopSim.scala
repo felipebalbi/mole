@@ -49,25 +49,25 @@ import scala.collection.mutable
   *
   * Instantiates [[MoleTop]] with `useBlackBox = false` (PLL bypass + SB_IO
   * bypass + SPRAM behavioural model) and adds a sim-side [[UartTx]] /
-  * [[UartRx]] pair so the test harness can push frame bytes and pop ring
-  * bytes through Spinal Streams instead of bit-banging the UART wire. The
-  * sim-side UART runs at the same `(clkFreqHz, baudRate)` as MoleTop's
-  * internal UART, so the bits on `io_uRx` and `io_uTx` look exactly like
-  * what a real host adapter would drive.
+  * [[UartRx]] pair so the test harness can push frame bytes and pop ring bytes
+  * through Spinal Streams instead of bit-banging the UART wire. The sim-side
+  * UART runs at the same `(clkFreqHz, baudRate)` as MoleTop's internal UART, so
+  * the bits on `io_uRx` and `io_uTx` look exactly like what a real host adapter
+  * would drive.
   *
   * Lives in `src/sim/` (not `src/hw/`) so it never elaborates to RTL; the
-  * `useBlackBox = false` MoleTop instance brings the SPRAM as `Mem` and
-  * leaves the analog SB_IO pads as straight passthrough.
+  * `useBlackBox = false` MoleTop instance brings the SPRAM as `Mem` and leaves
+  * the analog SB_IO pads as straight passthrough.
   *
-  * **v0.2 deviation from the attic stash:** the v0 `MoleTopSimDut`
-  * exposed `sim_sda{DriveLow,DriveHigh}` / `sim_scl{DriveLow,DriveHigh}`
-  * / `sim_engineDone` from MoleTop. v0.2 MoleTop's sim_* surface is
-  * narrower (only `sim_halted`, `sim_haltStatus`, `sim_loaderLoaded`,
-  * `sim_loaderFault`, `sim_ctsViolationObserved`). The bus-toggle case
-  * from the v0 stash is therefore skipped here --- adding the missing
-  * sim_* taps would require editing the frozen HDL at fpga/Mole/src/hw/
-  * (forbidden per the C.11 hand-off contract). The remaining three
-  * cases exercise the full host-link path end-to-end.
+  * **v0.2 deviation from the attic stash:** the v0 `MoleTopSimDut` exposed
+  * `sim_sda{DriveLow,DriveHigh}` / `sim_scl{DriveLow,DriveHigh}` /
+  * `sim_engineDone` from MoleTop. v0.2 MoleTop's sim_* surface is narrower
+  * (only `sim_halted`, `sim_haltStatus`, `sim_loaderLoaded`, `sim_loaderFault`,
+  * `sim_ctsViolationObserved`). The bus-toggle case from the v0 stash is
+  * therefore skipped here --- adding the missing sim_* taps would require
+  * editing the frozen HDL at fpga/Mole/src/hw/ (forbidden per the C.11 hand-off
+  * contract). The remaining three cases exercise the full host-link path
+  * end-to-end.
   */
 case class MoleTopSimDut(cfg: MoleConfig) extends Component {
 
@@ -88,13 +88,13 @@ case class MoleTopSimDut(cfg: MoleConfig) extends Component {
     /** Active-low external reset; tied to the user button in production. */
     val externalReset = in Bool ()
 
-    /** Sim-side byte injection. Bytes pushed here are serialised by the
-      * sim UART TX onto MoleTop's `io_uRx`.
+    /** Sim-side byte injection. Bytes pushed here are serialised by the sim
+      * UART TX onto MoleTop's `io_uRx`.
       */
     val txData = slave Stream (Bits(8 bits))
 
-    /** Sim-side byte capture. Bytes from MoleTop's `io_uTx` are
-      * deserialised by the sim UART RX and presented here.
+    /** Sim-side byte capture. Bytes from MoleTop's `io_uTx` are deserialised by
+      * the sim UART RX and presented here.
       */
     val rxData = master Stream (Bits(8 bits))
 
@@ -103,15 +103,15 @@ case class MoleTopSimDut(cfg: MoleConfig) extends Component {
     val ledG = out Bool ()
     val ledB = out Bool ()
 
-    /** MoleTop's CTS# output (active-low). Asserted (`0`) only while the
-      * loader is open for a new frame.
+    /** MoleTop's CTS# output (active-low). Asserted (`0`) only while the loader
+      * is open for a new frame.
       */
     val ctsOut = out Bool ()
 
-    /** Sim-side drive for MoleTop's RTS# input (active-low). Asserted
-      * (`0`) = "host ready, drainer may TX"; deasserted (`1`) = drainer
-      * halts. Default `false` (= active-low LOW = host ready) so cases
-      * that don't exercise TX back-pressure keep streaming.
+    /** Sim-side drive for MoleTop's RTS# input (active-low). Asserted (`0`) =
+      * "host ready, drainer may TX"; deasserted (`1`) = drainer halts. Default
+      * `false` (= active-low LOW = host ready) so cases that don't exercise TX
+      * back-pressure keep streaming.
       */
     val rtsIn = in Bool ()
 
@@ -128,10 +128,10 @@ case class MoleTopSimDut(cfg: MoleConfig) extends Component {
     val fetchActiveTap = out Bool ()
     val haltInFlightTap = out Bool ()
 
-    /** Pad ports passed straight through to MoleTop's `io_sda` / `io_scl`
-      * inout pads. Verilator requires `inout(Analog)` ports be connected
-      * at every instantiation site; nothing in the sim drives or observes
-      * these directly.
+    /** Pad ports passed straight through to MoleTop's `io_sda` / `io_scl` inout
+      * pads. Verilator requires `inout(Analog)` ports be connected at every
+      * instantiation site; nothing in the sim drives or observes these
+      * directly.
       */
     val io_sda = inout(Analog(Bool()))
     val io_scl = inout(Analog(Bool()))
@@ -202,15 +202,14 @@ case class MoleTopSimDut(cfg: MoleConfig) extends Component {
   *
   * Lives at object scope so [[MoleTopSim]], [[MoleTopFlowControlSim]], and
   * [[MoleTopCtsViolationSim]] all share one builder. The v0 stash files
-  * duplicated the CRC + frame builder per-sim because each `extends App`
-  * body fires on import; this v0.2 port pulls them into a plain `object`
-  * to dedupe.
+  * duplicated the CRC + frame builder per-sim because each `extends App` body
+  * fires on import; this v0.2 port pulls them into a plain `object` to dedupe.
   */
 object MoleTopSimSupport {
 
-  /** CRC-16/XMODEM (poly 0x1021, init 0x0000, no reflect, no xorout).
-    * Matches `mole-asm::frame::crc16_xmodem` and
-    * [[Crc16Xmodem]] hardware. See WIRE_FORMAT.md §3.
+  /** CRC-16/XMODEM (poly 0x1021, init 0x0000, no reflect, no xorout). Matches
+    * `mole-asm::frame::crc16_xmodem` and [[Crc16Xmodem]] hardware. See
+    * WIRE_FORMAT.md §3.
     */
   def crc16Xmodem(bytes: Seq[Int]): Int = {
     var crc = 0
@@ -231,52 +230,53 @@ object MoleTopSimSupport {
     *
     * Wire layout per `MoleLoaderFsm`:
     *
+    * v0.2 wire format (must match `mole-asm::frame::build_frame`):
+    *
     * ```
-    *   [len_lo][len_hi]                       <- 16-bit count of 16-bit words
-    *   [magic_w0_b0][magic_w0_b1]
-    *   [magic_w0_b2][magic_w0_b3]             <- preamble word 0 (= 0x0002_4D4C)
-    *   [bodyLen_b0][bodyLen_b1]
-    *   [bodyLen_b2][bodyLen_b3]               <- preamble word 1 (= N)
-    *   [body0_b0]..[body0_b3]                 <- body word 0 (32-bit LE)
+    *   [magic_b0..b3]                         <- 4 bytes LE = 0x0002_4D4C
+    *   [len_b0..b3]                           <- 4 bytes LE = N body words
+    *   [body0_b0..b3]                         <- body word 0 (32-bit LE)
     *   ...
-    *   [bodyN-1_b0]..[bodyN-1_b3]             <- body word N-1
-    *   [crc_lo][crc_hi]                       <- CRC-16/XMODEM over len+payload
+    *   [bodyN-1_b0..b3]                       <- body word N-1
+    *   [crc_lo][crc_hi]                       <- CRC-16/XMODEM over magic+len+body
     * ```
     *
-    * The 16-bit `len` field is the count of **32-bit** words that follow
-    * (excluding the trailing CRC), matching the v0.2 MoleLoaderFsm
-    * contract and `mole-asm::frame::build_frame`. Each word splits into
-    * 4 bytes (little-endian) on the UART wire.
+    * `body` is body-only (no in-memory preamble).
     */
   def buildFrame(body: Seq[Int]): Seq[Int] = {
     val n = body.size
-    // Preamble (2 × 32-bit words) + body (n × 32-bit words).
-    val preambleWords32: Seq[Long] = Seq(MAGIC, n.toLong & 0xffffffffL)
-    val allWords32: Seq[Long] =
-      preambleWords32 ++ body.map(w => w.toLong & 0xffffffffL)
-    val totalWords32 = allWords32.size
     require(
-      totalWords32 <= 0xffff,
-      s"frame too large: $totalWords32 32-bit words exceeds 16-bit len field"
+      n >= 1 && n <= 8192,
+      s"body too large or empty: $n words (must be 1..=8192)"
     )
-    val lenBytes = Seq(totalWords32 & 0xff, (totalWords32 >> 8) & 0xff)
-    // Each 32-bit word splits into 4 bytes (b0=LSB, b3=MSB), little-endian.
-    val wordBytes: Seq[Int] = allWords32.flatMap { w =>
+    val magicBytes: Seq[Int] = Seq(
+      (MAGIC & 0xff).toInt,
+      ((MAGIC >> 8) & 0xff).toInt,
+      ((MAGIC >> 16) & 0xff).toInt,
+      ((MAGIC >> 24) & 0xff).toInt
+    )
+    val lenBytes: Seq[Int] = Seq(
+      n & 0xff,
+      (n >> 8) & 0xff,
+      (n >> 16) & 0xff,
+      (n >> 24) & 0xff
+    )
+    val wordBytes: Seq[Int] = body.flatMap { w =>
+      val wl = w.toLong & 0xffffffffL
       Seq(
-        (w & 0xff).toInt,
-        ((w >> 8) & 0xff).toInt,
-        ((w >> 16) & 0xff).toInt,
-        ((w >> 24) & 0xff).toInt
+        (wl & 0xff).toInt,
+        ((wl >> 8) & 0xff).toInt,
+        ((wl >> 16) & 0xff).toInt,
+        ((wl >> 24) & 0xff).toInt
       )
     }
-    val payload = lenBytes ++ wordBytes
+    val payload: Seq[Int] = magicBytes ++ lenBytes ++ wordBytes
     val crc = crc16Xmodem(payload)
     payload ++ Seq(crc & 0xff, (crc >> 8) & 0xff)
   }
 
-  /** Build a clean HALT 32-bit word per spec §11:
-    *   [31:30]=11 (tag), [29]=overflow, [28]=mismatch,
-    *   [27:23]=status, [22:0]=reserved=0.
+  /** Build a clean HALT 32-bit word per spec §11: [31:30]=11 (tag),
+    * [29]=overflow, [28]=mismatch, [27:23]=status, [22:0]=reserved=0.
     */
   def cleanHaltWord32(status: Int = 0): Long = {
     val tag = 0x3L << 30
@@ -284,8 +284,8 @@ object MoleTopSimSupport {
     tag | st
   }
 
-  /** Pop one byte from the sim UART RX stream, with a generous timeout
-    * to keep the sim from hanging if the drainer misbehaves.
+  /** Pop one byte from the sim UART RX stream, with a generous timeout to keep
+    * the sim from hanging if the drainer misbehaves.
     */
   def recvByte(dut: MoleTopSimDut, maxCycles: Int = 1_000_000): Int = {
     dut.io.rxData.ready #= true
@@ -308,8 +308,7 @@ object MoleTopSimSupport {
     b
   }
 
-  /** Push one byte through the sim UART TX stream and wait for the
-    * handshake.
+  /** Push one byte through the sim UART TX stream and wait for the handshake.
     */
   def sendByte(dut: MoleTopSimDut, byte: Int): Unit = {
     dut.io.txData.payload #= byte
@@ -323,8 +322,8 @@ object MoleTopSimSupport {
     for (b <- frame) sendByte(dut, b)
   }
 
-  /** Hold reset for a few cycles then release. The MoleTop reset bridge
-    * takes a couple of edges to deassert through the 2-FF sync chain.
+  /** Hold reset for a few cycles then release. The MoleTop reset bridge takes a
+    * couple of edges to deassert through the 2-FF sync chain.
     */
   def doReset(dut: MoleTopSimDut): Unit = {
     dut.io.externalReset #= false
@@ -338,8 +337,8 @@ object MoleTopSimSupport {
     dut.clockDomain.waitSampling(10)
   }
 
-  /** Common small test config: 16-word program memory, 32-byte result
-    * ring. Keeps each case under ~50K cycles.
+  /** Common small test config: 16-word program memory, 32-byte result ring.
+    * Keeps each case under ~50K cycles.
     */
   val testCfg: MoleConfig = MoleConfig(
     fabricFreqHz = 24 MHz,
@@ -350,12 +349,12 @@ object MoleTopSimSupport {
     uartBaud = 1_000_000
   )
 
-  /** Verilator simulator flags. Without these, Verilator randomises
-    * every uninitialised Reg, and on unlucky seeds MoleTop's reset
-    * bridge synchroniser starts low, letting fabric-domain Regs (engine
-    * FSM, drive enables, busModeReg) skip their sync-reset clear and
-    * trip the iobuf bus-contention assert at the first post-reset
-    * posedge. Identical to the v0 stash.
+  /** Verilator simulator flags. Without these, Verilator randomises every
+    * uninitialised Reg, and on unlucky seeds MoleTop's reset bridge
+    * synchroniser starts low, letting fabric-domain Regs (engine FSM, drive
+    * enables, busModeReg) skip their sync-reset clear and trip the iobuf
+    * bus-contention assert at the first post-reset posedge. Identical to the v0
+    * stash.
     */
   def simConfig: SpinalSimConfig =
     SimConfig
@@ -473,7 +472,9 @@ object MoleTopSim extends App {
             println(
               s"   diag(in-drain): loaded=$loadedSeen progLen=$programLengthSeen engineStart=$engineStartSeen halted=$haltedSeen status=0x${haltStatusAtHalt.toHexString} fault=$faultSeen rxsize=${received.size}"
             )
-            println(s"   pc samples (cycle, pc, fetchActive, haltInFlight): ${pcSamples.take(20)}")
+            println(
+              s"   pc samples (cycle, pc, fetchActive, haltInFlight): ${pcSamples.take(20)}"
+            )
             throw e
         }
       }

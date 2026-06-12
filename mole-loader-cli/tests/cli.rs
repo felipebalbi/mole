@@ -59,24 +59,30 @@ fn exit_0_for_valid_program() {
 
 #[test]
 fn exit_4_for_bad_magic() {
-    // Build a frame whose word 0 has wrong magic (low 16 bits ≠
-    // 0x4D4C).
-    let mut words = vec![mole_abi::MAGIC, 1u32, 0u32];
-    // Corrupt the magic (keep version, break low 16).
-    words[0] = (mole_abi::MAGIC & 0xFFFF_0000) | 0x0000_DEAD;
-    let frame = build_frame(&words).unwrap();
+    // Build a valid frame, then corrupt the magic bytes.
+    let body = vec![0u32];
+    let mut frame = build_frame(&body).unwrap();
+    frame[0] ^= 0xFF;
     let path = write_temp("bad-magic.mole.bin", &frame);
     assert_eq!(validate_only(&path), 4, "bad magic must exit 4");
 }
 
 #[test]
-fn exit_3_for_wrong_version() {
-    // Build a frame with correct magic but version = 0x0001 ≠ 0x0002.
-    let mut words = vec![mole_abi::MAGIC, 1u32, 0u32];
-    words[0] = (0x0001u32 << 16) | (mole_abi::MAGIC_LO_U16 as u32);
-    let frame = build_frame(&words).unwrap();
-    let path = write_temp("bad-version.mole.bin", &frame);
-    assert_eq!(validate_only(&path), 3, "wrong version must exit 3");
+fn exit_4_for_wrong_version_in_magic() {
+    // The version is encoded in the high 16 bits of the magic word.
+    // Building a frame with a v1 magic (= (0x0001 << 16) | 0x4D4C =
+    // 0x0001_4D4C) must also exit 4, since the magic comparison is
+    // against the full 32-bit value.
+    let body = vec![0u32];
+    let mut frame = build_frame(&body).unwrap();
+    let wrong_magic: u32 = (0x0001u32 << 16) | (mole_abi::MAGIC_LO_U16 as u32);
+    frame[0..4].copy_from_slice(&wrong_magic.to_le_bytes());
+    let path = write_temp("wrong-version.mole.bin", &frame);
+    assert_eq!(
+        validate_only(&path),
+        4,
+        "wrong version in magic word must exit 4 (no separate version code)"
+    );
 }
 
 #[test]
@@ -86,8 +92,8 @@ fn exit_5_for_reserved_halt_status_in_body() {
     //   [31:30]=01 (CTRL group), [29:26]=0000 (HALT sub),
     //   [7:3]=status, rest=0.
     let halt_instr: u32 = (0b01_0000u32 << 26) | (0x1Du32 << 3);
-    let words = vec![mole_abi::MAGIC, 1u32, halt_instr];
-    let frame = build_frame(&words).unwrap();
+    let body = vec![halt_instr];
+    let frame = build_frame(&body).unwrap();
     let path = write_temp("reserved-halt.mole.bin", &frame);
     assert_eq!(validate_only(&path), 5, "reserved HALT status must exit 5");
 }
@@ -104,16 +110,14 @@ fn exit_2_for_corrupt_crc() {
 
 #[test]
 fn exit_2_for_preamble_only_empty_program() {
-    // A frame with len=2 (preamble only, no body) must be rejected
-    // as an empty program (§16.5) with exit code 2.
-    let header = 2u16;
-    let mut buf = header.to_le_bytes().to_vec();
-    // 2 words × 4 bytes = 8 body bytes.
-    buf.extend_from_slice(&[0u8; 8]);
-    let crc = mole_asm::frame::crc16_xmodem(&buf);
-    buf.push((crc & 0xFF) as u8);
-    buf.push((crc >> 8) as u8);
-    let path = write_temp("empty-program.mole.bin", &buf);
+    // A frame claiming LEN=0 (no body words) must be rejected as an
+    // empty program (§16.5) with exit code 2.
+    let body = vec![0u32];
+    let mut frame = build_frame(&body).unwrap();
+    // Patch LEN to 0.
+    frame[4..8].copy_from_slice(&0u32.to_le_bytes());
+    // CRC will be wrong but LengthOutOfRange fires before CRC check.
+    let path = write_temp("empty-program.mole.bin", &frame);
     assert_eq!(validate_only(&path), 2, "empty program must exit 2");
 }
 
@@ -124,8 +128,8 @@ fn verify_frame_and_verify_program_round_trip_all_user_statuses() {
     for status in 0u8..=0x1C {
         let src = format!("HALT status={status}\n");
         let frame = mole_asm::assemble_to_frame(&src, "<t>").unwrap();
-        let words = verify_frame(&frame).unwrap();
-        let result = mole_loader::verify_program(&words);
+        let body = verify_frame(&frame).unwrap();
+        let result = mole_loader::verify_program(&body);
         assert!(
             result.is_ok(),
             "status 0x{status:02X} must be accepted by verify_program, \

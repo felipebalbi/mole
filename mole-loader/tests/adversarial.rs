@@ -73,20 +73,20 @@ const HALT_CLEAN: u32 = halt_word_status(0);
 
 #[test]
 fn frame_words_are_little_endian_on_the_wire() {
-    // §10: 32-bit LE words. Pin it explicitly so a future BE flip is
-    // caught.
-    // Use 4 words: MAGIC, body_len=2, w1, w2.
+    // §10: 32-bit LE body words. Pin it explicitly so a future BE flip
+    // is caught. Frame layout: [MAGIC 4B][LEN 4B][body 4*N B][CRC 2B].
+    // First body word starts at byte offset 8.
     let w1: u32 = 0xAABB_CCDD;
-    let words = vec![mole_abi::MAGIC, 2u32, w1, 0u32];
-    let frame = build_frame(&words).unwrap();
-    // Word 2 (index 10..14) = w1 in LE.
-    assert_eq!(frame[10], 0xDD, "w1 byte 0 (lo)");
-    assert_eq!(frame[11], 0xCC, "w1 byte 1");
-    assert_eq!(frame[12], 0xBB, "w1 byte 2");
-    assert_eq!(frame[13], 0xAA, "w1 byte 3 (hi)");
+    let body = vec![w1, 0u32];
+    let frame = build_frame(&body).unwrap();
+    // body[0] = w1 at bytes [8..12], little-endian.
+    assert_eq!(frame[8], 0xDD, "w1 byte 0 (lo)");
+    assert_eq!(frame[9], 0xCC, "w1 byte 1");
+    assert_eq!(frame[10], 0xBB, "w1 byte 2");
+    assert_eq!(frame[11], 0xAA, "w1 byte 3 (hi)");
     // The verifier must reconstruct the word identically.
     let decoded = verify_frame(&frame).unwrap();
-    assert_eq!(decoded[2], w1);
+    assert_eq!(decoded[0], w1);
 }
 
 #[test]
@@ -94,8 +94,8 @@ fn verify_frame_truncated_at_every_offset_never_panics() {
     // Cut a known-good frame at every byte offset from 0 to len-1.
     // For each truncation, the verifier must return a clean error
     // and never panic.
-    let words = vec![mole_abi::MAGIC, 3u32, 0x1234_0000u32, 0xABCD_0000u32, 0u32];
-    let frame = build_frame(&words).unwrap();
+    let body = vec![0x1234_0000u32, 0xABCD_0000u32, 0u32];
+    let frame = build_frame(&body).unwrap();
     for cut in 0..frame.len() {
         let slice = &frame[..cut];
         let result = verify_frame(slice);
@@ -111,8 +111,8 @@ fn verify_frame_truncated_at_every_offset_never_panics() {
 fn verify_frame_trailing_garbage_rejected_as_length_mismatch() {
     // A good frame with one extra byte appended is a length problem,
     // not a CRC problem. The verifier must report LengthMismatch.
-    let words = vec![mole_abi::MAGIC, 2u32, 0x9000_0000u32, 0x6000_0000u32];
-    let mut frame = build_frame(&words).unwrap();
+    let body = vec![0x9000_0000u32, 0x6000_0000u32];
+    let mut frame = build_frame(&body).unwrap();
     frame.push(0xFF);
     let err = verify_frame(&frame).unwrap_err();
     assert!(
@@ -123,10 +123,13 @@ fn verify_frame_trailing_garbage_rejected_as_length_mismatch() {
 
 #[test]
 fn verify_frame_header_says_three_but_payload_has_only_header() {
-    // Header claims 3 words (minimum valid); only the 2-byte header
-    // itself is present. Must be LengthMismatch.
-    let buf = vec![0x03, 0x00];
-    let err = verify_frame(&buf).unwrap_err();
+    // Build a valid 1-body-word frame, then patch the LEN field to
+    // claim 3 body words. Body has only 1, so LengthMismatch fires.
+    let body = vec![0u32];
+    let mut frame = build_frame(&body).unwrap();
+    let claimed: u32 = 3;
+    frame[4..8].copy_from_slice(&claimed.to_le_bytes());
+    let err = verify_frame(&frame).unwrap_err();
     assert!(
         matches!(err, FrameError::LengthMismatch { .. }),
         "got: {err:?}"
@@ -135,14 +138,16 @@ fn verify_frame_header_says_three_but_payload_has_only_header() {
 
 #[test]
 fn verify_frame_oversize_8195_distinct_from_8194_max() {
-    // 8194 is the inclusive max (PREAMBLE_WORDS + MAX_PROGRAM_WORDS).
-    // 8195 must be LengthOutOfRange, not LengthMismatch.
-    let over: u16 = 8195;
-    let mut buf = over.to_le_bytes().to_vec();
-    buf.extend(std::iter::repeat_n(0u8, (over as usize) * 4 + 2));
-    let err = verify_frame(&buf).unwrap_err();
+    // MAX_PROGRAM_WORDS is the inclusive max body word count (= 8192).
+    // 8193 (and above) must be LengthOutOfRange, not LengthMismatch.
+    // Build a valid 1-body-word frame, patch LEN to 8193.
+    let body = vec![0u32];
+    let mut frame = build_frame(&body).unwrap();
+    let over: u32 = (mole_abi::MAX_PROGRAM_WORDS as u32) + 1; // 8193
+    frame[4..8].copy_from_slice(&over.to_le_bytes());
+    let err = verify_frame(&frame).unwrap_err();
     assert!(
-        matches!(err, FrameError::LengthOutOfRange { len_words: 8195 }),
+        matches!(err, FrameError::LengthOutOfRange { len_words } if len_words == over),
         "got: {err:?}"
     );
 }
@@ -151,10 +156,10 @@ fn verify_frame_oversize_8195_distinct_from_8194_max() {
 fn verify_frame_crc_bit_flip_in_payload_caught() {
     // Flip exactly one bit in the middle of the payload and check
     // that CRC catches it.
-    let words = vec![mole_abi::MAGIC, 3u32, 0x1111_0000u32, 0x2222_0000u32, 0u32];
-    let mut frame = build_frame(&words).unwrap();
-    // Flip a bit in the third word's low byte (byte offset 2+8=10).
-    frame[10] ^= 0x01;
+    let body = vec![0x1111_0000u32, 0x2222_0000u32, 0u32];
+    let mut frame = build_frame(&body).unwrap();
+    // Flip a bit in the first body word's low byte (byte offset 8).
+    frame[8] ^= 0x01;
     let err = verify_frame(&frame).unwrap_err();
     assert!(
         matches!(err, FrameError::CrcMismatch { .. }),
@@ -166,8 +171,8 @@ fn verify_frame_crc_bit_flip_in_payload_caught() {
 fn verify_frame_crc_does_not_cover_itself() {
     // If CRC were computed over the whole frame including the CRC
     // bytes, flipping the CRC and re-CRCing would round-trip.
-    let words = vec![mole_abi::MAGIC, 1u32, 0u32];
-    let mut frame = build_frame(&words).unwrap();
+    let body = vec![0u32];
+    let mut frame = build_frame(&body).unwrap();
     let last = frame.len() - 1;
     frame[last] ^= 0xFF;
     frame[last - 1] ^= 0xFF;
@@ -438,13 +443,11 @@ fn assemble_then_verify_frame_round_trip() {
     // trip through verify_frame. The returned words include the
     // 2-word preamble (MAGIC + body_len).
     let frame = mole_asm::assemble_to_frame("HALT status=0\nHALT status=1\n", "<rt>").unwrap();
-    let words = verify_frame(&frame).unwrap();
-    // words[0] = MAGIC, words[1] = body_len(2), words[2..] = body.
-    assert_eq!(words[0], mole_abi::MAGIC);
-    assert_eq!(words[1], 2u32); // two HALT instructions
-    // Two HALT instructions: verify_program strips the preamble.
-    let (_ver, body) = mole_loader::verify_program(&words).expect("valid assembled frame");
-    assert_eq!(body.len(), 2);
+    // verify_frame returns body-only (preamble validated + stripped).
+    let body = verify_frame(&frame).unwrap();
+    assert_eq!(body.len(), 2); // two HALT instructions
+    let scanned = mole_loader::verify_program(&body).expect("valid assembled frame");
+    assert_eq!(scanned.len(), 2);
 }
 
 #[test]
@@ -462,17 +465,22 @@ fn assemble_to_frame_then_loader_error_is_frame_variant() {
 }
 
 // ---------------------------------------------------------------------------
-// Format version / magic validation (§16.1, §16.2)
+// Magic validation (§16.1) — now done by verify_frame.
+//
+// v0.2 does not have a separate format-version field on the wire; the
+// magic word `0x0002_4D4C` encodes both magic ("ML" = 0x4D4C) and
+// version (0x0002) atomically. Any 4-byte value at offset 0 that is
+// not exactly MAGIC is a frame-level rejection, surfaced from
+// `verify_frame` (NOT `verify_program`).
 // ---------------------------------------------------------------------------
 
 #[test]
-fn verify_program_rejects_wrong_magic() {
-    // Build a frame whose word 0 has a bad low-u16 (magic field).
-    let mut words = vec![mole_abi::MAGIC, 1u32, 0u32];
-    words[0] = (mole_abi::MAGIC & 0xFFFF_0000) | 0x0000_1234; // wrong magic
-    let frame = build_frame(&words).unwrap();
-    let decoded_words = verify_frame(&frame).unwrap();
-    let err = mole_loader::verify_program(&decoded_words).unwrap_err();
+fn verify_frame_rejects_wrong_magic() {
+    // Build a valid frame, then corrupt the magic bytes.
+    let body = vec![0u32];
+    let mut frame = build_frame(&body).unwrap();
+    frame[0] ^= 0xFF;
+    let err = verify_frame(&frame).unwrap_err();
     assert!(
         matches!(err, FrameError::MagicMismatch { .. }),
         "wrong magic must produce MagicMismatch, got: {err:?}"
@@ -480,32 +488,32 @@ fn verify_program_rejects_wrong_magic() {
 }
 
 #[test]
-fn verify_program_rejects_wrong_version() {
-    // Build a frame with correct magic but wrong version (0x0001).
-    let mut words = vec![mole_abi::MAGIC, 1u32, 0u32];
-    words[0] = (0x0001u32 << 16) | (mole_abi::MAGIC_LO_U16 as u32); // version=1
-    let frame = build_frame(&words).unwrap();
-    let decoded_words = verify_frame(&frame).unwrap();
-    let err = mole_loader::verify_program(&decoded_words).unwrap_err();
+fn verify_frame_rejects_wrong_version_via_magic() {
+    // The version is baked into the high 16 bits of the magic word.
+    // If word 0 has the right "ML" low half but a wrong version high
+    // half (e.g. 0x0001_4D4C), verify_frame still flags it as a magic
+    // mismatch because the comparison is against the full 32-bit value.
+    let body = vec![0u32];
+    let mut frame = build_frame(&body).unwrap();
+    // Build "v1 magic" = (0x0001 << 16) | 0x4D4C = 0x0001_4D4C.
+    let wrong_magic: u32 = (0x0001u32 << 16) | (mole_abi::MAGIC_LO_U16 as u32);
+    frame[0..4].copy_from_slice(&wrong_magic.to_le_bytes());
+    let err = verify_frame(&frame).unwrap_err();
     assert!(
-        matches!(
-            err,
-            FrameError::VersionMismatch {
-                found: 0x0001,
-                expected: 0x0002,
-            }
-        ),
-        "wrong version must produce VersionMismatch, got: {err:?}"
+        matches!(err, FrameError::MagicMismatch { got, expected }
+                 if got == wrong_magic && expected == mole_abi::MAGIC),
+        "wrong version in magic word must produce MagicMismatch, got: {err:?}"
     );
 }
 
 #[test]
 fn verify_program_accepts_correct_frame() {
     let frame = mole_asm::assemble_to_frame("HALT status=0\n", "<t>").unwrap();
-    let words = verify_frame(&frame).unwrap();
-    let (ver, body) = mole_loader::verify_program(&words).unwrap();
-    assert_eq!(ver, mole_abi::FORMAT_VERSION);
-    assert_eq!(body.len(), 1);
+    // verify_frame returns body-only; verify_program returns the body
+    // unchanged if no reserved HALT status is found.
+    let body = verify_frame(&frame).unwrap();
+    let scanned = mole_loader::verify_program(&body).unwrap();
+    assert_eq!(scanned.len(), 1);
 }
 
 // ---------------------------------------------------------------------------
@@ -519,8 +527,8 @@ fn verify_program_rejects_halt_with_reserved_status_0x1d() {
     // HALT opcode at [31:26] = 0b01_0000 = 0x10.
     // status=0x1D at [7:3]: 0x1D << 3 = 0xE8.
     let halt_instr: u32 = (0b01_0000u32 << 26) | (0x1Du32 << 3);
-    let words = vec![mole_abi::MAGIC, 1u32, halt_instr];
-    let frame = build_frame(&words).unwrap();
+    let body = vec![halt_instr];
+    let frame = build_frame(&body).unwrap();
     let decoded = verify_frame(&frame).unwrap();
     let err = mole_loader::verify_program(&decoded).unwrap_err();
     assert!(
@@ -538,8 +546,8 @@ fn verify_program_rejects_halt_with_reserved_status_0x1d() {
 #[test]
 fn verify_program_rejects_halt_with_reserved_status_0x1e() {
     let halt_instr: u32 = (0b01_0000u32 << 26) | (0x1Eu32 << 3);
-    let words = vec![mole_abi::MAGIC, 1u32, halt_instr];
-    let frame = build_frame(&words).unwrap();
+    let body = vec![halt_instr];
+    let frame = build_frame(&body).unwrap();
     let decoded = verify_frame(&frame).unwrap();
     let err = mole_loader::verify_program(&decoded).unwrap_err();
     assert!(
@@ -558,8 +566,8 @@ fn verify_program_rejects_halt_with_reserved_status_0x1e() {
 fn verify_program_accepts_halt_status_user_max_0x1c() {
     // 0x1C is STATUS_USER_MAX; it must NOT be rejected.
     let halt_instr: u32 = (0b01_0000u32 << 26) | (0x1Cu32 << 3);
-    let words = vec![mole_abi::MAGIC, 1u32, halt_instr];
-    let frame = build_frame(&words).unwrap();
+    let body = vec![halt_instr];
+    let frame = build_frame(&body).unwrap();
     let decoded = verify_frame(&frame).unwrap();
     assert!(mole_loader::verify_program(&decoded).is_ok());
 }
@@ -571,8 +579,8 @@ fn verify_program_accepts_halt_status_trap_0x1f() {
     // should never emit it, but the loader spec only rejects
     // 0x1D..=0x1E. STATUS_TRAP passes verify_program.
     let halt_instr: u32 = (0b01_0000u32 << 26) | (0x1Fu32 << 3);
-    let words = vec![mole_abi::MAGIC, 1u32, halt_instr];
-    let frame = build_frame(&words).unwrap();
+    let body = vec![halt_instr];
+    let frame = build_frame(&body).unwrap();
     let decoded = verify_frame(&frame).unwrap();
     assert!(mole_loader::verify_program(&decoded).is_ok());
 }

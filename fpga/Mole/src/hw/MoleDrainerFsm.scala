@@ -55,8 +55,8 @@ import spinal.lib.fsm._
   *     `wordReg`.
   *   - `sendB0State` / `sendB1State` / `sendB2State` / `sendB3State`: byte
   *     stream out (little-endian: b0=LSB first, then b1, b2, b3=MSB), with
-  *     proper back-pressure. The final fire in `sendB3` pulses
-  *     `drainComplete` and returns to `idleState` in one step.
+  *     proper back-pressure. The final fire in `sendB3` pulses `drainComplete`
+  *     and returns to `idleState` in one step.
   *
   * Seven states total (idle + issueRead + waitResp + 4 byte sends).
   *
@@ -104,14 +104,14 @@ case class MoleDrainerFsm(
       */
     val readResp = slave Flow Bits(32 bits)
 
-    /** Byte stream sink. Drives the controller's `UartTx.data` port. Bytes
-      * of each 32-bit word stream out in little-endian order: b0 (LSB)
-      * first, then b1, b2, b3 (MSB).
+    /** Byte stream sink. Drives the controller's `UartTx.data` port. Bytes of
+      * each 32-bit word stream out in little-endian order: b0 (LSB) first, then
+      * b1, b2, b3 (MSB).
       */
     val txData = master Stream Bits(8 bits)
 
-    /** Single-cycle pulse the SAME cycle the final byte (highest byte of
-      * the last ring word) fires on `txData`.
+    /** Single-cycle pulse the SAME cycle the final byte (highest byte of the
+      * last ring word) fires on `txData`.
       */
     val drainComplete = out Bool ()
 

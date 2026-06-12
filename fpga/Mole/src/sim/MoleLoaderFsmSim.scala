@@ -57,15 +57,29 @@ object MoleLoaderFsmSim extends App {
     crc & 0xffff
   }
 
-  // Assemble a complete frame for the **v0.2 loader** (32-bit words):
-  //   len_lo, len_hi,                           ← len = 32-bit word count
-  //   word0_b0, word0_b1, word0_b2, word0_b3,   ← each word = 4 bytes LE
-  //   ...
-  //   crc_lo, crc_hi                            ← CRC-16/XMODEM over len+body
-  def buildFrame(words: Seq[Int]): Seq[Int] = {
-    val n = words.size
-    val lenBytes = Seq(n & 0xff, (n >> 8) & 0xff)
-    val wordBytes = words.flatMap { w =>
+  // v0.2 MAGIC mirror — keep in sync with `mole_abi::MAGIC`.
+  val MAGIC: Long = 0x0002_4d4cL
+
+  // Assemble a complete frame for the **v0.2 loader**:
+  //   magic_b0..b3       ← 4 bytes LE = 0x0002_4D4C
+  //   len_b0..b3         ← 4 bytes LE = N body words
+  //   body word 0..N-1   ← each word = 4 bytes LE
+  //   crc_lo, crc_hi     ← CRC-16/XMODEM over MAGIC + LEN + body bytes
+  def buildFrame(body: Seq[Int]): Seq[Int] = {
+    val n = body.size
+    val magicBytes: Seq[Int] = Seq(
+      (MAGIC & 0xff).toInt,
+      ((MAGIC >> 8) & 0xff).toInt,
+      ((MAGIC >> 16) & 0xff).toInt,
+      ((MAGIC >> 24) & 0xff).toInt
+    )
+    val lenBytes: Seq[Int] = Seq(
+      n & 0xff,
+      (n >> 8) & 0xff,
+      (n >> 16) & 0xff,
+      (n >> 24) & 0xff
+    )
+    val wordBytes: Seq[Int] = body.flatMap { w =>
       Seq(
         w & 0xff,
         (w >> 8) & 0xff,
@@ -73,7 +87,7 @@ object MoleLoaderFsmSim extends App {
         (w >> 24) & 0xff
       )
     }
-    val payload = lenBytes ++ wordBytes
+    val payload: Seq[Int] = magicBytes ++ lenBytes ++ wordBytes
     val crc = crc16Xmodem(payload)
     payload ++ Seq(crc & 0xff, (crc >> 8) & 0xff)
   }

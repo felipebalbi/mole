@@ -25,26 +25,26 @@ fn fixtures_dir() -> PathBuf {
 fn verify_fixture(name: &str) {
     let path: PathBuf = fixtures_dir().join(name);
     let bytes = fs::read(&path).unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
-    let words = verify_frame(&bytes).unwrap_or_else(|e| {
+    let body = verify_frame(&bytes).unwrap_or_else(|e| {
         panic!(
             "verify_frame({}) rejected a committed fixture: {e}",
             path.display()
         )
     });
     assert!(
-        !words.is_empty(),
+        !body.is_empty(),
         "{}: verifier returned zero words --- frame had a valid header but no body?",
         path.display()
     );
-    // Cross-check: the header word count must round-trip to the
-    // number of words decoded.
-    let header_words = u16::from_le_bytes([bytes[0], bytes[1]]) as usize;
+    // Cross-check: the LEN field (bytes [4..8], u32 LE) must equal the
+    // number of body words verify_frame returned.
+    let header_len = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]) as usize;
     assert_eq!(
-        header_words,
-        words.len(),
-        "{}: header says {header_words} words, verifier yielded {} words",
+        header_len,
+        body.len(),
+        "{}: header says {header_len} body words, verifier yielded {} words",
         path.display(),
-        words.len()
+        body.len()
     );
 }
 

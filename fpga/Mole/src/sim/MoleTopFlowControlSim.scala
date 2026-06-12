@@ -12,35 +12,32 @@ import scala.collection.mutable
 // the full diagnosis and the proposed fix shape. Not in aggregate
 // `make sim`; run via `make sim-top-flow-control` to reproduce.
 
-/** End-to-end audit for [[MoleTop]]'s USB-UART hardware flow control
-  * (v0.2).
+/** End-to-end audit for [[MoleTop]]'s USB-UART hardware flow control (v0.2).
   *
-  * Companion to [[MoleTopSim]]; same wrapper ([[MoleTopSimDut]]), same
-  * fabric clock and baud, focused exclusively on the `io_uCts` /
-  * `io_uRts` contract.
+  * Companion to [[MoleTopSim]]; same wrapper ([[MoleTopSimDut]]), same fabric
+  * clock and baud, focused exclusively on the `io_uCts` / `io_uRts` contract.
   *
   * Four cases (matching the v0 stash):
   *
-  *   1. **CTS asserted in acceptLoad** --- after reset, before any
-  *      frame is sent, `io_uCts` is the active-low `0` (asserted) and
-  *      stays asserted for many cycles. Validates that the phase FSM
-  *      enters `acceptLoadState` cleanly out of reset.
-  *   2. **CTS deasserted during run+drain** --- after a frame loads,
-  *      the phase FSM transitions through `runningState` and
-  *      `drainingState` before returning to `acceptLoadState`.
-  *      `io_uCts` must be `1` (deasserted) somewhere in that window
-  *      and back to `0` (asserted) after the full drain.
-  *   3. **TX backpressure on RTS deasserted** --- holding `io_uRts`
-  *      high (deasserted) before a frame is sent must prevent the
-  *      drainer from ever placing a byte on `io_uTx`. The engine
-  *      still runs (RTS only gates TX). Dropping `io_uRts` then
-  *      drains the full ring with a clean HALT word at the tail.
-  *   4. **TX resumes after mid-drain halt** --- partial-drain N
-  *      bytes, raise `io_uRts` mid-drain, wait long enough for one
-  *      in-flight UART frame to complete, verify no further bytes
-  *      arrive, then drop `io_uRts` and drain the remainder. Total
-  *      bytes drained equals the full ring and the final HALT word
-  *      is clean.
+  *   1. **CTS asserted in acceptLoad** --- after reset, before any frame is
+  *      sent, `io_uCts` is the active-low `0` (asserted) and stays asserted for
+  *      many cycles. Validates that the phase FSM enters `acceptLoadState`
+  *      cleanly out of reset.
+  *   2. **CTS deasserted during run+drain** --- after a frame loads, the phase
+  *      FSM transitions through `runningState` and `drainingState` before
+  *      returning to `acceptLoadState`. `io_uCts` must be `1` (deasserted)
+  *      somewhere in that window and back to `0` (asserted) after the full
+  *      drain.
+  *   3. **TX backpressure on RTS deasserted** --- holding `io_uRts` high
+  *      (deasserted) before a frame is sent must prevent the drainer from ever
+  *      placing a byte on `io_uTx`. The engine still runs (RTS only gates TX).
+  *      Dropping `io_uRts` then drains the full ring with a clean HALT word at
+  *      the tail.
+  *   4. **TX resumes after mid-drain halt** --- partial-drain N bytes, raise
+  *      `io_uRts` mid-drain, wait long enough for one in-flight UART frame to
+  *      complete, verify no further bytes arrive, then drop `io_uRts` and drain
+  *      the remainder. Total bytes drained equals the full ring and the final
+  *      HALT word is clean.
   */
 object MoleTopFlowControlSim extends App {
   import MoleTopSimSupport._
@@ -57,10 +54,10 @@ object MoleTopFlowControlSim extends App {
     b0 | b1 | b2 | b3
   }
 
-  /** Non-asserting variant of [[recvByte]]. Returns `Some(b)` if a
-    * byte arrives within `maxCycles`, `None` otherwise. Used to
-    * assert **absence** of a byte (Cases 3 + 4): if this returns
-    * `Some` when we expected `None`, the halt path is leaking bytes.
+  /** Non-asserting variant of [[recvByte]]. Returns `Some(b)` if a byte arrives
+    * within `maxCycles`, `None` otherwise. Used to assert **absence** of a byte
+    * (Cases 3 + 4): if this returns `Some` when we expected `None`, the halt
+    * path is leaking bytes.
     */
   def tryRecvByte(dut: MoleTopSimDut, maxCycles: Int): Option[Int] = {
     dut.io.rxData.ready #= true

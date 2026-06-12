@@ -5,11 +5,12 @@
 //! [`mole-asm`](../mole_asm/index.html) assembler:
 //!
 //! - **Frame verification** ([`frame`]): sanity-check a `.mole.bin`
-//!   artifact (length, CRC-16/XMODEM) before sending it to the
-//!   engine.
-//! - **Program validation** ([`verify_program`]): check magic,
-//!   version, and reserved-status fields (§16.1, §16.2, §16.4)
-//!   before writing any data to SPRAM.
+//!   artifact (magic, length, CRC-16/XMODEM) before sending it to the
+//!   engine. The 8-byte preamble (`MAGIC` + body LEN) is validated
+//!   and stripped; the returned slice is body-only.
+//! - **Program validation** ([`verify_program`]): scan the body for
+//!   reserved HALT status values (§16.4) before writing any data to
+//!   SPRAM.
 //! - **Result-ring decoder** ([`ring`]): parse the engine's
 //!   `REVISION` / `CAPTURE` / `MARK` / `HALT` records out of the
 //!   raw byte stream the drainer returns.
@@ -17,12 +18,12 @@
 //!   UART (2 Mbaud, 8N1, hardware RTS/CTS) and waits for the
 //!   engine's drained ring.
 //!
-//! The wire contract is documented in
-//! `fpga/Mole/WIRE_FORMAT.md`. Frames are little-endian
-//! `[len_lo, len_hi, words..., crc_lo, crc_hi]` with 32-bit LE
-//! instruction words over UART at 2 Mbaud 8N1 with mandatory
-//! hardware RTS/CTS. The engine drains exactly
-//! `resultRingByteCount` bytes back per `HALT`.
+//! The wire contract is documented in `fpga/Mole/WIRE_FORMAT.md`.
+//! Frames are little-endian
+//! `[MAGIC(4B), LEN(4B), body(4*N B), crc(2B)]` with 32-bit LE
+//! body words over UART at 1-2 Mbaud 8N1 with mandatory hardware
+//! RTS/CTS. The engine drains exactly `resultRingByteCount` bytes
+//! back per `HALT`.
 //!
 //! # Quick start
 //!
@@ -35,8 +36,8 @@
 //!     "<inline>",
 //! )
 //! .unwrap();
-//! let words = verify_frame(&frame).unwrap();
-//! let (_version, body) = verify_program(&words).unwrap();
+//! let body = verify_frame(&frame).unwrap();
+//! let _scanned = verify_program(&body).unwrap();
 //! assert_eq!(body.len(), 1); // one body word (HALT)
 //!
 //! // Post-run: decode a hand-built 4-word "REVISION + HALT" ring.
@@ -72,63 +73,19 @@ pub use transport::{
     DEFAULT_BAUD, DEFAULT_RING_BYTES, DEFAULT_TIMEOUT, FALLBACK_BAUD, Progress, Transport,
 };
 
-use mole_abi::{FORMAT_VERSION, MAGIC, MAGIC_LO_U16, PREAMBLE_WORDS, halt};
+use mole_abi::halt;
 
-/// Validate a v0.2 program word slice per spec §16.
+/// Scan a v0.2 program body for reserved HALT status values (§16.4).
 ///
-/// Run AFTER [`verify_frame`] succeeds. Performs the magic check
-/// (§16.1), version check (§16.2), body-length consistency check
-/// (§16.3), and the reserved-HALT-status scan (§16.4). The
-/// minimum-length check (§16.5) is enforced by [`verify_frame`]'s
-/// lower bound on the length field.
-///
-/// On success, returns `(version, body)` where `version` is the
-/// format version extracted from preamble word 0 and `body` is the
-/// program body slice (preamble stripped). On failure, returns the
-/// first error encountered without scanning further.
+/// Run AFTER [`verify_frame`] succeeds (magic + length + CRC already
+/// validated). The body slice is the program instructions only --- the
+/// 8-byte MAGIC + LEN preamble has been stripped by `verify_frame`.
 ///
 /// # Errors
 ///
-/// - [`FrameError::MagicMismatch`] if word 0 low 16 bits ≠
-///   `mole_abi::MAGIC_LO_U16` (§16.1).
-/// - [`FrameError::VersionMismatch`] if word 0 high 16 bits ≠
-///   `mole_abi::FORMAT_VERSION` (§16.2).
-/// - [`FrameError::ReservedHaltStatusInBody`] if any HALT
-///   instruction in the body carries status `0x1D..=0x1E` (§16.4).
-pub fn verify_program(words: &[u32]) -> Result<(u16, &[u32]), FrameError> {
-    // §16.1 — Magic check: low 16 bits of word 0 must be MAGIC_LO_U16.
-    let found_magic_lo = (words[0] & 0xFFFF) as u16;
-    if found_magic_lo != MAGIC_LO_U16 {
-        return Err(FrameError::MagicMismatch {
-            found: words[0],
-            expected: MAGIC,
-        });
-    }
-
-    // §16.2 — Version check: high 16 bits of word 0 must be
-    // FORMAT_VERSION.
-    let found_version = (words[0] >> 16) as u16;
-    if found_version != FORMAT_VERSION {
-        return Err(FrameError::VersionMismatch {
-            found: found_version,
-            expected: FORMAT_VERSION,
-        });
-    }
-
-    // §16.3 — Body length consistency: word 1 declares the body
-    // length; the actual body slice length must agree.
-    let declared_body_len = words[1] as usize;
-    let body = &words[PREAMBLE_WORDS..];
-    debug_assert_eq!(
-        declared_body_len,
-        body.len(),
-        "verify_frame should have guaranteed consistency between \
-         the frame length field and the returned word slice"
-    );
-
-    // §16.4 — Reserved-status scan: walk every body word and reject
-    // any HALT instruction whose status field is in 0x1D..=0x1E.
-    //
+/// - [`FrameError::ReservedHaltStatusInBody`] if any HALT instruction
+///   in the body carries status `0x1D..=0x1E` (§16.4).
+pub fn verify_program(body: &[u32]) -> Result<&[u32], FrameError> {
     // HALT instruction encoding per §5.10:
     //   [31:30] group  = 0b01  (CTRL group)
     //   [29:26] sub    = 0b0000
@@ -156,5 +113,5 @@ pub fn verify_program(words: &[u32]) -> Result<(u16, &[u32]), FrameError> {
         }
     }
 
-    Ok((found_version, body))
+    Ok(body)
 }

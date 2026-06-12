@@ -65,27 +65,27 @@ pub enum LoaderError {
 /// valid word vector lands here.
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
 pub enum FrameError {
-    /// Frame is shorter than the 2-byte length header, so we cannot
-    /// even tell what the file thinks it is. Anything longer than 2
-    /// bytes but still malformed lands in [`FrameError::LengthMismatch`]
-    /// or [`FrameError::LengthOutOfRange`] instead.
-    #[error("frame too short: need at least 2 bytes (length header), got {got}")]
+    /// Frame is shorter than the minimum (4B magic + 4B len + 4B body[0]
+    /// + 2B CRC = 14 bytes). Anything longer than 14 but still
+    /// malformed lands in [`FrameError::LengthMismatch`] or
+    /// [`FrameError::LengthOutOfRange`] instead.
+    #[error("frame too short: need at least 14 bytes (preamble + 1 body word + CRC), got {got}")]
     TooShort {
         /// Actual byte count of the truncated frame.
         got: usize,
     },
 
-    /// Frame's `len` header asks for a word count that does not match
-    /// the bytes actually present. `expected_bytes` is what the header
-    /// implies (`2 + 4 * len_words + 2`); `got_bytes` is what the
-    /// file has.
+    /// Frame's `len` header asks for a body word count that does not
+    /// match the bytes actually present. `expected_bytes` is what the
+    /// header implies (`4 + 4 + 4 * len_words + 2`); `got_bytes` is
+    /// what the file has.
     #[error(
-        "frame length mismatch: header says {len_words} words \
+        "frame length mismatch: header says {len_words} body words \
          (= {expected_bytes} total bytes), got {got_bytes} bytes"
     )]
     LengthMismatch {
-        /// Word count the header claims.
-        len_words: u16,
+        /// Body word count the header claims.
+        len_words: u32,
         /// Total byte count the header implies.
         expected_bytes: usize,
         /// Actual byte count of the buffer.
@@ -93,23 +93,20 @@ pub enum FrameError {
     },
 
     /// Frame's `len` header is outside the engine's accepted range
-    /// `3..=8194` (preamble + 1..=8192 body words; currently 8192
-    /// max body words). Symmetric with [`mole_asm`]'s
-    /// `AsmError::FrameTooLarge` on the encoder side. Also covers
-    /// the §16.5 empty-program rejection (length ≤ `PREAMBLE_WORDS`
-    /// = 2 means zero body words).
+    /// `1..=MAX_PROGRAM_WORDS` (= `1..=8192`). Symmetric with
+    /// [`mole_asm`]'s `AsmError::FrameTooLarge` on the encoder side.
     #[error(
-        "frame word count {len_words} outside engine range \
-         3..=8194 (preamble_words + 1..=MAX_PROGRAM_WORDS)"
+        "frame body word count {len_words} outside engine range \
+         1..=8192 (MAX_PROGRAM_WORDS)"
     )]
     LengthOutOfRange {
-        /// Word count the header claims.
-        len_words: u16,
+        /// Body word count the header claims.
+        len_words: u32,
     },
 
-    /// CRC-16/XMODEM over `len + words` did not match the trailing
-    /// two-byte CRC. File is corrupt or truncated past the length
-    /// check.
+    /// CRC-16/XMODEM over `MAGIC + LEN + body` did not match the
+    /// trailing two-byte CRC. File is corrupt or truncated past the
+    /// length check.
     #[error("frame CRC mismatch: computed {computed:#06x}, header has {got:#06x}")]
     CrcMismatch {
         /// What [`crate::frame::verify_frame`] computed locally.
@@ -118,34 +115,14 @@ pub enum FrameError {
         got: u16,
     },
 
-    /// Frame magic mismatch (§16.1): word 0 low 16 bits do not match
-    /// `mole_abi::MAGIC_LO_U16 = 0x4D4C`.
-    ///
-    /// `found` is the full 32-bit preamble word 0; `expected` is
-    /// `mole_abi::MAGIC`. This is distinct from a version mismatch:
-    /// the magic field identifies the format family, while the version
-    /// field identifies the revision within that family.
-    #[error("frame magic mismatch: found 0x{found:08x}, expected 0x{expected:08x}")]
+    /// Frame magic mismatch (§16.1): the 4 magic bytes at offset 0..4
+    /// do not match `mole_abi::MAGIC = 0x0002_4D4C`.
+    #[error("frame magic mismatch: got 0x{got:08x}, expected 0x{expected:08x}")]
     MagicMismatch {
-        /// The full 32-bit preamble word 0 found in the frame.
-        found: u32,
+        /// The 32-bit value at offset 0..4 of the frame.
+        got: u32,
         /// The expected value (`mole_abi::MAGIC`).
         expected: u32,
-    },
-
-    /// Frame version mismatch (§16.2): word 0 high 16 bits do not
-    /// match `mole_abi::FORMAT_VERSION = 0x0002`.
-    ///
-    /// The loader-CLI exits with a dedicated exit code for this error
-    /// so automated tooling can distinguish "wrong version" from
-    /// generic structural failures.
-    #[error("frame version mismatch: found 0x{found:04x}, expected 0x{expected:04x}")]
-    VersionMismatch {
-        /// The version value found in the frame's preamble word 0
-        /// high 16 bits.
-        found: u16,
-        /// The expected version (`mole_abi::FORMAT_VERSION`).
-        expected: u16,
     },
 
     /// A HALT instruction in the program body has a reserved status

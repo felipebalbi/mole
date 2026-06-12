@@ -56,7 +56,11 @@ pub fn run(args: &AssembleArgs) -> Result<()> {
 
     let want_frame = args.frame || args.frame_output.is_some();
     if want_frame {
-        let frame = mole_asm::frame::build_frame(&words).wrap_err("failed to build UART frame")?;
+        // `assemble` returns [MAGIC, body_len, body...]; the wire frame's
+        // MAGIC + LEN preamble is built fresh by `build_frame` from the
+        // body alone.
+        let body = &words[mole_asm::PREAMBLE_WORDS..];
+        let frame = mole_asm::frame::build_frame(body).wrap_err("failed to build UART frame")?;
         let frame_path = args
             .frame_output
             .clone()
