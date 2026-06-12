@@ -23,6 +23,19 @@
 //! to software / no flow control because doing so is guaranteed to
 //! drop bytes against the Mole's loader FSM.
 //!
+//! # Stale-buffer defence at open time
+//!
+//! [`Transport::open`] calls
+//! [`SerialPort::clear`]`(`[`ClearBuffer::Input`]`)` immediately
+//! after configuring the port. This discards any RX bytes the kernel
+//! was holding in the tty buffer from a *previous* process that
+//! talked to the same device. Without that clear, a fresh
+//! `Transport::open` followed by `drain_ring(8192)` could satisfy
+//! the read entirely from stale kernel-buffered bytes and never
+//! actually talk to the engine --- producing a "fake clean run"
+//! that looks identical to a real one in the decoder. See
+//! F-HOST-009 in the design notes.
+//!
 //! # Progress reporting
 //!
 //! This module emits zero progress bars itself. Callers that want a
@@ -34,7 +47,7 @@
 use std::io::{ErrorKind, Read, Write};
 use std::time::Duration;
 
-use serialport::{DataBits, FlowControl, Parity, SerialPort, StopBits};
+use serialport::{ClearBuffer, DataBits, FlowControl, Parity, SerialPort, StopBits};
 
 use crate::error::{TransportError, TransportPhase};
 
@@ -156,6 +169,37 @@ impl Transport {
         port.set_data_bits(DataBits::Eight)
             .and_then(|()| port.set_parity(Parity::None))
             .and_then(|()| port.set_stop_bits(StopBits::One))
+            .map_err(|source| TransportError::Configure {
+                path: path.to_string(),
+                source,
+            })?;
+
+        // Discard any bytes the kernel was holding in the RX buffer
+        // before we opened the port.
+        //
+        // The serial port driver buffers RX bytes independently of
+        // process lifetimes: a previous loader-cli invocation that
+        // drained 8 KiB from the engine and then exited leaves those
+        // bytes sitting in the kernel's tty layer for the *next*
+        // process to open the same device. Without this clear, the
+        // next `drain_ring()` call satisfies itself from that stale
+        // buffer in microseconds and returns a byte-perfect replay
+        // of the previous program's drain --- a "fake clean run" that
+        // looks identical to a real one in the decoder. F-HOST-009
+        // (silently-stale-drain hazard); reproduced on the bench
+        // with blinky returning byte-identical-to-tmp108 ring data
+        // because the FPGA was in an infinite loop and never streamed
+        // new bytes.
+        //
+        // We intentionally clear only the INPUT buffer (not Output or
+        // All): the kernel TX buffer may legitimately contain bytes
+        // we wrote in a previous call (the caller may chain
+        // `Transport::open().with_timeout(...).send_frame(...)` and
+        // we don't want to drop in-flight writes). The TX side is
+        // also far less prone to this hazard because every successful
+        // `send_frame()` ends in `flush()` which blocks until the
+        // OS hands all bytes to the driver.
+        port.clear(ClearBuffer::Input)
             .map_err(|source| TransportError::Configure {
                 path: path.to_string(),
                 source,
