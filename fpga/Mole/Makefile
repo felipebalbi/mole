@@ -12,7 +12,7 @@ PCF      := icebreaker.pcf
 # Keep the defaults there in lockstep with these values.
 REVISION_MAJOR := 0
 REVISION_MINOR := 1
-REVISION_PATCH := 0
+REVISION_PATCH := 1
 REVISION_DEFS  := -Drevision.major=$(REVISION_MAJOR) \
                   -Drevision.minor=$(REVISION_MINOR) \
                   -Drevision.patch=$(REVISION_PATCH)

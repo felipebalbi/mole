@@ -44,10 +44,10 @@ object Revision {
     */
   val minor: Int = intProp("revision.minor", 1)
 
-  /** Patch revision (low 16 bits). Default `0` mirrors the `Makefile`'s
+  /** Patch revision (low 16 bits). Default `1` mirrors the `Makefile`'s
     * `REVISION_PATCH`.
     */
-  val patch: Int = intProp("revision.patch", 0)
+  val patch: Int = intProp("revision.patch", 1)
 
   require(
     major >= 0 && major <= 0xff,
