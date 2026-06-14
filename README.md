@@ -165,8 +165,27 @@ are reserved for humans (the DCO is a human certification).
 
 ## License
 
-TBD. No license file is present yet; treat the contents as
-"all rights reserved" until one is added.
+Licensed under either of
+
+- Apache License, Version 2.0
+  ([LICENSE-APACHE](./LICENSE-APACHE) or
+  https://www.apache.org/licenses/LICENSE-2.0)
+- MIT license
+  ([LICENSE-MIT](./LICENSE-MIT) or
+  https://opensource.org/licenses/MIT)
+
+at your option.
+
+This is the standard Rust-ecosystem dual license. The workspace
+declares `license = "MIT OR Apache-2.0"` in
+[`Cargo.toml`](./Cargo.toml) and every member crate inherits it.
+
+### Contribution
+
+Unless you explicitly state otherwise, any contribution
+intentionally submitted for inclusion in Mole by you, as defined
+in the Apache-2.0 license, shall be dual licensed as above,
+without any additional terms or conditions.
 
 ## Acknowledgements
 
