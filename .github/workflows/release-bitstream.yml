@@ -30,11 +30,16 @@
 #   - run on PRs or non-tag pushes.
 #
 # Toolchain pinning matches the sibling `fpga-sim.yml` synth job:
-# JDK 17 (Temurin), apt-pinned yosys / nextpnr-ice40 / fpga-icestorm
-# from Ubuntu 24.04. Keeping the two workflows on identical toolchain
-# versions means "passes CI" and "ships a bitstream" produce the same
-# binary; a drift between them would invite the "passes sim, fails
-# release" surprise.
+# JDK 17 (Temurin) for SpinalHDL elaboration; oss-cad-suite
+# (pinned dated release) for yosys + nextpnr-ice40 + icestorm.
+# The Ubuntu 24.04 apt-pinned `nextpnr-ice40 0.6` is too old to
+# meet timing on the v0.2 netlist with the Makefile's seed pin
+# (validated against modern nextpnr); see the "Install
+# oss-cad-suite" step comment for the full story. Keeping the
+# two synth-running workflows on identical toolchain versions
+# means "passes CI" and "ships a bitstream" produce the same
+# binary; a drift between them would invite the "passes sim,
+# fails release" surprise.
 #
 # Sibling fpga-sim.yml already gates CRLF for *.yml files in
 # .github/, so this workflow doesn't duplicate that check.
@@ -95,18 +100,30 @@ jobs:
       - name: Install sbt
         uses: sbt/setup-sbt@v1
 
-      # apt-pinned synth toolchain (same versions as the fpga-sim.yml
-      # synth job): yosys 0.36, nextpnr-ice40 0.6, fpga-icestorm 2024.
-      # See fpga-sim.yml comment for the rationale on apt vs
-      # oss-cad-suite. Keep both jobs on apt-pinned versions so a
-      # commit that passes the sim+synth CI gate produces the same
-      # bitstream here.
-      - name: Install yosys + nextpnr-ice40 + icestorm
-        run: |
-          set -eu
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            yosys nextpnr-ice40 fpga-icestorm
+      # Synth toolchain: oss-cad-suite (pinned date version), not
+      # Ubuntu apt. The apt-pinned `nextpnr-ice40 0.6` on Ubuntu
+      # 24.04 is too old --- the v0.2 netlist with `--seed 4`
+      # achieves 23.80 MHz against the 24.00 MHz target on 0.6
+      # (P&R behaviour drifted between 0.6 and 0.9; the per-seed
+      # Fmax distribution shifted). The Makefile's seed pin is
+      # validated against the modern nextpnr we run locally
+      # (0.9+); CI needs the same toolchain or every netlist
+      # nudge plays seed lottery twice.
+      #
+      # Pinned to a specific dated release for reproducibility ---
+      # `2026-06-14` is the first release we know works against
+      # the v0.2 netlist + seed 4. Bump deliberately when a newer
+      # toolchain has features or fixes we want.
+      #
+      # NOTE: the sibling `fpga-sim.yml` sim job stays on apt
+      # Verilator deliberately (see its header for the
+      # SpinalHDL #1919 rationale) --- only the synth-style jobs
+      # need oss-cad-suite.
+      - name: Install oss-cad-suite (yosys + nextpnr-ice40 + icestorm)
+        uses: YosysHQ/setup-oss-cad-suite@v4
+        with:
+          version: '2026-06-14'
+          github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Verify toolchain
         working-directory: fpga/Mole

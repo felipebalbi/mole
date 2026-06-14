@@ -172,27 +172,34 @@ jobs:
       - name: Install sbt
         uses: sbt/setup-sbt@v1
 
-      # Synth toolchain is installed from Ubuntu apt rather than
-      # YosysHQ oss-cad-suite for the same reason the sim job pins
-      # Verilator from apt: pinning to a distro-supplied version
-      # gives reproducible CI without depending on the moving
-      # head of oss-cad-suite.
+      # Synth toolchain: oss-cad-suite (pinned date version), not
+      # Ubuntu apt. The apt-pinned `nextpnr-ice40 0.6` on Ubuntu
+      # 24.04 is too old --- the v0.2 netlist with the Makefile's
+      # `--seed 4` pin achieves 23.80 MHz against the 24.00 MHz
+      # target on 0.6 (P&R behaviour drifted between 0.6 and 0.9;
+      # the per-seed Fmax distribution shifted with it). The
+      # Makefile's seed pin is validated against the modern
+      # nextpnr we run locally (0.9+); CI needs the same toolchain
+      # or every netlist nudge plays seed lottery twice.
       #
-      # Ubuntu 24.04 noble ships:
-      #   - yosys           0.36 (apt)
-      #   - nextpnr-ice40   0.6  (apt)
-      #   - fpga-icestorm   2024 (apt, provides icepack)
+      # Pinned to a specific dated release for reproducibility ---
+      # `2026-06-14` is the first release we know works against
+      # the v0.2 netlist + seed 4. Bump deliberately when a newer
+      # toolchain has features or fixes we want.
       #
-      # All three are recent enough to handle the UP5K and the
-      # current Mole netlist. If a future Spinal/yosys interaction
-      # forces a newer toolchain version, switch this job to
-      # oss-cad-suite at that point and document the trigger.
-      - name: Install yosys + nextpnr-ice40 + icestorm
-        run: |
-          set -eu
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            yosys nextpnr-ice40 fpga-icestorm
+      # NOTE: only the SYNTH job moves to oss-cad-suite. The SIM
+      # job (above) deliberately stays on apt Verilator 5.020
+      # because SpinalHDL 1.14.1's generated `__spinalWrapper.cpp`
+      # doesn't compile against Verilator 5.049+ (which oss-cad-
+      # suite 2026-05-26 onwards ships --- the `WData` -> `VlWide`
+      # rename in upstream PR #7642). Two-track toolchain story
+      # stays until SpinalHDL #1919 is fixed and the project
+      # bumps SpinalHDL.
+      - name: Install oss-cad-suite (yosys + nextpnr-ice40 + icestorm)
+        uses: YosysHQ/setup-oss-cad-suite@v4
+        with:
+          version: '2026-06-14'
+          github-token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Verify toolchain
         working-directory: fpga/Mole
