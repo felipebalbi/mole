@@ -237,8 +237,8 @@ object MoleTopFlowControlSim extends App {
       // on the wire (standard HW-flow-control semantics).
       dut.io.rtsIn #= true
 
-      // Allow one in-flight UART frame to finish (~240 cycles at
-      // 1 Mbaud / 24 MHz fabric).
+      // Allow one in-flight UART frame to finish (~120 cycles at
+      // 2 Mbaud / 24 MHz fabric).
       tryRecvByte(dut, maxCycles = 400) match {
         case Some(b) => received += b
         case None    => ()

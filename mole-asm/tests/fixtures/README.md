@@ -184,13 +184,13 @@ python3 mole-asm.py [-h] [--frame] [-o OUT] [INPUT.moleasm]
 
 ## How to send
 
-UART: `/dev/ttyUSBx`, **1 000 000 baud**, 8N1, no software flow
+UART: `/dev/ttyUSBx`, **2 000 000 baud**, 8N1, no software flow
 control. The FT2232H RTS#/CTS# pair carries HW flow control
 (see `fpga/Mole/BRINGUP.md` §3).
 
 ```python
 import serial
-port = serial.Serial("/dev/ttyUSB0", 1_000_000, timeout=2)
+port = serial.Serial("/dev/ttyUSB0", 2_000_000, timeout=2)
 
 with open("first-light.mole.bin", "rb") as f:
     port.write(f.read())
@@ -209,7 +209,7 @@ print(f"got {len(data)} bytes; revision = {data[:4].hex()}")
 For a no-Python first-light send (one-shot, drop and watch):
 
 ```sh
-stty -F /dev/ttyUSB0 1000000 cs8 -cstopb -parenb \
+stty -F /dev/ttyUSB0 2000000 cs8 -cstopb -parenb \
     crtscts -ixon -ixoff -ixany raw
 cat first-light.mole.bin > /dev/ttyUSB0
 ```

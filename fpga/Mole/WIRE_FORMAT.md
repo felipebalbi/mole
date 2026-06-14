@@ -46,7 +46,7 @@ support, in which case file an issue first.
 
 ## 2. UART settings (board-specific)
 
-UART link: **1 000 000 baud, 8N1, RTS/CTS hardware flow control**
+UART link: **2 000 000 baud, 8N1, RTS/CTS hardware flow control**
 (active-low, FT2232H convention). The iCEbreaker's FT2232H
 channel A is `/dev/ttyUSB0` on Linux and typically `COM3` or
 higher on Windows; on macOS it enumerates as
@@ -56,9 +56,18 @@ device's chip-side serial number).
 The engine clock and the UART clock are **both 24 MHz on Verde**
 (1:1 ratio off `PLLOUTGLOBAL`; see
 [`../../docs/MOLE-0.2-SPEC.md`](../../docs/MOLE-0.2-SPEC.md) §2
-clock-domain table). 1 Mbaud is 24× the baud, which is well
-above the textbook 16× oversample floor; no PLL trimming
-needed.
+clock-domain table). 2 Mbaud is 12× the uartClk, paired with
+**8× RX oversample** at the `UartConfig` instantiation in
+`MoleTop` — `baudRate * oversample = 16 MHz < 24 MHz` clears
+the `UartConfig` DDS-overflow guard with ~33 % headroom.
+
+Earlier history: the Verde production default was 1 Mbaud × 16×
+(matches every textbook UART implementation; pinned conservatively
+to keep the engine well off any DDS-overflow edge while the rest
+of v0.2 stabilised). 2 Mbaud × 8× is now the default; 1 Mbaud
+remains available as a fallback by rebuilding the engine with
+`uartBaud = 1_000_000` + `oversample = 16` and passing
+`--baud 1000000` to `mole-loader`.
 
 ## 3. Flow control --- `crtscts` is mandatory
 
@@ -81,7 +90,7 @@ halted (visible failure rather than metastable garbage).
 A working `stty` line for raw bring-up:
 
 ```sh
-stty -F /dev/ttyUSB0 1000000 cs8 -cstopb -parenb \
+stty -F /dev/ttyUSB0 2000000 cs8 -cstopb -parenb \
     crtscts -ixon -ixoff -ixany raw
 ```
 
@@ -104,7 +113,7 @@ UART RX framing / parity / overrun error --- the loader latches
 a fault, lights the red LED, and enters a **Resync** state in
 which it drops every incoming byte until the RX line has been
 continuously high for **at least two UART byte-times**
-(~20 bit periods, ~20 µs at 1 Mbaud).
+(~20 bit periods, ~10 µs at 2 Mbaud).
 
 The host is therefore obligated to:
 

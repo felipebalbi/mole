@@ -174,14 +174,16 @@ object MoleConfigSim extends App {
   )
 
   // UART / DDS audit. Mole's host-link UART runs the RX BaudGenerator
-  // at baudRate × oversample (16× is the imported sibling default,
-  // textbook for UART RX). The 24-bit DDS accumulator overflows once
-  // `baudRate * oversample >= clkFreqHz`; UartConfig already guards
-  // that. Restate it here against uartFreqHz (the uartClk domain, 24
-  // MHz) so a future MoleConfig default bump can't silently violate
-  // the constraint — we'll see this assertion fire before any UART is
-  // even instantiated.
-  val uartOversample = 16
+  // at baudRate × oversample. The Verde v0.2 production wiring is
+  // 2 Mbaud × 8× (set in MoleTop.scala's `UartConfig` instantiation);
+  // the engine sims that don't electrically drive UART inherit the
+  // same 8× value for consistency. The 24-bit DDS accumulator
+  // overflows once `baudRate * oversample >= clkFreqHz`; UartConfig
+  // already guards that. Restate it here against uartFreqHz (the
+  // uartClk domain, 24 MHz) so a future MoleConfig default bump
+  // can't silently violate the constraint — we'll see this assertion
+  // fire before any UART is even instantiated.
+  val uartOversample = 8
   val uartOsHz = cfg.uartBaud.toLong * uartOversample
   val uartClkHz = cfg.uartFreqHz.toLong
   assert(

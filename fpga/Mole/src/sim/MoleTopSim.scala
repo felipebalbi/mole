@@ -80,7 +80,10 @@ case class MoleTopSimDut(cfg: MoleConfig) extends Component {
     parity = ParityType.None,
     useCts = false,
     useRts = false,
-    oversample = 16
+    // 8× RX oversample paired with the 2 Mbaud `cfg.uartBaud` —
+    // mirrors the production wiring in MoleTop.scala so this sim
+    // wrapper exercises the same UART contract end-to-end.
+    oversample = 8
   )
 
   val io = new Bundle {
@@ -354,7 +357,7 @@ object MoleTopSimSupport {
     programWordCount = 16,
     resultRingByteCount = 32,
     captureMaxBits = 64,
-    uartBaud = 1_000_000
+    uartBaud = 2_000_000
   )
 
   /** Verilator simulator flags. Without these, Verilator randomises every

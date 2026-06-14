@@ -63,7 +63,12 @@ case class MoleTop(
     parity = ParityType.None,
     useCts = false,
     useRts = false,
-    oversample = 16
+    // 8× RX oversample paired with the 2 Mbaud uartBaud default
+    // (MoleConfig). baudRate * oversample = 16 MHz < 24 MHz uartClk,
+    // satisfying the UartConfig elaboration guard with ~33% headroom.
+    // For 1 Mbaud × 16× fallback (see MoleConfig docstring), set
+    // oversample = 16 here.
+    oversample = 8
   )
 
   // Resync gap for the loader: 20 UART bit periods of idle on RX.

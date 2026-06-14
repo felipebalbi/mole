@@ -69,7 +69,7 @@ The host loader that wraps the serial port lives in
 
 ```sh
 cargo install --path mole-loader-cli
-mole-loader -p /dev/ttyUSB1 -b 1000000 hello.mole.bin
+mole-loader -p /dev/ttyUSB1 hello.mole.bin
 ```
 
 The loader configures the port (8N1, hardware RTS/CTS),

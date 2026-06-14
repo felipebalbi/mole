@@ -42,7 +42,7 @@ The full CLI surface, including stdin support (`-`), the
 
 ## Wire contract
 
-- UART, default 1 Mbaud, 8N1, **mandatory hardware RTS/CTS flow
+- UART, default 2 Mbaud, 8N1, **mandatory hardware RTS/CTS flow
   control** (see `fpga/Mole/WIRE_FORMAT.md`).
 - Host writes the framed program; engine pulls bytes via CTS.
 - On `HALT` the engine drains `resultRingByteCount` bytes back,

@@ -87,19 +87,28 @@ import spinal.core._
   * @param uartBaud
   *   Default UART baud rate for both directions of the host-link UART.
   *   iCEBreaker's USB-UART bridge is an FT2232H, which comfortably supports up
-  *   to 12 Mbaud. The Mole Verde production default is **1 Mbaud** — the
-  *   highest rate that still keeps the textbook 16× RX oversample at 24 MHz
-  *   uartClk fabric. At 1 Mbaud × 16× oversample the 24-bit DDS phase increment
-  *   is `round(1_000_000 * 16 * 2^24 / 24_000_000) = 11_184_811` (`0xAAA_AAB`),
-  *   fitting cleanly in the 24-bit accumulator with ppm-level baud accuracy.
-  *   Pushing higher (e.g. 1.5 Mbaud) at 16× would step right onto the DDS
-  *   overflow threshold (`1.5e6 × 16 = 24e6 = uartClk`, no margin), and 2 Mbaud
-  *   at 16× would overflow it outright — both are rejected by the
-  *   `baudRate * oversample < clkFreqHz` guard in [[UartConfig]]. 1 Mbaud
-  *   easily streams ring-buffer drain traffic without throttling the engine
-  *   (worst-case 8 KiB program load at 1 Mbaud × 10 bits/byte = ~80 ms). The 2
-  *   Mbaud move (spec §2 "Default at 48 MHz engineClk") is deferred to Phase
-  *   C.10; see ROADMAP §"UART baud default".
+  *   to 12 Mbaud. The Mole Verde production default is **2 Mbaud** — paired
+  *   with **8× RX oversample** (set at the [[UartConfig]] instantiation in
+  *   [[MoleTop]]) on the 24 MHz uartClk fabric. At 2 Mbaud × 8× the
+  *   `baudRate * oversample` product is `2_000_000 × 8 = 16_000_000`, which
+  *   fits the `< clkFreqHz = 24_000_000` guard in [[UartConfig]] with
+  *   comfortable headroom; the 24-bit DDS phase increment is
+  *   `round(2_000_000 * 8 * 2^24 / 24_000_000) = 11_184_811` (`0xAAA_AAB`),
+  *   fitting cleanly in the 24-bit accumulator with ppm-level baud accuracy. 8×
+  *   is below the textbook 16× floor commonly cited for asynchronous UART
+  *   receivers, but is comfortably above the 3× theoretical minimum and is the
+  *   standard choice once link-quality concerns are dominated by the short,
+  *   low-noise USB-to-FPGA hop on an iCEbreaker / FT2232H setup. The
+  *   ~20-bit-period resync gap [[MoleTop]] requires (~10 µs at 2 Mbaud)
+  *   continues to bound how a host can recover from a half-sent frame.
+  *
+  * Earlier history: the Verde production default was 1 Mbaud × 16× (the
+  * conservative pin that matches every textbook UART implementation, reused
+  * from sibling projects); 2 Mbaud × 8× was originally framed as "Rojo-only" in
+  * early v0.2 drafts. The 1 Mbaud fallback remains available by passing
+  * `--baud 1000000` to mole-loader and rebuilding the engine with
+  * `uartBaud = 1_000_000` + `oversample = 16` if a particular host adapter
+  * struggles with 2 Mbaud.
   *
   * @param stretchTimeoutCycles
   *   Stretch-wait timeout in fabric cycles, applied at the Q1->Q2 boundary of
@@ -134,7 +143,7 @@ case class MoleConfig(
     programWordCount: Int = 4096,
     resultRingByteCount: Int = 8192,
     captureMaxBits: Int = 65536,
-    uartBaud: Int = 1_000_000,
+    uartBaud: Int = 2_000_000,
     stretchTimeoutCycles: Int = 1 << 20,
     role: EngineRole = EngineRole.Controller
 ) {

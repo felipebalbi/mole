@@ -83,10 +83,10 @@ in place for portability to Rojo where the ratio may differ.)
 
 ### UART defaults
 
-| Baud rate | Oversampling | Use                          |
-|-----------|-------------|------------------------------|
-| 1 Mbaud   | 16×          | Default on Verde (24 MHz uartClk) |
-| 2 Mbaud   | 8×           | Available on Rojo (≥ 32 MHz uartClk) |
+| Baud rate | Oversampling | Use                                                      |
+|-----------|--------------|----------------------------------------------------------|
+| 2 Mbaud   | 8×           | Default on Verde (24 MHz uartClk)                        |
+| 1 Mbaud   | 16×          | Conservative fallback (still meets the DDS guard)        |
 
 ### Pipeline
 

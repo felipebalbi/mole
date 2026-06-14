@@ -81,13 +81,20 @@ case class UartLoopbackDut(cfg: UartConfig) extends Component {
   *   2. **24 MHz / 115 200 baud** — Mole Verde "early dev" config; same baud,
   *      production fabric. Catches BaudGenerator phase increment sizing
   *      regressions introduced by the higher clock.
-  *   3. **24 MHz / 1 Mbaud** — Mole Verde production default per
-  *      `MoleConfig.uartBaud`. 1 Mbaud × 16× oversample = 16 MHz tick rate,
-  *      which fits comfortably in the 24-bit DDS at 24 MHz fabric (`phaseInc ≈
-  *      11_184_811 = 0xAAA_AAB`, well below the 2^24 ceiling). iCEBreaker's
-  *      FT2232H supports up to 12 Mbaud, so 1 Mbaud has plenty of host-side
-  *      headroom; the engine is throttled by the fabric clock long before UART
-  *      becomes the bottleneck.
+  *   3. **24 MHz / 1 Mbaud** — Mole Verde "1 Mbaud × 16× fallback" config (the
+  *      original Verde production default; superseded by case 4 in late v0.2).
+  *      1 Mbaud × 16× oversample = 16 MHz tick rate, which fits comfortably in
+  *      the 24-bit DDS at 24 MHz fabric (`phaseInc ≈ 11_184_811 = 0xAAA_AAB`,
+  *      well below the 2^24 ceiling). iCEBreaker's FT2232H supports up to 12
+  *      Mbaud, so 1 Mbaud has plenty of host-side headroom; the engine is
+  *      throttled by the fabric clock long before UART becomes the bottleneck.
+  *   4. **24 MHz / 2 Mbaud × 8×** — Mole Verde production default per
+  *      `MoleConfig.uartBaud` (v0.2). Same `baudRate × oversample = 16 MHz`
+  *      tick rate as case 3 (so the DDS phase increment is identical,
+  *      11_184_811 = 0xAAA_AAB); the trade is per-bit sampling resolution (8
+  *      windows/bit instead of 16) in exchange for doubling host throughput.
+  *      The `2_000_000 * 8 < 24_000_000` UartConfig elaboration guard clears
+  *      with ~33 % headroom.
   *
   * Coverage at each config:
   *   - Single-byte round trip across a representative pattern set (`0x00`,
@@ -272,7 +279,18 @@ object UartSim {
     val configs = Seq(
       "12MHz_115200" -> UartConfig(clkFreqHz = 12000000, baudRate = 115200),
       "24MHz_115200" -> UartConfig(clkFreqHz = 24000000, baudRate = 115200),
-      "24MHz_1000000" -> UartConfig(clkFreqHz = 24000000, baudRate = 1000000)
+      "24MHz_1000000" -> UartConfig(clkFreqHz = 24000000, baudRate = 1000000),
+      // Verde v0.2 production default: 2 Mbaud × 8× oversample on
+      // 24 MHz fabric. Same baudRate*oversample tick rate (16 MHz)
+      // as the 24MHz_1000000 case at default oversample=16, so the
+      // BaudGenerator's DDS phase increment is identical; coverage
+      // adds the 8× window count and the production oversample
+      // value to the matrix.
+      "24MHz_2000000_8x" -> UartConfig(
+        clkFreqHz = 24000000,
+        baudRate = 2000000,
+        oversample = 8
+      )
     )
     configs.foreach { case (label, cfg) => runOne(label, cfg) }
     println("UartSim OK")

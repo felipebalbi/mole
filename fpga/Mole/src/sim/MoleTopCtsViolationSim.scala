@@ -41,7 +41,7 @@ object MoleTopCtsViolationSim extends App {
   // The timeout is in quarter-bit times. With
   // `quarterPeriodCyclesReset = 6` and timeout = 1023 (v0.2's 10-bit
   // max), the wait lasts roughly 1023 * 6 = 6138 fabric cycles ---
-  // well over a single UART byte (~240 cycles at 1 Mbaud / 24 MHz).
+  // well over a single UART byte (~120 cycles at 2 Mbaud / 24 MHz).
   // The WAIT_ON then times out (TIMEOUT_FLAG sticky), the HALT runs,
   // and the engine re-enters idle.
   val longProgram = Seq(

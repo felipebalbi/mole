@@ -96,7 +96,7 @@ cargo build --release -p mole-asm-cli -p mole-loader-cli
 
 The CLIs set `crtscts` on the serial port builder automatically.
 If you want to drive the link from a different host tool, the
-UART must be opened at **1 000 000 baud, 8N1, RTS/CTS hardware
+UART must be opened at **2 000 000 baud, 8N1, RTS/CTS hardware
 flow control** (active-low, FT2232H convention); see
 [`WIRE_FORMAT.md`](WIRE_FORMAT.md) §3 for the full requirement
 and the `stty` line for raw bring-up.
@@ -217,7 +217,7 @@ physically lights green on this board rev).
 
 | Symptom                                | Likely cause                                                                                                                                                                                                                                                                                                                                            |
 |----------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| Fault LED pulses, nothing drains         | Bad CRC, bad magic, wrong `body_len`, or a UART RX error mid-frame. The loader is in resync. Stop sending for **≥ 20 µs** (~20 UART bit times at 1 Mbaud) of idle-high on the line so the loader returns to `idleState`, then retry. See [`WIRE_FORMAT.md`](WIRE_FORMAT.md) §4 --- this is the host's contract.                                          |
+| Fault LED pulses, nothing drains         | Bad CRC, bad magic, wrong `body_len`, or a UART RX error mid-frame. The loader is in resync. Stop sending for **≥ 10 µs** (~20 UART bit times at 2 Mbaud) of idle-high on the line so the loader returns to `idleState`, then retry. See [`WIRE_FORMAT.md`](WIRE_FORMAT.md) §4 --- this is the host's contract.                                          |
 | Running LED solid, nothing drains        | The program is in an infinite loop. Press the user button to reset; verify the program eventually hits a `HALT`.                                                                                                                                                                                                                                          |
 | No LEDs change, no drain               | PLL never locked, or the bitstream did not flash. Power-cycle, re-flash via `make flash`, and check `dmesg` for FT2232H enumeration. The PLL-locked deassertion is what releases the fabric reset --- without it the engine sits in reset forever and `io_ledHeartbeat` never starts blinking.                                                            |
 | Drain comes back but the HALT word looks wrong | Decode the HALT word via `mole-loader` (`HaltStatus`). Bit `[29]` set = **overflow** (record stream exceeded the ring; later records dropped). Bit `[28]` set = **mismatch** (sampled bit failed an `expect` compare somewhere). Bits `[27:23]` = 5-bit status code; `0x1F` is the engine's STATUS_TRAP (malformed instruction, reserved opcode, out-of-range BRANCH, etc.). See [`../../docs/MOLE-0.2-SPEC.md`](../../docs/MOLE-0.2-SPEC.md) §11.   |

@@ -50,7 +50,7 @@ object BitCycleEngineEmitBitDataHoldSim extends App {
     programWordCount = 64,
     resultRingByteCount = 64,
     captureMaxBits = 65536,
-    uartBaud = 1_000_000
+    uartBaud = 2_000_000
   )
 
   private lazy val compiled =
