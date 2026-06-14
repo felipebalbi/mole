@@ -1,0 +1,216 @@
+# Bitstream release workflow for the Mole project.
+#
+# Triggered by pushing a tag of the form `bitstream-<sku>-vX.Y.Z[-pre]`,
+# where `<sku>` is the Mole SKU name (`verde`, eventually `rojo` /
+# `negro`). Currently this workflow only handles `verde` (iCE40 UP5K-
+# SG48). The SKU vocabulary is the canonical product naming from
+# `ROADMAP.md` "What Mole is" and is used elsewhere in the repo
+# (AGENTS.md §6 commit scopes, etc.).
+#
+# What this workflow does:
+#
+#   1. Builds the iCE40 UP5K-SG48 bitstream from the tagged commit
+#      via `make all` (Spinal -> Verilog -> yosys -> nextpnr -> icepack).
+#   2. Runs `make report` to capture a machine-readable timing +
+#      utilisation report (`gen/MoleTop.report.json`).
+#   3. Stages the bitstream, netlists, RTL, pin-constraint file, and
+#      report into a release/ directory.
+#   4. Creates a **draft** GitHub Release with all artefacts attached.
+#      Pre-release tags (`vX.Y.Z-*`) are marked as GitHub pre-releases.
+#
+# What this workflow does NOT do:
+#
+#   - publish the release. The release is created as a draft so a
+#     human can review the auto-generated notes (`--generate-notes`)
+#     and the staged artefact list before clicking Publish.
+#   - re-run sims. The sibling `fpga-sim.yml` workflow already gates
+#     master pushes on the full sim suite; this workflow trusts that
+#     merge-time gate. Don't tag a commit whose sim job is failing.
+#   - flash hardware (obviously).
+#   - run on PRs or non-tag pushes.
+#
+# Toolchain pinning matches the sibling `fpga-sim.yml` synth job:
+# JDK 17 (Temurin), apt-pinned yosys / nextpnr-ice40 / fpga-icestorm
+# from Ubuntu 24.04. Keeping the two workflows on identical toolchain
+# versions means "passes CI" and "ships a bitstream" produce the same
+# binary; a drift between them would invite the "passes sim, fails
+# release" surprise.
+#
+# Sibling fpga-sim.yml already gates CRLF for *.yml files in
+# .github/, so this workflow doesn't duplicate that check.
+
+name: release-bitstream
+
+on:
+  push:
+    tags:
+      # Stable: `bitstream-verde-v0.1.1`
+      - 'bitstream-verde-v[0-9]+.[0-9]+.[0-9]+'
+      # Pre-release: `bitstream-verde-v0.2.0-rc1`, `-alpha.1`, `-beta`
+      - 'bitstream-verde-v[0-9]+.[0-9]+.[0-9]+-*'
+
+permissions:
+  # `gh release create` needs write access to repository contents to
+  # publish the release object and upload assets. No other scopes
+  # required --- we explicitly decline `id-token: write` and
+  # `attestations: write` (SLSA attestation can be added later if
+  # supply-chain provenance becomes worth the extra ~30 s).
+  contents: write
+
+# Releases are not cheap to re-do (full synth + P&R + GitHub upload),
+# and a partial cancellation can leave a half-published draft. So
+# unlike `fpga-sim.yml` (which sets `cancel-in-progress: true` for PR
+# iteration speed), we let in-flight release runs complete even if a
+# follow-up tag arrives. If you really need to cancel, do it via the
+# GitHub UI and delete the partial draft manually.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Build + draft GitHub Release for Mole Verde bitstream
+    runs-on: ubuntu-latest
+
+    steps:
+      # `fetch-depth: 0` so the auto-generated release notes
+      # (`gh release create --generate-notes`) can walk back to the
+      # previous bitstream-verde tag.
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          # Same sbt cache key as the sibling fpga-sim.yml jobs
+          # (~/.sbt, ~/.ivy2/cache, ~/.cache/coursier keyed on
+          # **/*.sbt + **/project/build.properties). Warm runs drop
+          # sbt bootstrap from ~3 min to ~30 s.
+          cache: sbt
+
+      - name: Install sbt
+        uses: sbt/setup-sbt@v1
+
+      # apt-pinned synth toolchain (same versions as the fpga-sim.yml
+      # synth job): yosys 0.36, nextpnr-ice40 0.6, fpga-icestorm 2024.
+      # See fpga-sim.yml comment for the rationale on apt vs
+      # oss-cad-suite. Keep both jobs on apt-pinned versions so a
+      # commit that passes the sim+synth CI gate produces the same
+      # bitstream here.
+      - name: Install yosys + nextpnr-ice40 + icestorm
+        run: |
+          set -eu
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            yosys nextpnr-ice40 fpga-icestorm
+
+      - name: Verify toolchain
+        working-directory: fpga/Mole
+        run: |
+          set -eu
+          java -version
+          sbt --version
+          yosys -V
+          nextpnr-ice40 --version
+          icepack -h 2>&1 | head -1 || true
+
+      # `make all` chains: SpinalHDL elaboration ->
+      # yosys synth_ice40 -> nextpnr-ice40 (with --freq 24 --seed 4) ->
+      # icepack. nextpnr exits non-zero when the routed design fails
+      # its clock constraint, so a timing-closure regression below
+      # 24 MHz fails this job loudly --- which is the entire point of
+      # only releasing bitstreams that meet timing.
+      - name: Build bitstream (make all)
+        working-directory: fpga/Mole
+        run: make all
+
+      # `make report` re-runs nextpnr with --report + --detailed-
+      # timing-report to capture a machine-readable timing +
+      # utilisation summary (gen/MoleTop.report.json). The route is
+      # deterministic for a fixed seed so the report describes the
+      # exact bitstream shipped by `make all`. Costs ~2 min of extra
+      # synth time; cheap insurance for "what was the slack on this
+      # released build?"
+      - name: Build timing report (make report)
+        working-directory: fpga/Mole
+        run: make report
+
+      # Stage all release assets under release/. Keeping every file
+      # at the top of release/ (no nested directories) means
+      # `gh release create release/*` uploads them with clean names.
+      - name: Stage release artefacts
+        run: |
+          set -eu
+          mkdir -p release
+          cp fpga/Mole/gen/MoleTop.bin          release/
+          cp fpga/Mole/gen/MoleTop.json         release/
+          cp fpga/Mole/gen/MoleTop.asc          release/
+          cp fpga/Mole/gen/MoleTop.v            release/
+          cp fpga/Mole/gen/MoleTop.report.json  release/
+          cp fpga/Mole/icebreaker.pcf           release/
+          ls -la release/
+
+      # Fail fast if the bin is missing or empty --- catches the
+      # "make all succeeded but icepack produced nothing" pathology
+      # before we publish a draft release with a broken bitstream.
+      - name: Sanity-check release bundle
+        run: |
+          set -eu
+          if [ ! -s release/MoleTop.bin ]; then
+            echo "::error::release/MoleTop.bin missing or empty"
+            exit 1
+          fi
+          # 6 staged artefacts (bitstream + netlists + RTL + report + PCF)
+          expected_count=6
+          actual_count=$(find release -maxdepth 1 -type f | wc -l)
+          if [ "$actual_count" -ne "$expected_count" ]; then
+            echo "::error::release/ has $actual_count files; expected $expected_count"
+            ls -la release/
+            exit 1
+          fi
+          echo "release/ contents OK: $actual_count files, MoleTop.bin = $(stat -c%s release/MoleTop.bin) bytes"
+
+      # Pre-release marker: SemVer 2.0 §9 says any version with a
+      # '-' suffix is a pre-release. Strip the `bitstream-<sku>-v`
+      # prefix first so the hyphens inside the prefix itself (e.g.
+      # `bitstream-verde-v0.1.1`) don't trigger a false positive ---
+      # only a hyphen in the X.Y.Z[-suffix] tail counts. Result maps
+      # straight to gh's --prerelease flag so e.g.
+      # `bitstream-verde-v0.2.0-rc1` becomes a GitHub pre-release while
+      # `bitstream-verde-v0.1.1` becomes a stable release.
+      - name: Determine pre-release flag
+        id: prerelease
+        run: |
+          set -eu
+          # Strip the longest matching `bitstream-*-v` prefix so this
+          # generalises to future SKUs without editing the test.
+          version="${GITHUB_REF_NAME#bitstream-*-v}"
+          if [[ "$version" == *-* ]]; then
+            echo "flag=--prerelease" >> "$GITHUB_OUTPUT"
+            echo "Tag ${GITHUB_REF_NAME} (version=${version}) is a pre-release."
+          else
+            echo "flag=" >> "$GITHUB_OUTPUT"
+            echo "Tag ${GITHUB_REF_NAME} (version=${version}) is a stable release."
+          fi
+
+      # Create the draft release. `--generate-notes` walks the commit
+      # log back to the previous tag of the same kind (gh picks the
+      # most-recent matching tag automatically) and produces a
+      # "What's Changed" + "New Contributors" block. The draft is
+      # not visible until a human reviews and clicks Publish in the
+      # GitHub UI.
+      - name: Create draft GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -eu
+          gh release create "${GITHUB_REF_NAME}" \
+            --draft \
+            --generate-notes \
+            --title "${GITHUB_REF_NAME}" \
+            ${{ steps.prerelease.outputs.flag }} \
+            release/*
