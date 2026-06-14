@@ -64,14 +64,20 @@ $(JSON): $(V)
 # compliance edge rather than chase a moving Fmax target.
 # uartClk is 24 MHz too (1:1 ratio, both off PLLOUTGLOBAL).
 #
-# `--seed 3` is the v0 silicon-validated pin from the original
-# 24 MHz bring-up (Step 16). On v0 at 24 MHz only ~37 % of seeds
-# passed timing; seed 3 was the lowest-numbered passing seed with
-# the best observed Fmax. The v0.2 netlist is structurally
-# different (5-stage pipeline, 32-bit instructions, larger SPRAM
-# wiring) so a fresh seed sweep at 24 MHz is appropriate. Until
-# that sweep selects a new pin, `--seed 3` is kept as the
-# auditable default that matches v0 bring-up history.
+# `--seed 4` is the v0.2 silicon-validated pin, chosen because it
+# gives good Fmax margin above the 24 MHz engineClk target on the
+# current v0.2 netlist (5-stage pipeline, 32-bit instructions,
+# sentinel-fill FSM, larger SPRAM wiring than v0). Earlier history
+# (v0 bring-up Step 16) pinned `--seed 3` because v0's much smaller
+# netlist had only ~37 % of seeds passing timing at 24 MHz and
+# seed 3 was the lowest-numbered passing seed; that pin survived
+# into early v0.2 but became marginal as the netlist grew --- seed
+# 3 was observed achieving 23.93 MHz (FAIL by 70 kHz) on a
+# post-sentinel-fill bitstream. A small seed sweep (1..10) at
+# 24 MHz against the current netlist picked seed 4 as the new
+# pin with comfortable margin. Re-sweep if the netlist shifts
+# materially again and the achieved Fmax drops near the 24 MHz
+# floor.
 $(ASC): $(JSON) $(PCF)
 	$(NEXTPNR)              \
 		--up5k          \
@@ -80,7 +86,7 @@ $(ASC): $(JSON) $(PCF)
 		--json $<       \
 		--asc $@        \
 		--freq 24       \
-		--seed 3
+		--seed 4
 
 # 4. Pack (ASC -> BIN)
 $(BIN): $(ASC)
@@ -106,7 +112,7 @@ gui: $(JSON) $(PCF) ## Open nextpnr GUI on the v0.2 design (Linux/oss-cad-suite)
 		--json $<                 \
 		--asc /tmp/$(TOP).gui.asc \
 		--freq 24                 \
-		--seed 3                  \
+		--seed 4                  \
 		--gui
 
 # Machine-readable timing + utilisation report. Useful for tracking
@@ -120,7 +126,7 @@ $(REPORT): $(JSON) $(PCF)
 		--json $<                   \
 		--asc gen/$(TOP).report.asc \
 		--freq 24                   \
-		--seed 3                    \
+		--seed 4                    \
 		--report $@                 \
 		--detailed-timing-report
 

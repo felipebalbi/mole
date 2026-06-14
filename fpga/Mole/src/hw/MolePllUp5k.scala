@@ -37,8 +37,12 @@ import spinal.core._
   * v0.2 5-stage pipeline plateaued at ~32 MHz best across 10 seeds (paths
   * shifted but ceiling didn't move structurally). To keep comfortable margin
   * off the compliance edge rather than chase a moving target, Verde returns to
-  * the v0 silicon-validated 24 MHz fabric. Full-rate I3C SDR / HDR-DDR are Mole
-  * Rojo (ECP5) territory.
+  * the v0 silicon-validated 24 MHz fabric. The v0.2 netlist (5-stage pipeline,
+  * 32-bit instructions, sentinel-fill FSM) is structurally different from v0;
+  * the active pin is now `--seed 4`, picked because it gives comfortable Fmax
+  * margin above 24 MHz on the current netlist after the v0-era seed 3 became
+  * marginal post-sentinel-fill. Full-rate I3C SDR / HDR-DDR are Mole Rojo
+  * (ECP5) territory.
   *
   * Outputs:
   *   - `clkOutEngine` (24 MHz) is taken from PLLOUTGLOBAL so the fabric sees

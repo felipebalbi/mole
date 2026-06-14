@@ -1480,9 +1480,9 @@ the `gui` target's doc comment in `fpga/Mole/Makefile`).
 **Procedure:**
 1. From `fpga/Mole/`: `make clean && make all` to produce
    `gen/MoleTop.bin`. Expected: nextpnr meets timing at 24 MHz
-   on seed 3 (Verde target; not 48 MHz — see Verde retarget
-   above and `MoleConfig.fabricFreqHz`). If it misses, try
-   another seed via `make all SEED=<N>`; do **not** raise the
+   on seed 4 (Verde target; not 48 MHz — see Verde retarget
+   above and `MoleConfig.fabricFreqHz`). If it misses, edit the
+   `--seed` value in `fpga/Mole/Makefile`; do **not** raise the
    target.
 2. `make flash` (this is `iceprog gen/MoleTop.bin`). Expected:
    "VERIFY OK" from iceprog; the **heartbeat LED**

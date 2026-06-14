@@ -36,16 +36,18 @@ The chain elaborates `MoleTopVerilog` (12 MHz pad clock, PLL
 multiplied to a **24 MHz** fabric clock, dual SPRAM-backed
 program and result memory at 32-bit grain), synthesises with
 `yosys -p synth_ice40`, places-and-routes with `nextpnr-ice40
---up5k --package sg48 --freq 24 --seed 3`, and packs the
+--up5k --package sg48 --freq 24 --seed 4`, and packs the
 bitstream with `icepack`. The `--freq 24` constraint is the
 **real** fabric clock; nextpnr will fail the build if timing
-doesn't close at 24 MHz on seed 3.
+doesn't close at 24 MHz on seed 4.
 
-If a future change to the design makes seed 3 stop meeting
-timing, try another seed via `make all SEED=<N>`; do **not**
-raise the target frequency. The Verde target is 24 MHz; see
-the C.X "Verde retarget" entry in [`TODO.md`](TODO.md) for the
-X.1–X.5 plateau history that pinned that call.
+If a future change to the design makes seed 4 stop meeting
+timing, edit `fpga/Mole/Makefile` to pick another seed; do
+**not** raise the target frequency. The Verde target is 24
+MHz; see the C.X "Verde retarget" entry in
+[`TODO.md`](TODO.md) for the X.1–X.5 plateau history that
+pinned that call. The current seed pin's rationale is in the
+Makefile comment above the `$(ASC)` rule.
 
 Re-derive only the generated Verilog (e.g. to inspect a change)
 via `make gen` --- it lands at `gen/MoleTop.v` and is gitignored.
