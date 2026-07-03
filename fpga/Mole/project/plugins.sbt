@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Felipe Balbi
+// SPDX-License-Identifier: CERN-OHL-W-2.0
+
 // sbt-scalafmt plugin --- enables `sbt scalafmtCheckAll` and `sbt
 // scalafmtAll` against the project-level `.scalafmt.conf`. Used by
 // the fpga-sim CI workflow to fail on style drift; locally,

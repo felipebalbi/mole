@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: 2026 Felipe Balbi
+SPDX-License-Identifier: CERN-OHL-W-2.0
+-->
+
 # Mole host link wire format (v0.2)
 
 This document covers the **iCEbreaker-side** UART link contract:

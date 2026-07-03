@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Felipe Balbi
+// SPDX-License-Identifier: CERN-OHL-W-2.0
+
 package mole
 
 // Imported from felipebalbi/icebreaker-spinalhdl-examples@98c06a8cf39f6c212d3b46d98868aca398a82186 Uart/src/sim/UartRxSim.scala.

@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: 2026 Felipe Balbi
+SPDX-License-Identifier: CERN-OHL-W-2.0
+-->
+
 # Stashed v0 sources (Phase C in flight)
 
 These files reference v0 symbols (`Opcode.emitBit`, `Opcode.loadLoop`,

@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: 2026 Felipe Balbi
+SPDX-License-Identifier: CERN-OHL-W-2.0
+-->
+
 # Mole --- FPGA bit-cycle engine (v0.2, iCEbreaker)
 
 This is the SpinalHDL project for **Mole**: the protocol-agnostic

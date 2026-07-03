@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Felipe Balbi
+// SPDX-License-Identifier: CERN-OHL-W-2.0
+
 package mole
 
 /** Open-drain / push-pull bus resolution audit for [[MoleBus]].

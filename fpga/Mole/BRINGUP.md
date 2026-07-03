@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: 2026 Felipe Balbi
+SPDX-License-Identifier: CERN-OHL-W-2.0
+-->
+
 # Mole bring-up procedure (v0.2, iCEbreaker)
 
 This doc walks through the first end-to-end smoke of a freshly

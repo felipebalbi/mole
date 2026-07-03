@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Felipe Balbi
+// SPDX-License-Identifier: CERN-OHL-W-2.0
+
 package mole
 
 /** Round-trip audit and golden-encoding verification for the v0.2

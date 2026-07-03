@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: 2026 Felipe Balbi
+SPDX-License-Identifier: CERN-OHL-W-2.0
+-->
+
 # Mole/fpga/Mole --- TODO
 
 Bottom-up bring-up plan for the Mole bit-cycle engine in

@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: 2026 Felipe Balbi
+// SPDX-License-Identifier: CERN-OHL-W-2.0
+
 ThisBuild / version := "0.1"
 ThisBuild / scalaVersion := "2.13.14"
 ThisBuild / organization := "io.mole"

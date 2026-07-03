@@ -1,3 +1,8 @@
+<!--
+SPDX-FileCopyrightText: 2026 Felipe Balbi
+SPDX-License-Identifier: CERN-OHL-W-2.0
+-->
+
 # Mole/fpga/Mole --- AGENTS.md
 
 Project-specific conventions for the Mole v0.2 SpinalHDL bit-cycle

@@ -1,3 +1,6 @@
+# SPDX-FileCopyrightText: 2026 Felipe Balbi
+# SPDX-License-Identifier: CERN-OHL-W-2.0
+
 # iCEbreaker (iCE40 UP5K-SG48) pin assignment for the Mole v0
 # bit-cycle engine top (`MoleTop`).
 #
